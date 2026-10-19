@@ -1,0 +1,490 @@
+/* ===========================================================
+ *  开源太空安全 · 浅色（日）主题
+ *  在 html[data-theme="light"] 下生效，全面覆盖为浅色系
+ *  与 main.ts 中 useTheme 的切换逻辑配合
+ * =========================================================== */
+
+html[data-theme="light"] {
+  /* —— 浅色基底 —— */
+  --bg-0: #e8edf4;
+  --bg-1: #f6f8fc;
+  --bg-2: #ffffff;
+  --bg-3: #e2e8f1;
+
+  /* —— 金属面板（浅色）—— */
+  --panel: linear-gradient(180deg, #ffffff 0%, #f7f9fc 50%, #edf1f7 100%);
+  --panel-edge: #d5dde8;          /* 顶高光（浅边框） */
+  --panel-edge-dark: #bfc9d8;     /* 底阴影 */
+  --panel-inner: rgba(15, 23, 42, 0.02);
+
+  /* —— 文字 —— */
+  --text-1: #1c2533;
+  --text-2: #46536a;
+  --text-3: #6c7789;
+  --text-4: #9aa5b6;
+
+  /* —— 钢蓝 —— */
+  --steel: #2f7fd9;
+  --steel-dim: #3d86d6;
+  --steel-glow: rgba(47, 127, 217, 0.3);
+
+  /* —— 状态色 —— */
+  --ok: #16a34a;
+  --warn: #d97706;
+  --err: #dc2626;
+
+  /* —— 页面底色 / 光晕 —— */
+  #app::before {
+    background:
+      radial-gradient(1400px 700px at 50% -200px, rgba(47, 127, 217, 0.08), transparent 60%),
+      radial-gradient(800px 400px at 100% 100%, rgba(47, 127, 217, 0.05), transparent 60%),
+      var(--bg-0);
+  }
+
+  /* —— 阴影整体调浅（全局辅助类） —— */
+  .panel {
+    box-shadow:
+      inset 0 1px 0 var(--panel-edge),
+      inset 0 -1px 0 var(--panel-edge-dark),
+      0 4px 12px rgba(15, 23, 42, 0.08);
+  }
+  .metal-card {
+    box-shadow:
+      inset 0 1px 0 var(--panel-edge),
+      inset 0 -1px 0 var(--panel-edge-dark),
+      0 1px 0 rgba(255, 255, 255, 0.6),
+      0 8px 24px rgba(15, 23, 42, 0.12);
+    &::before {
+      background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.6), transparent);
+    }
+  }
+  .metal-sunken {
+    background: linear-gradient(180deg, #e3e8f1 0%, #eaeef5 50%, #e3e8f1 100%);
+    box-shadow:
+      inset 0 2px 4px rgba(15, 23, 42, 0.12),
+      inset 0 -1px 0 rgba(255, 255, 255, 0.6);
+  }
+
+  /* —— 布局：侧栏 / 顶栏 / logo —— */
+  .app-aside {
+    background: linear-gradient(180deg, #f7f9fc 0%, #edf1f7 100%);
+    box-shadow: inset -1px 0 0 rgba(15, 23, 42, 0.06);
+  }
+  .app-header {
+    background: linear-gradient(180deg, #f7f9fc 0%, #edf1f7 100%);
+    box-shadow: 0 1px 0 rgba(15, 23, 42, 0.08), inset 0 -1px 0 rgba(255, 255, 255, 0.6);
+  }
+  .logo {
+    box-shadow: 0 1px 0 rgba(15, 23, 42, 0.08);
+  }
+  .user-info {
+    background: rgba(15, 23, 42, 0.03);
+  }
+  .theme-toggle:hover {
+    background: rgba(15, 23, 42, 0.06);
+  }
+  .login-theme-toggle:hover {
+    background: rgba(15, 23, 42, 0.06);
+  }
+  .m-theme-btn:active {
+    background: rgba(15, 23, 42, 0.06);
+  }
+  .app-menu .el-menu-item.is-active {
+    /* 覆盖 Layout.vue 中硬编码的 #fff，浅色下用深色文字 */
+    color: var(--text-1) !important;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.5), 0 1px 2px rgba(15, 23, 42, 0.1);
+  }
+
+  /* ===========================================================
+   *  Element Plus 浅色化（覆盖 tech.scss 的深色 !important）
+   * =========================================================== */
+
+  /* 卡片 */
+  .el-card {
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.5),
+      0 4px 16px rgba(15, 23, 42, 0.1) !important;
+    > .el-card__header {
+      background: linear-gradient(180deg, rgba(15, 23, 42, 0.02), transparent) !important;
+    }
+  }
+
+  /* 表格 */
+  .el-table {
+    --el-table-row-hover-bg-color: rgba(47, 127, 217, 0.08);
+    --el-table-border-color: rgba(15, 23, 42, 0.08);
+    --el-table-border: 1px solid rgba(15, 23, 42, 0.08);
+    --el-table-header-bg-color: #eef2f8;
+    --el-table-current-row-bg-color: rgba(47, 127, 217, 0.05);
+    .el-table__row:hover > td,
+    .el-table__body tr:hover > td,
+    .el-table--enable-row-hover .el-table__row:hover > td {
+      background: rgba(47, 127, 217, 0.08) !important;
+      background-color: rgba(47, 127, 217, 0.08) !important;
+    }
+    th.el-table__cell {
+      background: #eef2f8 !important;
+      background-color: #eef2f8 !important;
+      border-bottom: 1px solid var(--panel-edge) !important;
+    }
+    td.el-table__cell {
+      border-bottom: 1px solid rgba(15, 23, 42, 0.06) !important;
+    }
+    /* fixed 列 hover 必须用不透明浅色 */
+    .el-table__body tr.el-table__row:hover td.el-table-fixed-column--right,
+    .el-table__body tr.el-table__row:hover td.el-table-fixed-column--left,
+    .el-table__fixed-right .el-table__row:hover > td,
+    .el-table__fixed-left .el-table__row:hover > td {
+      background: #e9eef6 !important;
+      background-color: #e9eef6 !important;
+    }
+  }
+  .el-table--striped .el-table__body tr.el-table__row--striped td {
+    background: #f2f5f9 !important;
+  }
+  .el-table--border::after,
+  .el-table--border::before,
+  .el-table__inner-wrapper::before {
+    background-color: rgba(15, 23, 42, 0.08) !important;
+  }
+  .el-table__loading-mask { background-color: rgba(255, 255, 255, 0.7) !important; }
+
+  /* 按钮 */
+  .el-button {
+    background: linear-gradient(180deg, #f6f8fb 0%, #e7ecf3 100%) !important;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.6), 0 1px 2px rgba(15, 23, 42, 0.08) !important;
+    &:hover {
+      background: linear-gradient(180deg, #ffffff 0%, #edf1f7 100%) !important;
+      /* 防止 type 按钮 hover 时浅底+白字 */
+      color: var(--text-1) !important;
+    }
+    &:active,
+    &.is-active {
+      background: var(--bg-2) !important;
+      /* 覆盖 type 按钮白字，避免按下时白底白字 */
+      color: var(--text-1) !important;
+      box-shadow: inset 0 2px 4px rgba(15, 23, 42, 0.1) !important;
+    }
+  }
+  /* type 按钮普通态：保持彩色背景 + 白字（覆盖上面 .el-button 的浅色背景） */
+  .el-button--primary {
+    background: linear-gradient(180deg, #5aa9ff 0%, #2d6cb8 100%) !important;
+    color: #fff !important;
+  }
+  .el-button--danger {
+    background: linear-gradient(180deg, #c8485c 0%, #9c2e3f 100%) !important;
+    color: #fff !important;
+  }
+  .el-button--success {
+    background: linear-gradient(180deg, #3aa856 0%, #2a8a44 100%) !important;
+    color: #fff !important;
+  }
+  .el-button--warning {
+    background: linear-gradient(180deg, #f59e0b 0%, #d97706 100%) !important;
+    color: #fff !important;
+  }
+  /* type 按钮 hover 保持彩色背景 + 白字（放在 .el-button:hover 之后，同特异性后写生效） */
+  .el-button--primary:hover {
+    background: linear-gradient(180deg, #6fb5ff 0%, #3578c8 100%) !important;
+    color: #fff !important;
+  }
+  .el-button--danger:hover {
+    background: linear-gradient(180deg, #d9637a 0%, #a9384b 100%) !important;
+    color: #fff !important;
+  }
+  .el-button--success:hover {
+    background: linear-gradient(180deg, #3aa856 0%, #2a8a44 100%) !important;
+    color: #fff !important;
+  }
+  .el-button--warning:hover {
+    background: linear-gradient(180deg, #f59e0b 0%, #d97706 100%) !important;
+    color: #fff !important;
+  }
+  /* 浅色下 link 按钮 hover 使用深色钢蓝，避免浅蓝在浅底上对比度不足 */
+  .el-button--text:hover,
+  .el-button.is-link:hover {
+    color: var(--steel-dim) !important;
+  }
+
+  /* 输入 */
+  .el-input__wrapper,
+  .el-textarea__inner,
+  .el-select__wrapper {
+    background: var(--bg-2) !important;
+    box-shadow: inset 0 1px 2px rgba(15, 23, 42, 0.06), 0 0 0 1px var(--panel-edge) !important;
+  }
+  .el-input__wrapper.is-focus,
+  .el-select__wrapper.is-focused,
+  .el-textarea__inner:focus {
+    box-shadow: inset 0 1px 2px rgba(15, 23, 42, 0.06), 0 0 0 1px var(--steel-dim) !important;
+  }
+
+  /* 弹窗 / 抽屉 / 确认框 */
+  .el-dialog,
+  .el-drawer,
+  .el-message-box {
+    background: linear-gradient(180deg, #ffffff 0%, #f4f6fa 100%) !important;
+    border: 1px solid var(--panel-edge) !important;
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.6),
+      0 12px 36px rgba(15, 23, 42, 0.18) !important;
+  }
+  .el-dialog__header,
+  .el-drawer__header {
+    border-bottom: 1px solid var(--panel-edge) !important;
+  }
+  .el-dialog__footer {
+    border-top: 1px solid var(--panel-edge) !important;
+  }
+  .el-overlay { background-color: rgba(30, 41, 59, 0.32) !important; }
+  .el-dialog__body,
+  .el-drawer__body { background: var(--bg-1) !important; }
+  .el-dialog__body .el-card,
+  .el-drawer__body .el-card { background: var(--bg-2) !important; }
+  .el-dialog__body .el-card__header,
+  .el-drawer__body .el-card__header { background: linear-gradient(180deg, rgba(15, 23, 42, 0.02), transparent) !important; }
+
+  /* 浮层阴影 / tooltip / popover / 下拉 */
+  .el-menu--popup,
+  .el-select__popper,
+  .el-dropdown-menu,
+  .el-time-panel,
+  .el-time-select-panel,
+  .el-date-picker__time-header,
+  .el-popper.is-light,
+  .el-popper,
+  .el-popover.el-popper,
+  .el-popover {
+    box-shadow: 0 8px 24px rgba(15, 23, 42, 0.15) !important;
+  }
+  .el-tooltip__popper.is-dark {
+    background: #ffffff !important;
+    color: var(--text-1) !important;
+    border: 1px solid var(--panel-edge) !important;
+  }
+
+  /* 分页 */
+  .el-pagination .btn-prev,
+  .el-pagination .btn-next,
+  .el-pagination .el-pager li {
+    background: var(--bg-2) !important;
+    color: var(--text-2) !important;
+    border: 1px solid var(--panel-edge) !important;
+  }
+  /* 当前页：浅色下必须显式还原蓝底白字，否则会被上面的白底覆盖成白底白字 */
+  .el-pagination .el-pager li.is-active {
+    background: linear-gradient(180deg, #5aa9ff, #2d6cb8) !important;
+    color: #fff !important;
+    border-color: var(--steel) !important;
+  }
+  .el-pagination .btn-prev:disabled,
+  .el-pagination .btn-next:disabled,
+  .el-pagination .el-pager li.is-disabled,
+  .el-pagination .el-pager li:disabled {
+    color: var(--text-4) !important;
+  }
+
+  /* 上传 */
+  .el-upload,
+  .el-upload-dragger,
+  .el-upload-list__item {
+    background: var(--bg-2) !important;
+  }
+
+  /* 加载遮罩 */
+  .el-loading-mask { background-color: rgba(255, 255, 255, 0.7) !important; }
+
+  /* 图片查看器 / 轮播 */
+  .el-image-viewer__canvas,
+  .el-image-viewer__mask,
+  .el-image-viewer__wrapper { background: rgba(30, 41, 59, 0.6) !important; }
+  .el-carousel__button,
+  .el-carousel__arrow { background: rgba(30, 41, 59, 0.5) !important; }
+
+  /* 水印 */
+  .el-watermark { color: rgba(15, 23, 42, 0.05) !important; }
+
+  /* Checkbox / Radio 内底 */
+  .el-checkbox__inner,
+  .el-radio__inner {
+    background: var(--bg-2) !important;
+  }
+  .el-checkbox__inner:hover { border-color: var(--steel) !important; }
+
+  /* ===========================================================
+   *  移动端浅色化（覆盖 mobile.scss 硬编码）
+   * =========================================================== */
+  .mobile-header {
+    background: linear-gradient(180deg, #f7f9fc 0%, #edf1f7 100%);
+    box-shadow: 0 1px 0 rgba(15, 23, 42, 0.08);
+    .m-back-btn:active { background: rgba(15, 23, 42, 0.06); }
+    .m-avatar-btn { background: rgba(15, 23, 42, 0.03); }
+  }
+  .mobile-tabbar {
+    background: linear-gradient(180deg, #f7f9fc 0%, #e8edf4 100%);
+    box-shadow: 0 -1px 0 rgba(15, 23, 42, 0.08), inset 0 1px 0 rgba(255, 255, 255, 0.6);
+    .m-tab-item:active { background: rgba(15, 23, 42, 0.04); }
+  }
+  .m-drawer-mask { background: rgba(30, 41, 59, 0.4); }
+  .m-drawer {
+    background: linear-gradient(180deg, #f7f9fc 0%, #edf1f7 100%);
+    box-shadow: 4px 0 20px rgba(15, 23, 42, 0.12);
+    .m-menu-item {
+      &:active { background: rgba(15, 23, 42, 0.05); }
+      &.active {
+        background: linear-gradient(90deg, rgba(47, 127, 217, 0.12), transparent);
+      }
+    }
+  }
+  .m-data-card {
+    box-shadow: 0 2px 8px rgba(15, 23, 42, 0.08);
+    .m-card-actions {
+      border-top: 1px solid rgba(15, 23, 42, 0.08);
+    }
+  }
+
+  /* ===========================================================
+   *  页签栏（TabsBar）浅色化 —— 原为硬编码深色背景
+   * =========================================================== */
+  .tabs-bar {
+    background: linear-gradient(180deg, #f6f8fb 0%, #e8edf4 100%);
+    box-shadow: inset 0 -1px 0 rgba(15, 23, 42, 0.08), 0 1px 0 rgba(255, 255, 255, 0.6);
+    .scroll-btn:hover:not(:disabled) { background: rgba(15, 23, 42, 0.06); }
+    .tab {
+      background: linear-gradient(180deg, #ffffff 0%, #eef2f8 100%);
+      border-color: var(--panel-edge);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.6);
+      &:hover { border-color: var(--steel-dim); }
+      &.active {
+        background: linear-gradient(180deg, #e7edf7 0%, #dce4f1 100%);
+        border-color: var(--steel);
+        box-shadow: inset 0 2px 0 var(--steel), 0 1px 2px rgba(15, 23, 42, 0.08);
+      }
+      .close:hover { background: rgba(15, 23, 42, 0.08); }
+    }
+    .ctx-menu { box-shadow: 0 8px 24px rgba(15, 23, 42, 0.15); }
+  }
+
+  /* ===========================================================
+   *  登录页浅色化 —— 原为硬编码深色
+   * =========================================================== */
+  .login-page {
+    background: radial-gradient(ellipse at center, #eef3f9 0%, #dde5ef 70%);
+  }
+  .login-box {
+    background: linear-gradient(180deg, #ffffff 0%, #f4f6fa 100%);
+    border-color: var(--panel-edge);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.7),
+      inset 0 -1px 0 var(--panel-edge-dark),
+      0 20px 50px rgba(15, 23, 42, 0.16);
+  }
+
+  /* ===========================================================
+   *  角色授权分配页（sys_role/add）浅色化 —— 原硬编码白字+深色底
+   * =========================================================== */
+  .title {
+    color: #5f6b7f;
+    strong { color: var(--text-1); }
+  }
+  .perm-group {
+    border-color: var(--panel-edge);
+    background: rgba(15, 23, 42, 0.02);
+  }
+  .group-name { color: var(--text-1); }
+  .group-count { color: var(--text-3); }
+  .perm-item {
+    border-color: rgba(15, 23, 42, 0.08);
+    background: rgba(15, 23, 42, 0.02);
+  }
+  .item-name { color: var(--text-1); }
+  .item-code { color: var(--text-3); }
+  .item-actions .el-checkbox__label { color: var(--text-2); }
+
+  /* ===========================================================
+   *  仪表盘 / 存储页等深色小块浅色化
+   * =========================================================== */
+  .stat-card {
+    box-shadow:
+      inset 0 1px 0 var(--panel-edge),
+      inset 0 -1px 0 var(--panel-edge-dark),
+      0 4px 12px rgba(15, 23, 42, 0.08);
+  }
+  .stat-tag { background: rgba(15, 23, 42, 0.05); }
+  .tick { background: rgba(15, 23, 42, 0.08); }
+  .tips li { border-bottom: 1px dashed rgba(15, 23, 42, 0.1); }
+  .tips code {
+    background: rgba(15, 23, 42, 0.06);
+    color: var(--text-1);
+  }
+  .drop-mask {
+    background: rgba(246, 248, 252, 0.85);
+    backdrop-filter: blur(2px);
+  }
+  .drop-box {
+    background: rgba(47, 127, 217, 0.06);
+    color: var(--text-1);
+  }
+
+  /* ===========================================================
+   *  存储页（storage/index）深色背景浅色化
+   *  覆盖原 rgba(0,0,0,0.25/0.2/0.35) 的背景，border 统一用面板边框变量
+   * =========================================================== */
+  .crumbs {
+    background: rgba(15, 23, 42, 0.04);
+    border-color: var(--panel-edge);
+  }
+  .up-list {
+    background: rgba(15, 23, 42, 0.04);
+    border-color: var(--panel-edge);
+  }
+  .sort-bar {
+    background: rgba(15, 23, 42, 0.04);
+    border-color: var(--panel-edge);
+  }
+  .file-card {
+    background: var(--bg-2);
+    border-color: var(--panel-edge);
+    &:hover {
+      background: rgba(47, 127, 217, 0.05);
+      border-color: var(--steel-dim);
+    }
+    &.selected {
+      background: rgba(47, 127, 217, 0.1);
+      border-color: var(--steel);
+    }
+    &.drop-target {
+      background: rgba(47, 127, 217, 0.18);
+      border-color: var(--steel);
+    }
+  }
+  .preview-text,
+  .preview-xlsx-wrap {
+    background: rgba(15, 23, 42, 0.04);
+    border-color: var(--panel-edge);
+  }
+  .preview-xlsx-table td {
+    background: rgba(15, 23, 42, 0.03);
+    border-color: var(--panel-edge);
+  }
+
+  /* 图标选择器弹层（teleport 到 body）浅色化 */
+  .icon-picker-pop {
+    box-shadow: 0 8px 24px rgba(15, 23, 42, 0.14) !important;
+  }
+
+  /* ===========================================================
+   *  浮层阴影调浅（深色主题下的黑阴影过重）
+   * =========================================================== */
+  .el-menu--popup,
+  .el-select__popper,
+  .el-dropdown-menu {
+    box-shadow: 0 8px 24px rgba(15, 23, 42, 0.14) !important;
+  }
+  .el-tooltip__popper.is-dark {
+    background: #ffffff !important;
+    color: var(--text-1) !important;
+    border: 1px solid var(--panel-edge) !important;
+    box-shadow: 0 8px 24px rgba(15, 23, 42, 0.14) !important;
+  }
+}

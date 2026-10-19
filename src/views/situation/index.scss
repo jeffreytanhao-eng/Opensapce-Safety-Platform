@@ -1,0 +1,1040 @@
+.constel-page { position: relative; width: 100%; height: 100%; min-height: 560px; overflow: hidden; border-radius: var(--r); }
+.constel-canvas { width: 100%; height: 100%; canvas { display: block; } }
+/* 简约加载态：旋转圆环 + 文案 + 进度条（整屏加载遮罩 / 地球中央操作 loading 共用） */
+.loading-box { display: flex; flex-direction: column; align-items: center; gap: 14px;
+  .spin {
+    width: 34px; height: 34px; border-radius: 50%;
+    border: 3px solid rgba(79,195,247,0.18); border-top-color: #4fc3f7;
+    animation: cspin 0.9s linear infinite;
+  }
+  /* 首屏加载 SVG（跳跃小人 + 落地阴影 + 轨迹弧线）：动画由 SVG 内 SMIL 驱动，此处只负责配色尺寸 */
+  .load-svg {
+    width: 104px; height: 104px;
+    overflow: visible;
+    filter: drop-shadow(0 0 10px rgba(79,195,247,0.35));
+    .lj-arc { fill: none; stroke: rgba(160,233,255,0.4); stroke-width: 1; stroke-dasharray: 3 4; }
+    .lj-ground { stroke: rgba(79,195,247,0.35); stroke-width: 1.6; stroke-linecap: round; }
+    .lj-shadow { fill: rgba(79,195,247,0.3); }
+    .lj-head { fill: rgba(127,216,255,0.16); stroke: #7fd8ff; stroke-width: 2.4; }
+    .lj-limb { stroke: #7fd8ff; stroke-width: 2.4; stroke-linecap: round; }
+  }
+  .loading-txt { font-size: 13px; letter-spacing: 1px; color: #bcd6f7; }
+  .load-bar {
+    width: 180px; height: 4px; border-radius: 2px; overflow: hidden;
+    background: rgba(255,255,255,0.12);
+    i { display: block; height: 100%; border-radius: 2px;
+      background: linear-gradient(90deg, #4fc3f7, #a0e9ff); transition: width 0.25s ease; }
+  }
+}
+.constel-mask {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 18px;
+  background: rgba(4,6,11,0.6); color: #dfe7f2; font-size: 14px; z-index: 5;
+  .err { color: #ff8a80; }
+}
+/* 操作类 loading（绘制轨道线 / 加载碰撞事件）：统一显示在地球正中央，不铺整屏暗底、不拦截指针，保留地球视野 */
+.constel-center {
+  position: absolute; inset: 0; z-index: 5; pointer-events: none;
+  display: flex; align-items: center; justify-content: center;
+  .loading-box { padding: 16px 22px; border-radius: 14px;
+    background: rgba(8,13,24,0.72); border: 1px solid rgba(120,160,220,0.22); backdrop-filter: blur(8px); }
+}
+@keyframes cspin { to { transform: rotate(360deg); } }
+/* 顶部通知条 */
+.constel-toast {
+  position: absolute; top: 14px; left: 50%; transform: translateX(-50%); z-index: 6; max-width: 70%;
+  padding: 8px 16px; border-radius: 20px; font-size: 12px; color: #ffd591;
+  background: rgba(10,16,28,0.8); border: 1px solid rgba(120,160,220,0.28); backdrop-filter: blur(8px);
+  &.err { color: #ff8a80; border-color: rgba(255,138,128,0.3); }
+}
+/* 左侧滑出面板 */
+.side-panel {
+  position: absolute; top: 0; left: 0; z-index: 7; width: 300px; height: 100%;
+  display: flex; flex-direction: column; padding: 14px 12px 12px;
+  background: rgba(8,13,24,0.86); border-right: 1px solid rgba(120,160,220,0.22); backdrop-filter: blur(12px);
+  /* 面板空白/半透明区域点击穿透到画布拾取卫星；仅需交互的控件恢复事件 */
+  pointer-events: none;
+  user-select: none;
+  .sp-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding-bottom: 10px; border-bottom: 1px solid rgba(120,160,220,0.16);
+    .sp-head-main { display: flex; flex-direction: column; gap: 2px; min-width: 0;
+      .sp-title { font-size: 14px; font-weight: 700; color: #e8eef7; }
+      .sp-count { font-size: 11px; color: #7fb0ff; }
+      .sp-meta { font-size: 10px; color: #8fa8c9; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    }
+    .sp-close { flex: none; width: 24px; height: 24px; line-height: 22px; text-align: center; border-radius: 6px;
+      pointer-events: auto; /* 关闭按钮可点击 */
+      background: rgba(120,160,220,0.12); border: 1px solid rgba(120,160,220,0.25); color: #cfdcea; cursor: pointer;
+      &:hover { background: rgba(255,255,255,0.14); }
+    }
+  }
+  /* 数据源切换（国际库 / AOE 库）：分段控件，默认国际库。
+     放在头部下方独立一行，避免占用 .sp-head 的拖拽手柄区域 */
+  .sp-src { display: flex; gap: 4px; margin-top: 10px; padding: 3px; border-radius: 9px;
+    pointer-events: auto; /* 分段按钮可点击 */
+    background: rgba(255,255,255,0.05); border: 1px solid rgba(120,160,220,0.18);
+    .sp-src-btn { flex: 1; height: 26px; border: 0; border-radius: 7px; cursor: pointer; font-size: 11.5px;
+      background: transparent; color: #93a4bd; transition: all .15s;
+      &:hover { color: #e6edf6; }
+      &.on { background: rgba(79,195,247,0.2); color: #e6edf6; font-weight: 600;
+        box-shadow: inset 0 0 0 1px rgba(79,195,247,0.45); }
+    }
+  }
+  .sp-search { position: relative; margin: 12px 0 10px;
+    pointer-events: auto; /* 搜索框可输入/清除 */
+    .sp-input { width: 100%; height: 34px; padding: 0 30px 0 12px; border-radius: 8px; box-sizing: border-box;
+      background: rgba(255,255,255,0.06); border: 1px solid rgba(120,160,220,0.28); color: #e6edf6; font-size: 13px; outline: none;
+      &::placeholder { color: #7d8ba3; }
+      &:focus { border-color: #4fc3f7; }
+    }
+    .sp-clear { position: absolute; top: 50%; right: 8px; transform: translateY(-50%); width: 18px; height: 18px; line-height: 16px;
+      text-align: center; border-radius: 50%; background: rgba(255,255,255,0.16); color: #cfdcea; font-size: 13px; cursor: pointer; }
+  }
+  .sp-types { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px;
+    .sp-type { display: inline-flex; align-items: center; gap: 5px; padding: 4px 8px; border-radius: 14px; cursor: pointer;
+      pointer-events: auto; /* 类型勾选可点击 */
+      background: rgba(255,255,255,0.05); border: 1px solid rgba(120,160,220,0.18); color: #93a4bd; font-size: 11px;
+      input { display: none; }
+      &.on { background: rgba(79,195,247,0.16); border-color: rgba(79,195,247,0.5); color: #e6edf6; }
+      .sp-type-dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+    }
+  }
+  .sp-regimes { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px;
+    .sp-regime { display: inline-flex; align-items: center; gap: 5px; padding: 4px 8px; border-radius: 14px; cursor: pointer;
+      pointer-events: auto; /* 轨道区域勾选可点击 */
+      background: rgba(255,255,255,0.05); border: 1px solid rgba(120,160,220,0.18); color: #93a4bd; font-size: 11px;
+      input { display: none; }
+      &.on { background: rgba(124,77,255,0.16); border-color: rgba(124,77,255,0.5); color: #e6edf6; }
+    }
+  }
+  .sp-list { flex: 1; overflow-y: auto; min-height: 0; -webkit-overflow-scrolling: touch;
+    /* 面板整体 pointer-events:none 用于「空白穿透拾取」，但列表滚动区必须恢复事件，否则触摸/滚轮在此滑动会被穿透到画布而无法滚动 */
+    pointer-events: auto;
+    touch-action: pan-y; /* 明确列表内纵向触摸滚动，避免与画布旋转手势冲突 */
+    &::-webkit-scrollbar { width: 6px; }
+    &::-webkit-scrollbar-thumb { background: rgba(120,160,220,0.3); border-radius: 3px; }
+    .sp-item { display: flex; align-items: center; gap: 10px; padding: 8px 9px; margin-bottom: 4px; border-radius: 8px; cursor: pointer;
+      pointer-events: auto; /* 列表条目可点击，选中对应卫星 */
+      background: rgba(255,255,255,0.025); border: 1px solid transparent;
+      &:hover { background: rgba(79,195,247,0.1); }
+      &.active { background: rgba(79,195,247,0.16); border-color: rgba(79,195,247,0.45); }
+      .sp-item-dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+      .cons-dot { background: linear-gradient(135deg, #4fc3f7, #7c4dff); }
+      /* 过境分析：城市（与地表白色中文标注同一配色，便于图例对照） */
+      .pass-dot { background: #ffffff; box-shadow: 0 0 6px rgba(255,255,255,0.7); }
+      .sp-item-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px;
+        .sp-item-name { font-size: 12.5px; color: #e6edf6; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .sp-item-nor { font-size: 11px; color: #7d8ba3; }
+        .sp-item-net { font-size: 10.5px; color: #ffb43a; }
+      }
+      .sp-item-type { flex: none; font-size: 11px; color: #93a4bd; }
+      /* 发射站列表：该站「即将发射」条数徽标（琥珀色，与地球标记同色系） */
+      .sp-item-badge { flex: none; min-width: 18px; height: 17px; padding: 0 6px; line-height: 16px; text-align: center;
+        border-radius: 9px; font-size: 10.5px; font-weight: 700; color: #17110a;
+        background: #ffb43a; box-shadow: 0 0 8px rgba(255,180,58,0.45); }
+    }
+    .sp-empty { padding: 28px 0; text-align: center; color: #7d8ba3; font-size: 12px; }
+    .sp-more { padding: 10px 0; text-align: center; color: #7fb0ff; font-size: 11px; }
+  }
+  /* 过境分析面板：地理底图加载中 / 失败（列表尚未就绪时的整块状态提示） */
+  .sp-state { padding: 28px 0; text-align: center; color: #7d8ba3; font-size: 12px; line-height: 1.6;
+    pointer-events: auto; /* 面板空白区域穿透拾取，状态文案区恢复事件以便长期停留查看 */
+    &.is-err { color: #ff8a80; } }
+}
+/* 面板滑出过渡 */
+.panel-enter-active, .panel-leave-active { transition: transform 0.28s ease, opacity 0.28s ease; }
+.panel-enter-from, .panel-leave-to { transform: translateX(-100%); opacity: 0; }
+/* 底部 dock 导航栏 */
+.constel-dock {
+  /* z-index 高于左侧列表面板（.side-panel 为 7）：dock 向上弹出的「碰撞热力来源菜单」不能被面板盖住。
+     移动端面板宽 300px、菜单居中，二者必然重叠，层级低于面板时菜单会「看不见也点不到」。 */
+  position: absolute; bottom: 14px; left: 50%; transform: translateX(-50%); z-index: 9;
+  display: flex; align-items: center; flex-wrap: wrap; justify-content: center; gap: 4px;
+  max-width: calc(100% - 28px); padding: 5px 10px; border-radius: 22px;
+  background: rgba(8,13,24,0.78); border: 1px solid rgba(120,160,220,0.24); backdrop-filter: blur(10px);
+  /* 平板等窄宽度：按钮文字强制单行，dock 放不下时整行换行居中，避免文字在按钮内折断 */
+  .dock-btn { display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 12px; border-radius: 16px;
+    white-space: nowrap; flex-shrink: 0;
+    /* 长按「还原」返回控制台：禁掉长按选中/系统菜单，避免手势被浏览器拦截。
+       -webkit- 前缀必须保留：部分 Android WebView 不认无前缀的 user-select；
+       touch-action: manipulation 关掉双击缩放，长按期间浏览器不接管手势（否则会派发 pointercancel 打断计时） */
+    user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; -webkit-user-drag: none;
+    touch-action: manipulation;
+    background: transparent; border: 1px solid transparent; color: #aebacd; font-size: 12px; cursor: pointer; transition: all 0.18s ease;
+    &:hover { color: #e6edf6; background: rgba(255,255,255,0.06); }
+    &.on { color: #4fc3f7; background: rgba(79,195,247,0.16); border-color: rgba(79,195,247,0.4); }
+    &:disabled { opacity: 0.4; cursor: not-allowed; }
+    .dock-ico { font-size: 13px; }
+  }
+  /* 无可还原内容时的置灰（替代 :disabled，保证长按仍能收到指针事件） */
+  .dock-btn.dock-dim { opacity: 0.4; cursor: not-allowed; }
+  /* 子菜单锚点容器：带子项菜单的按钮各包一层，让菜单定位到「自己那个按钮」上方而不是整条 dock 居中。
+     它是 flex 容器中的一项，宽度即为按钮宽度，菜单以它的中线居中（与按钮中线重合）。 */
+  .dock-item { position: relative; display: inline-flex; flex-shrink: 0; }
+  /* 子项菜单：点击对应按钮后自该按钮上方向外弹出（综合态势 / 碰撞热力 / 过境分析各一份，互不干扰） */
+  .dock-menu { position: absolute; bottom: calc(100% + 10px); left: 50%; transform: translateX(-50%);
+    z-index: 8; display: flex; flex-direction: column; gap: 6px;
+    min-width: 220px; max-width: calc(100vw - 28px); padding: 8px; border-radius: 12px;
+    background: rgba(8,13,24,0.94); border: 1px solid rgba(120,160,220,0.3); backdrop-filter: blur(12px);
+    box-shadow: 0 10px 26px rgba(2,6,16,0.5), inset 0 1px 0 rgba(160,210,255,0.1);
+    /* 指向本按钮的小三角（视觉上「从按钮弹出」） */
+    &::after { content: ''; position: absolute; top: 100%; left: 50%; transform: translateX(-50%);
+      border: 7px solid transparent; border-top-color: rgba(120,160,220,0.3); }
+    /* 标题条：可点击折叠（v-collapse 全局指令），折叠后仅保留这一行。
+       折叠态菜单是「绝对定位 + left:50% + width:auto」的 shrink-to-fit，可用宽度只剩容器一半，
+       CJK 标题会被折成竖排，故强制单行不换行 */
+    .dock-menu-title { display: flex; align-items: center; font-size: 12px; font-weight: 600;
+      color: #7fb0ff; letter-spacing: 0.5px; padding: 0 2px 2px; white-space: nowrap;
+      &::after { color: #7d8ba3; border-color: rgba(120,160,220,0.3); }
+      &:hover { color: #a8c8ff;
+        &::after { color: #9fc3e0; border-color: rgba(120,170,230,0.5); } } }
+    /* 折叠态：菜单收缩为仅标题条（!important 覆盖全局 .collapsible-panel.is-collapsed 的 padding-bottom） */
+    &.is-collapsed { width: auto; min-width: 0; padding: 6px 10px 6px !important;
+      .dock-menu-title { padding-bottom: 0; } }
+    .dock-menu-item { display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
+      padding: 8px 10px; border-radius: 8px; text-align: left; cursor: pointer;
+      background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.07);
+      color: #cfdcea; transition: all 0.16s ease;
+      b { font-size: 13px; font-weight: 700; color: #e6edf6; }
+      i { font-style: normal; font-size: 11px; color: #7d8ba3; }
+      &:hover { background: rgba(255,255,255,0.1); border-color: rgba(120,170,230,0.4); }
+      &.on { background: rgba(79,195,247,0.16); border-color: rgba(79,195,247,0.55);
+        b { color: #7fd8ff; }
+        i { color: #9fc3e0; } }
+    }
+  }
+  /* 还原初始状态：默认灰（dock-dim），存在拾取/轨道线时亮起 */
+  .dock-btn.dock-reset { color: #8a94a6;
+    position: relative; overflow: hidden;
+    /* 长按 5s 的承载元素：touch-action: none 让浏览器完全不接管这一处的触摸手势
+       （允许 pan/zoom 会导致长按 500ms 左右被判为「手势接管」并派发 pointercancel）；
+       click 不受 touch-action 影响，短按还原照常 */
+    touch-action: none;
+    &:hover { color: #e6edf6; background: rgba(255,255,255,0.06); }
+    &.on { color: #ffd591; background: rgba(255,213,145,0.12); border-color: rgba(255,213,145,0.32);
+      &:hover { background: rgba(255,213,145,0.18); color: #ffe3ae; } }
+    /* 长按进度：按钮底部 2px 进度条，走满即返回控制台（时长与脚本 HOLD_HOME_MS 一致） */
+    &.holding::after { content: ''; position: absolute; left: 0; bottom: 0; width: 100%; height: 2px;
+      background: #ffd591; transform-origin: left center; animation: dock-hold 5s linear forwards; } }
+}
+/* 长按「还原」的进度条动画（5s 与脚本 HOLD_HOME_MS 一致） */
+@keyframes dock-hold {
+  from { transform: scaleX(0); }
+  to { transform: scaleX(1); }
+}
+/* 子项菜单弹出过渡（保留 translateX(-50%) 居中，避免动画期间左右跳动） */
+.dock-menu-enter-active, .dock-menu-leave-active { transition: opacity 0.18s ease, transform 0.18s ease; }
+.dock-menu-enter-from, .dock-menu-leave-to { opacity: 0; transform: translateX(-50%) translateY(8px); }
+/* 右下角图例 */
+.constel-legend {
+  /* z-index 高于详情面板/浮标（均为 4）：图例展开时不被右侧详情 icon / 浮标遮挡 */
+  position: absolute; right: 14px; bottom: 14px; z-index: 5; width: 200px; padding: 12px 14px;
+  border-radius: 10px; background: rgba(10,16,28,0.72); border: 1px solid rgba(120,160,220,0.25); backdrop-filter: blur(8px);
+  .lg-title { min-height: 20px; font-size: 12px; font-weight: 600; color: #7fb0ff; letter-spacing: 0.5px; margin-bottom: 8px; }
+  &.is-collapsed {
+    width: auto;                 // 收起时宽度收缩到仅折叠图标
+    padding: 6px 8px !important; // 覆盖全局 .collapsible-panel.is-collapsed 的底部 14px 内边距，压缩空位
+    .lg-title { min-height: 0; margin-bottom: 0; }
+  }
+  /* 着色维度切换（图例顶部）：一排小按钮，选中态高亮；切换后 3D 卫星配色与图例同步变化 */
+  .lg-modes { margin-bottom: 7px;
+    .lg-modes-label { font-size: 11px; color: #7d8ba3; margin-bottom: 4px; }
+    .lg-mode-btns { display: flex; flex-wrap: wrap; gap: 4px; }
+    .lg-mode-btn {
+      flex: none; padding: 0 7px; height: 20px; line-height: 18px; font-size: 11px;
+      border-radius: 4px; cursor: pointer; white-space: nowrap;
+      color: #b8c7de; background: rgba(120,160,220,0.10); border: 1px solid rgba(120,160,220,0.28);
+      transition: all 0.15s ease;
+      &:hover { color: #eaf2ff; border-color: #4fc3f7; background: rgba(79,195,247,0.16); }
+      &.on { color: #04121f; background: #4fc3f7; border-color: #4fc3f7; font-weight: 600; }
+    }
+  }
+  .lg-row { display: flex; align-items: center; gap: 8px; padding: 3px 0; cursor: pointer;
+    .lg-check { display: flex; align-items: center; gap: 6px; flex: none; cursor: pointer;
+      input { width: 13px; height: 13px; accent-color: #4fc3f7; cursor: pointer; }
+    }
+    .lg-dot { width: 14px; height: 14px; border-radius: 3px; flex: none; }
+    .lg-name { font-size: 12px; color: #dfe7f2; flex: none; }
+    .lg-desc { font-size: 11px; color: #7d8ba3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    /* 分档图例行（着色维度用）：无勾选框，名称可省略号压缩，占比右对齐不换行 */
+    &.lg-row-static {
+      cursor: default;
+      .lg-name { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .lg-pct { flex: none; font-size: 11px; color: #8ea4c4; font-variant-numeric: tabular-nums; }
+    }
+    /* 过境分析图例：国界＝线段、城市＝白色圆点（对应地表白色中文标注，城市已无三维点云） */
+    .lg-dot.lg-line { width: 16px; height: 0; border-radius: 0; border-top: 2px solid #4fc3f7; }
+    .lg-dot.lg-city { border-radius: 50%; background: #ffffff; box-shadow: 0 0 6px rgba(255,255,255,0.8); }
+    /* 空间环境 / 天体图层圆点：与场景里的实际观感对应 */
+    .lg-dot.lg-sun { border-radius: 50%; background: radial-gradient(circle, #fff3c4 30%, rgba(255,196,80,0.25) 100%); box-shadow: 0 0 6px rgba(255,214,120,0.7); }
+    .lg-dot.lg-moon { border-radius: 50%; background: linear-gradient(90deg, #c9c9c9 50%, #4a4f57 50%); }
+    .lg-dot.lg-aurora { border-radius: 50%; background: transparent; border: 2px solid #5cffc4; box-shadow: 0 0 6px rgba(92,255,196,0.55); }
+    .lg-dot.lg-dipole { border-radius: 50%; background: conic-gradient(from 0deg, #ff4d4d, #ffd54f, #4dff9e, #3fd0ff, #5a6bff, #ff4d4d); box-shadow: 0 0 7px rgba(180,210,255,0.75); }
+    /* 物体会总开关：四类颜色渐变，一眼看出「全部类型」 */
+    .lg-dot.lg-all { border-radius: 3px; background: linear-gradient(135deg, #ff4d4f 0%, #9fb0c0 33%, #3f9dff 66%, #ffd54f 100%); box-shadow: 0 0 5px rgba(200,215,235,0.5); }
+    .lg-dot.lg-wind { border-radius: 50%; background: radial-gradient(circle, #dff0ff 20%, rgba(120,190,255,0.15) 100%); }
+    .lg-dot.lg-shadow { border-radius: 3px; background: linear-gradient(180deg, rgba(4,6,13,0.95) 50%, rgba(47,94,168,0.35) 100%); border: 1px solid rgba(120,160,220,0.35); }
+    /* 三垣二十八宿：七色环状拼色（三垣紫/金/青碧 + 四象青/蓝/白/朱），与场景里连线颜色一致 */
+    .lg-dot.lg-mansion { border-radius: 50%; background: conic-gradient(from 0deg, #c07bff 0 14.3%, #ffb347 14.3% 28.6%, #7fe8b8 28.6% 42.9%, #35e0d0 42.9% 57.1%, #5a8cff 57.1% 71.4%, #eaf0ff 71.4% 85.7%, #ff6a4d 85.7% 100%); box-shadow: 0 0 7px rgba(190,215,255,0.7); }
+    /* 西方 88 星座：单一淡青蓝连线（只连线不画点），用线段色块示意 */
+    .lg-dot.lg-constellation { width: 16px; height: 0; border-radius: 0; border-top: 2px solid #9fc4ff; }
+    .lg-dot.lg-track { width: 16px; height: 0; border-radius: 0; border-top: 2px dashed #ffe082; }
+    .lg-dot.lg-ellip { border-radius: 50%; background: transparent; border: 1px dashed #ff9a5c; box-shadow: inset 0 0 5px rgba(255,154,92,0.5); }
+    /* 无数据可画的图层（极光环 / 太阳风）：整行压暗提示，开关仍可勾选 */
+    &.off { opacity: 0.55; }
+    /* 被当前画质档主动隐藏的图层（目前只有地影锥）：把状态说出来并给「强制显示」入口 ——
+       否则开关是亮的、场景里却没东西，使用者会以为图层坏了（低端机 / 移动端会自动降档） */
+    .lg-force {
+      margin-left: auto;
+      flex: none;
+      padding: 0 5px;
+      height: 16px;
+      line-height: 15px;
+      font-size: 10px;
+      border-radius: 3px;
+      white-space: nowrap;
+      color: #e6a23c;
+      background: rgba(230, 162, 60, 0.12);
+      border: 1px solid rgba(230, 162, 60, 0.42);
+      cursor: pointer;
+      &:hover { background: rgba(230, 162, 60, 0.24); }
+      &.on {
+        color: #52c41a;
+        background: rgba(82, 196, 26, 0.12);
+        border-color: rgba(82, 196, 26, 0.42);
+        &:hover { background: rgba(82, 196, 26, 0.24); }
+      }
+    }
+  }
+  /* 图例分组分隔线（空间环境图层与卫星类型图例之间） */
+  .lg-sep { height: 1px; margin: 7px 0 5px; background: rgba(120,160,220,0.22); }
+  /* 空间环境摘要：地磁暴等级徽标（颜色由后端下发）+ Kp 与实测龄期 */
+  .lg-sws { display: flex; align-items: center; gap: 6px; margin-top: 6px; padding-top: 6px;
+    border-top: 1px solid rgba(120,160,220,0.16);
+    .lg-sws-badge { flex: none; padding: 0 5px; border-radius: 4px; font-size: 10px; line-height: 15px;
+      font-weight: 700; border: 1px solid currentColor; }
+    .lg-sws-text { font-size: 10.5px; color: #7d8ba3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  }
+}
+.constel-detail {
+  position: absolute; top: 60px; right: 14px; z-index: 4; width: 320px; max-width: calc(100% - 28px);
+  max-height: calc(100% - 80px); overflow-y: auto; padding: 14px 16px; border-radius: 14px;
+  background: linear-gradient(160deg, rgba(16,26,46,0.92), rgba(9,14,26,0.86));
+  border: 1px solid rgba(120,170,230,0.28); backdrop-filter: blur(14px);
+  box-shadow: 0 10px 30px rgba(2,6,16,0.45), inset 0 1px 0 rgba(160,210,255,0.12);
+  .cd-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; padding-bottom: 12px; margin-bottom: 12px; border-bottom: 1px solid rgba(120,170,230,0.16);
+    .cd-head-main { display: flex; flex-direction: column; gap: 4px; min-width: 0;
+      .cd-name { font-size: 16px; font-weight: 800; color: #5fd0ff; letter-spacing: 0.3px; line-height: 1.3; word-break: break-word; }
+    .cd-sub { font-size: 12px; color: #8ea4c4; line-height: 1.4; }
+    /* 编目国（旗帜 + 中文名）：内联在副标题尾部，随详情数据出现/消失 */
+    .cd-owner { display: inline-flex; align-items: center; gap: 4px; margin-left: 6px; padding: 1px 7px 1px 4px;
+      border-radius: 20px; background: rgba(120,170,230,0.14); border: 1px solid rgba(120,170,230,0.22);
+      vertical-align: 1px; white-space: nowrap;
+      .cd-owner-flag { width: 16px; height: 11px; object-fit: cover; border-radius: 2px; flex: none;
+        box-shadow: 0 0 0 1px rgba(255,255,255,0.12); }
+      .cd-owner-name { font-size: 11px; color: #cfe3ff; line-height: 1.2; } }
+    /* 发射站详情副标题尾部的小胶囊（现役 / 退役、陆基 / 海基） */
+    .cd-site-tag { display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: 20px;
+      font-size: 10.5px; color: #7fd8ff; background: rgba(120,170,230,0.14); border: 1px solid rgba(120,170,230,0.24);
+      vertical-align: 1px; white-space: nowrap;
+      &.off { color: #9db0cc; background: rgba(150,170,200,0.12); border-color: rgba(150,170,200,0.26); } }
+    }
+    .cd-close { flex: none; width: 26px; height: 26px; line-height: 24px; text-align: center; border-radius: 50%;
+      background: rgba(120,170,230,0.14); border: 1px solid rgba(120,170,230,0.28); color: #cfdcea; cursor: pointer; transition: all 0.18s ease;
+      &:hover { background: rgba(255,255,255,0.16); border-color: #4fc3f7; color: #fff; } }
+    /* 头部操作区：总折叠按钮 + 关闭按钮并排靠右 */
+    .cd-head-actions { flex: none; display: flex; align-items: center; gap: 6px; }
+    .cd-collapse-all { flex: none; height: 26px; padding: 0 10px; border-radius: 13px; font-size: 11px; line-height: 24px;
+      white-space: nowrap; background: rgba(120,170,230,0.14); border: 1px solid rgba(120,170,230,0.28);
+      color: #cfdcea; cursor: pointer; transition: all 0.18s ease;
+      &:hover { background: rgba(255,255,255,0.16); border-color: #4fc3f7; color: #fff; } }
+  }
+  /* 每个数据分组独立卡片，层次更清晰 */
+  .cd-block { margin-bottom: 12px; padding: 12px 12px 6px; border-radius: 10px;
+    background: rgba(20,32,56,0.35); border: 1px solid rgba(120,170,230,0.12);
+    &:last-child { margin-bottom: 0; } }
+  .cd-title { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700; color: #8fc2ff;
+    letter-spacing: 0.6px; margin-bottom: 10px;
+    &::before { content: ''; width: 3px; height: 12px; border-radius: 2px; background: linear-gradient(#4fc3f7, #7fb0ff); flex: none; } }
+  /* 可折叠的块标题：竖条 + 标题在左，箭头被推到最右，点击整块切换展开/收起 */
+  .cd-title-toggle { cursor: pointer; user-select: none;
+    .cd-caret { margin-left: auto; font-size: 11px; color: #7fb0ff; flex: none; transition: transform 0.18s ease; } }
+  .cd-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 10px; }
+  /* 标签单行、值按需换行：拉开行高与间距，杜绝标签/值上下挤压 */
+  .cd-item { display: flex; flex-direction: column; gap: 3px; min-width: 0; padding: 7px 9px;
+    border-radius: 8px; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05);
+    span { font-size: 11px; color: #8398b5; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    b { font-size: 13px; color: #eaf2fc; font-weight: 700; line-height: 1.5; word-break: break-word; overflow-wrap: anywhere; }
+    .cd-norad { display: block; font-style: normal; font-size: 10px; font-weight: 500; color: #7d8ba3; margin-top: 1px; }
+  }
+  /* 紧凑单行变体（卫星详情面板新块专用）：标签在左、值在右，同一行完整显示；
+     单列排布 + 极小行距，窄面板下长标签 / 长值既不折行也不被截断（沿用上面的两行式 .cd-item 不受影响） */
+  .cd-grid.is-inline { grid-template-columns: 1fr; gap: 2px;
+    .cd-item { flex-direction: row; align-items: baseline; justify-content: space-between; gap: 10px;
+      padding: 2px 8px; background: rgba(255,255,255,0.02); border-color: rgba(255,255,255,0.04);
+      span { flex: none; white-space: nowrap; }
+      b { flex: 1; min-width: 0; text-align: right; white-space: nowrap; overflow-wrap: normal; word-break: normal; }
+    }
+    /* 长值项语义标记：单列下本就是整行；保留以备将来改多列时独占一行。
+       值允许换行：历元时刻 / 发射地 / 机构名等长文本在窄面板下不再溢出出界 */
+    .cd-item.is-wide { grid-column: 1 / -1;
+      b { white-space: normal; overflow-wrap: anywhere; }
+    }
+  }
+  /* 所属星座：命中的星座名做成小胶囊，多星座自动换行 */
+  .cd-cons { display: flex; flex-wrap: wrap; gap: 5px; }
+  .cd-cons-item { display: inline-flex; align-items: baseline; gap: 6px; padding: 2px 9px; border-radius: 20px;
+    font-size: 11.5px; color: #cfe3ff; background: rgba(120,170,230,0.14); border: 1px solid rgba(120,170,230,0.24);
+    i { font-style: normal; font-size: 10px; color: #7fb0ff; opacity: 0.9; } }
+  .cd-none { font-size: 11.5px; color: #8398b5; line-height: 1.4;
+    &.err { color: #ff8a80; } }
+  /* 原始 TLE 两行 + 复制按钮 */
+  .cd-tle-wrap { display: flex; align-items: stretch; gap: 8px; }
+  .cd-tle { flex: 1; min-width: 0; margin: 0; padding: 6px 8px; border-radius: 8px;
+    font-family: 'Consolas', 'Menlo', monospace; font-size: 10.5px; line-height: 1.5; color: #cfe0f5;
+    white-space: pre; overflow-x: auto; background: rgba(0,0,0,0.28); border: 1px solid rgba(120,170,230,0.14); }
+  .cd-tle-copy { flex: none; align-self: flex-start; padding: 4px 10px; border-radius: 8px; cursor: pointer;
+    font-size: 11px; color: #bcd6ff; background: rgba(120,170,230,0.16); border: 1px solid rgba(120,170,230,0.3);
+    transition: all 0.18s ease;
+    &:hover { background: rgba(120,170,230,0.28); border-color: #4fc3f7; color: #fff; } }
+  /* 面板内联：知识图谱关联（迷你力导向图，纯 canvas 组件绘制；图内不画文字，hover 出 tooltip，下方一行类型图例） */
+  .cd-kg { display: flex; flex-direction: column; gap: 6px; }
+  .cd-kg-canvas { width: 100%; height: 180px; overflow: hidden; border-radius: 8px;
+    background: rgba(20,30,48,0.35); border: 1px solid rgba(120,170,230,0.16); }
+  .cd-kg-legend { display: flex; flex-wrap: wrap; gap: 4px 10px; }
+  .cd-kg-legend-item { display: inline-flex; align-items: center; gap: 5px; font-size: 10.5px; color: #9db0cc;
+    i { flex: none; width: 7px; height: 7px; border-radius: 50%; box-shadow: 0 0 0 1px rgba(255,255,255,0.18); }
+    em { font-style: normal; font-size: 9.5px; color: #7d8ba3; } }
+  /* 面板内联：轨道高度变化图（折叠块，首次展开才请求历史接口；近地点/远地点双折线 + 近地点变化率） */
+  .cd-hist { display: flex; flex-direction: column; gap: 6px; }
+  .cd-hist-canvas { width: 100%; height: 150px; border-radius: 8px;
+    background: rgba(20,30,48,0.35); border: 1px solid rgba(120,170,230,0.16); }
+  .cd-hist-meta { display: flex; flex-direction: column; gap: 2px; }
+  .cd-hist-row { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; font-size: 11px;
+    span { flex: none; color: #8398b5; }
+    b { flex: 1; min-width: 0; text-align: right; font-weight: 700; color: #eaf2fc; } }
+  .cd-hist-tip { font-size: 10px; color: #7d8ba3; line-height: 1.4; }
+  /* 面板内联：过境仰角剖面（折叠块，首次展开才请求；仰角随时间曲线 + 门限参考线，峰值与明细同口径） */
+  .cd-elev { display: flex; flex-direction: column; gap: 6px; }
+  .cd-elev-cap { font-size: 11px; color: #9db0cc; }
+  .cd-elev-canvas { width: 100%; height: 150px; border-radius: 8px;
+    background: rgba(20,30,48,0.35); border: 1px solid rgba(120,170,230,0.16); }
+  /* 面板内联：卫星资料库（归属国家/地区 = 旗帜 + 中文名） */
+  .cd-cat-country { display: inline-flex; align-items: center; justify-content: flex-end; gap: 5px; }
+  .cd-cat-flag { flex: none; width: 16px; height: 11px; object-fit: cover; border-radius: 2px;
+    box-shadow: 0 0 0 1px rgba(255,255,255,0.12); }
+  /* 事件主指标高亮（事件详情 / 碰撞列表共用；颜色按来源分派：官方 CDM 用碰撞概率、本项目初筛用最近距离分级） */
+  .heat-strong { font-size: 15px; font-weight: 800; }
+  /* 卫星碰撞列表：检索该卫星未来窗口内全部碰撞事件 */
+  .cdm-list { list-style: none; margin: 0; padding: 0; }
+  .cdm-item { padding: 9px 10px; margin-bottom: 8px; border-radius: 10px; cursor: pointer;
+    background: rgba(255,90,90,0.05); border: 1px solid rgba(255,110,110,0.16); transition: background 0.15s, border-color 0.15s;
+    &:last-child { margin-bottom: 0; }
+    &:hover { background: rgba(255,90,90,0.11); border-color: rgba(255,130,130,0.32); }
+    &.on { background: rgba(79,195,247,0.16); border-color: rgba(79,195,247,0.55); }
+    .cdm-main { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px;
+      b { font-size: 13px; color: #ffd7d7; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .cdm-tag { flex: none; font-size: 10.5px; color: #ff9a9a; background: rgba(255,90,90,0.14); border: 1px solid rgba(255,110,110,0.3); border-radius: 10px; padding: 2px 7px; }
+    }
+    .cdm-grid { display: flex; gap: 10px; font-size: 11px; color: #9db0cc;
+      span { display: inline-flex; align-items: center; gap: 3px; }
+      b { font-weight: 700; color: #eaf2fc; }
+    }
+  }
+}
+/* ---------------- 过境分析明细（同一右栏，上栏＝过境列表、下栏＝选中过境参数） ---------------- */
+/* 过境明细信息量大于卫星详情（列表 + 参数两栏），此处单独加宽；移动端仍由 html.is-mobile 全宽铺满 */
+.constel-detail.detail-pass { width: 380px; }
+/* 发射站详情同样是「列表 + 列表」两栏，与过境明细同宽；移动端仍全宽 */
+.constel-detail.detail-site { width: 380px; }
+.constel-detail {
+  /* 发射站详情 · 上栏「即将发射」列表（按 NET 升序，限高内部滚动） */
+  .site-up-list { list-style: none; margin: 0; padding: 0;
+    max-height: min(30vh, 260px); overflow-y: auto; overscroll-behavior: contain;
+    &::-webkit-scrollbar { width: 6px; }
+    &::-webkit-scrollbar-thumb { background: rgba(120,160,220,0.3); border-radius: 3px; }
+  }
+  .site-up-item { padding: 8px 9px; margin-bottom: 6px; border-radius: 8px;
+    background: rgba(255,180,58,0.05); border: 1px solid rgba(255,180,58,0.16);
+    &:last-child { margin-bottom: 0; }
+    .site-up-main { display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
+      b { flex: 1; min-width: 0; font-size: 12.5px; color: #ffe1b0; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .site-up-net { flex: none; font-size: 11.5px; font-weight: 700; color: #ffb43a; font-family: 'Consolas', 'Menlo', monospace;
+        .site-up-prec { margin-left: 4px; font-style: normal; font-size: 10px; font-weight: 500; color: #9db0cc; } }
+    }
+    .site-up-grid { display: flex; flex-wrap: wrap; gap: 4px 10px; margin-top: 4px; font-size: 11px; color: #9db0cc;
+      .site-up-status { color: #7fd8ff; } }
+  }
+  /* 发射站详情 · 下栏「发射历史」列表 + 分页 */
+  .site-his-list { list-style: none; margin: 0; padding: 0;
+    max-height: min(34vh, 300px); overflow-y: auto; overscroll-behavior: contain;
+    &::-webkit-scrollbar { width: 6px; }
+    &::-webkit-scrollbar-thumb { background: rgba(120,160,220,0.3); border-radius: 3px; }
+  }
+  .site-his-item { padding: 7px 9px; margin-bottom: 5px; border-radius: 8px;
+    background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.06);
+    &:last-child { margin-bottom: 0; }
+    .site-his-main { display: flex; align-items: center; justify-content: space-between; gap: 8px;
+      b { font-size: 12px; color: #e6edf6; font-family: 'Consolas', 'Menlo', monospace; }
+      .site-his-out { flex: none; padding: 1px 7px; border-radius: 10px; font-size: 10.5px; border: 1px solid transparent;
+        &.success { color: #7ee0a0; background: rgba(82,196,26,0.12); border-color: rgba(82,196,26,0.35); }
+        &.failure { color: #ff9a9a; background: rgba(255,90,90,0.12); border-color: rgba(255,110,110,0.35); }
+        &.unknown { color: #9db0cc; background: rgba(150,170,200,0.12); border-color: rgba(150,170,200,0.3); } }
+    }
+    .site-his-grid { display: flex; flex-wrap: wrap; gap: 3px 10px; margin-top: 3px; font-size: 11px; color: #9db0cc; }
+  }
+  .site-his-page { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 8px;
+    font-size: 11px; color: #9db0cc;
+    button { padding: 3px 9px; border-radius: 6px; cursor: pointer; font-size: 11px;
+      color: #bcd6ff; background: rgba(120,170,230,0.16); border: 1px solid rgba(120,170,230,0.3);
+      transition: all 0.18s ease;
+      &:hover:not(:disabled) { background: rgba(120,170,230,0.3); border-color: #4fc3f7; color: #fff; }
+      &:disabled { opacity: 0.4; cursor: not-allowed; } }
+  }
+}
+.constel-detail {
+  /* 上栏：卫星过境列表（按最大仰角降序，限高内部滚动，下栏参数始终可见） */
+  .pass-list { list-style: none; margin: 0; padding: 0;
+    max-height: min(30vh, 260px); overflow-y: auto; overscroll-behavior: contain;
+    &::-webkit-scrollbar { width: 6px; }
+    &::-webkit-scrollbar-thumb { background: rgba(120,160,220,0.3); border-radius: 3px; }
+  }
+  /* 过境列表检索框（按卫星名 / NORAD 编号过滤） */
+  .pass-search { position: relative; margin-bottom: 6px;
+    input { width: 100%; box-sizing: border-box; padding: 5px 24px 5px 9px; border-radius: 6px;
+      font-size: 11.5px; color: #e6edf6; background: rgba(255,255,255,0.04);
+      border: 1px solid rgba(255,255,255,0.1); outline: none;
+      &::placeholder { color: #6f7d93; }
+      &:focus { border-color: rgba(79,195,247,0.5); background: rgba(79,195,247,0.06); } }
+    .pass-search-clear { position: absolute; right: 4px; top: 50%; transform: translateY(-50%);
+      width: 18px; height: 18px; padding: 0; border: 0; border-radius: 4px; cursor: pointer;
+      font-size: 14px; line-height: 1; color: #8ea4c4; background: transparent;
+      &:hover { color: #e6edf6; background: rgba(255,255,255,0.08); } } }
+  /* 标题里的「/ 共 N」原始条数提示 */
+  .pass-count-tip { font-style: normal; font-size: 10.5px; color: #7d8ba3; }
+  /* 滚动加载提示（列表末行的占位，滚到底自动追加下一批） */
+  .pass-more { padding: 8px 0; text-align: center; font-size: 10.5px; color: #7d8ba3; }
+  .pass-item { padding: 7px 9px; margin-bottom: 5px; border-radius: 8px; cursor: pointer;
+    background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.06);
+    transition: background 0.15s, border-color 0.15s;
+    &:last-child { margin-bottom: 0; }
+    &:hover { background: rgba(79,195,247,0.1); border-color: rgba(79,195,247,0.32); }
+    &.on { background: rgba(79,195,247,0.16); border-color: rgba(79,195,247,0.55); }
+    .pass-item-top { display: flex; align-items: center; justify-content: space-between; gap: 8px;
+      .pass-sat { flex: 1; min-width: 0; font-size: 12.5px; color: #e6edf6; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .pass-elev { flex: none; font-size: 12.5px; font-weight: 700; color: #7fd8ff; font-family: 'Consolas', 'Menlo', monospace; }
+    }
+    .pass-item-sub { display: flex; align-items: center; justify-content: space-between; gap: 8px;
+      margin-top: 3px; font-size: 10.5px; color: #8ea4c4;
+      .pass-dur { flex: none; color: #a7b6cc; }
+    }
+  }
+  .pass-none { padding: 14px 0; text-align: center; font-size: 12px; color: #7d8ba3; }
+  /* 光照条件：列表项内的状态标签（日照/半影/本影 + 暮光档 + 可成像） */
+  .pass-item-light { display: flex; align-items: center; gap: 5px; margin-top: 4px; flex-wrap: wrap;
+    .light-tag { flex: none; padding: 1px 6px; border-radius: 4px; font-size: 10px; line-height: 1.5;
+      border: 1px solid transparent; white-space: nowrap;
+      &.light-sunlit { color: #ffd980; background: rgba(255,190,60,0.12); border-color: rgba(255,190,60,0.32); }
+      &.light-penumbra { color: #9db6d8; background: rgba(140,170,210,0.12); border-color: rgba(140,170,210,0.3); }
+      &.light-umbra { color: #6f7d93; background: rgba(90,105,130,0.16); border-color: rgba(90,105,130,0.36); }
+      &.light-none { color: #66738a; background: rgba(255,255,255,0.04); border-color: rgba(255,255,255,0.08); }
+      &.tw { color: #8ea4c4; background: rgba(255,255,255,0.04); border-color: rgba(255,255,255,0.08); }
+      &.ok { color: #7ee0a8; background: rgba(60,210,130,0.12); border-color: rgba(60,210,130,0.34); }
+    } }
+  /* 列表标题行：标题 + 右侧「只看可成像」开关 */
+  .cd-title-row { display: flex; align-items: center; gap: 8px;
+    .pass-filter { margin-left: auto; flex: none; display: flex; align-items: center; gap: 4px;
+      font-size: 10.5px; color: #9fb4d0; cursor: pointer; user-select: none;
+      input { width: 12px; height: 12px; margin: 0; cursor: pointer; accent-color: #4fc3f7; }
+      &.off { color: #5f6c80; cursor: not-allowed;
+        input { cursor: not-allowed; } } } }
+  .cd-title-gap { margin-top: 10px; }
+  /* 口径提示行（误差椭球的「经验 σ 非真实协方差」等说明） */
+  .cd-hint { margin-top: 6px; font-size: 11px; line-height: 1.6; color: #8ea4c4;
+    &.err { color: #ff8a80; }
+    &.warn { color: #ffd980;
+      b { color: #ffe9b0; font-weight: 700; } } }
+  .pass-hint { font-size: 12px; line-height: 1.6; color: #a7b6cc; }
+  .pass-err { font-size: 12px; line-height: 1.6; color: #ff8a80; word-break: break-word; }
+  /* 星座成员列表（点击左侧星座后在右侧展示，点击成员高亮其轨道线） */
+  .cons-sat-list { list-style: none; margin: 0; padding: 0;
+    max-height: min(52vh, 460px); overflow-y: auto; overscroll-behavior: contain;
+    &::-webkit-scrollbar { width: 6px; }
+    &::-webkit-scrollbar-thumb { background: rgba(120,160,220,0.3); border-radius: 3px; }
+  }
+  .cons-sat-item { display: flex; align-items: center; gap: 8px; padding: 6px 9px; margin-bottom: 4px;
+    border-radius: 8px; cursor: pointer; background: rgba(255,255,255,0.03);
+    border: 1px solid rgba(255,255,255,0.06); transition: background 0.15s, border-color 0.15s;
+    &:hover { background: rgba(0,229,255,0.1); border-color: rgba(0,229,255,0.35); }
+    /* 高亮态：与三维里亮青色高亮轨道线呼应 */
+    &.on { background: rgba(0,229,255,0.16); border-color: rgba(0,229,255,0.6); }
+    .cons-sat-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; }
+    .cons-sat-name { flex: 1; min-width: 0; font-size: 12px; color: #e6edf6;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .cons-sat-nor { flex: none; font-size: 10.5px; color: #8ea4c4; font-family: 'Consolas', 'Menlo', monospace; }
+  }
+  .cons-sat-more { padding: 4px 0 2px; text-align: center; font-size: 10.5px; color: #7d8ba3; }
+}
+/* 详情面板收起后的小浮标（右侧，点击重新展开） */
+.constel-detail-tab {
+  position: absolute; top: 60px; right: 14px; z-index: 4;
+  width: 42px; height: 42px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(10,16,28,0.72); border: 1px solid rgba(120,160,220,0.25);
+  color: #4fc3f7; font-size: 19px; cursor: pointer; backdrop-filter: blur(8px);
+  &:hover { border-color: #4fc3f7; }
+}
+/* 列表收起后的小浮标（左上角，点击重新展开对应列表；仅移动端渲染，由 v-if=isMobile 控制） */
+.side-panel-tab {
+  position: absolute; top: 60px; left: 14px; z-index: 4;
+  width: 42px; height: 42px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(10,16,28,0.72); border: 1px solid rgba(120,160,220,0.25);
+  color: #4fc3f7; font-size: 19px; cursor: pointer; backdrop-filter: blur(8px);
+  &:hover { border-color: #4fc3f7; }
+}
+/* 跟随卫星的 HTML 准星 + 名字（CSS 像素恒定，平行于浏览器） */
+.sat-reticle {
+  position: absolute;
+  top: 0;
+  left: 0;
+  pointer-events: none;
+  z-index: 3;
+  width: 0;
+  height: 0;
+}
+/* 白色小圆环拾取器：外圈白环 + 内圈淡光晕，中心留空不遮挡卫星本体 */
+.sat-reticle-ring {
+  position: absolute;
+  width: 44px;
+  height: 44px;
+  margin-left: -22px;
+  margin-top: -22px;
+  border-radius: 50%;
+  border: 1.6px solid rgba(255, 255, 255, 0.95);
+  box-shadow: 0 0 6px rgba(255, 255, 255, 0.55), inset 0 0 6px rgba(255, 255, 255, 0.25);
+  animation: sat-reticle-pulse 2s ease-in-out infinite;
+}
+@keyframes sat-reticle-pulse {
+  0%, 100% { opacity: 0.95; transform: scale(1); }
+  50% { opacity: 0.7; transform: scale(1.05); }
+}
+.sat-reticle-name {
+  position: absolute;
+  left: 26px;
+  top: -22px;
+  font-size: 13px;
+  font-weight: 700;
+  color: #ffffff;
+  white-space: nowrap;
+  text-shadow: 0 0 2px rgba(4, 8, 16, 0.95), 0 0 4px rgba(4, 8, 16, 0.85), 0 0 1px rgba(4, 8, 16, 1);
+}
+/* 移动端环绕轮盘（桌面端右键的替代）：
+   桌面端「右键按住拖动 = 绕选中目标环绕浏览」，移动端没有右键，改为命中拾取后浮出的摇杆。
+   按住轮盘内任意位置拖动即等价桌面右键环绕（水平 = 环视、垂直 = 俯仰），取消选中 / 点空白即隐藏。
+   轮盘为纯移动端控件，整体嵌在 html.is-mobile 内，不会泄漏到 PC 端。 */
+html.is-mobile {
+  .orbit-wheel {
+    position: absolute;
+    right: 18px;
+    /* 抬到 dock（约 88px + 安全区）与列表抽屉之上，避免被底部导航压住 */
+    bottom: calc(104px + env(safe-area-inset-bottom));
+    /* 高于详情面板（z-index 4）：拾取后详情会自动展开，轮盘必须仍可操作 */
+    z-index: 6;
+    width: 104px;
+    height: 104px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: radial-gradient(circle at 50% 42%, rgba(24, 40, 68, 0.5), rgba(8, 14, 26, 0.44));
+    border: 1px solid rgba(120, 170, 230, 0.42);
+    box-shadow: 0 0 16px rgba(2, 8, 20, 0.45), inset 0 0 16px rgba(79, 195, 247, 0.12);
+    backdrop-filter: blur(4px);
+    opacity: 0.82;
+    /* 触屏拖动时不触发页面滚动 / 缩放 */
+    touch-action: none;
+    user-select: none;
+    transition: opacity 0.18s ease, border-color 0.18s ease;
+    &.is-dragging {
+      opacity: 1;
+      border-color: rgba(79, 195, 247, 0.85);
+    }
+    /* 内圈虚线：暗示「可拖动旋转」 */
+    &::before {
+      content: '';
+      position: absolute;
+      inset: 14px;
+      border-radius: 50%;
+      border: 1px dashed rgba(140, 190, 240, 0.22);
+    }
+    .ow-knob {
+      position: relative;
+      width: 44px;
+      height: 44px;
+      border-radius: 50%;
+      background: radial-gradient(circle at 38% 34%, rgba(160, 225, 255, 0.95), rgba(52, 132, 206, 0.85));
+      box-shadow: 0 0 10px rgba(79, 195, 247, 0.55), inset 0 0 6px rgba(255, 255, 255, 0.35);
+      pointer-events: none;
+    }
+    .ow-hint {
+      position: absolute;
+      top: calc(100% + 3px);
+      left: 50%;
+      transform: translateX(-50%);
+      font-size: 10px;
+      letter-spacing: 1px;
+      color: rgba(190, 215, 240, 0.62);
+      white-space: nowrap;
+      pointer-events: none;
+    }
+  }
+}
+/* 过境视图地表中文标签层（国名 / 主要城市名）
+   落点由 BaseScene 动画循环逐帧投影写入 transform，这里只管排版与描边；
+   隐藏用 opacity:0（保持元素挂载，避免每帧切换 display 触发重排） */
+.pass-label-layer {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 2;
+}
+.pass-label {
+  position: absolute;
+  left: 0;
+  top: 0;
+  white-space: nowrap;
+  line-height: 1;
+  opacity: 0;
+  will-change: transform, opacity;
+  text-shadow: 0 0 2px rgba(4, 8, 16, 0.95), 0 0 4px rgba(4, 8, 16, 0.85), 0 0 1px rgba(4, 8, 16, 1);
+}
+.pass-label-country {
+  font-size: 12px;
+  font-weight: 600;
+  color: #eef4ff;
+  letter-spacing: 0.5px;
+}
+/* 中国省级名：与城市名同为纯白（字号更小、字重更轻，仍可与城市名区分开）
+   注：显隐用的 opacity 由动画循环逐帧写内联样式，这里不要写 opacity（会被内联样式覆盖） */
+.pass-label-province {
+  font-size: 11px;
+  font-weight: 500;
+  color: #ffffff;
+  letter-spacing: 0.5px;
+}
+.pass-label-city {
+  font-size: 11px;
+  font-weight: 500;
+  color: #ffffff;
+}
+/* 三垣二十八宿名称标签层：与地表中文标签同范式（逐帧投影写 transform），按所在星官配色区分 */
+.mansion-label-layer {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 2;
+}
+.mansion-label {
+  position: absolute;
+  left: 0;
+  top: 0;
+  white-space: nowrap;
+  line-height: 1;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 1px;
+  opacity: 0;
+  will-change: transform, opacity;
+  text-shadow: 0 0 2px rgba(4, 8, 16, 0.95), 0 0 5px rgba(4, 8, 16, 0.85), 0 0 1px rgba(4, 8, 16, 1);
+}
+/* 四象配色：东方青龙青 / 北方玄武蓝 / 西方白虎白 / 南方朱雀朱 */
+.mansion-label-dragon { color: #7ff0e4; }
+.mansion-label-tortoise { color: #9fc0ff; }
+.mansion-label-tiger { color: #f2f6ff; }
+.mansion-label-bird { color: #ffa488; }
+/* 三垣配色：紫微垣紫 / 太微垣金 / 天市垣青碧（与场景连线同色） */
+.mansion-label-ziwei { color: #d8b4ff; }
+.mansion-label-taiwei { color: #ffcf8f; }
+.mansion-label-tianshi { color: #a9f0cf; }
+/* 西方 88 星座名称标签层：同星官标签范式；单色淡青蓝、字号字重略轻，弱于星官名不抢视觉 */
+.constellation-label-layer {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 2;
+}
+.constellation-label {
+  position: absolute;
+  left: 0;
+  top: 0;
+  white-space: nowrap;
+  line-height: 1;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.5px;
+  color: #9fc4ff;
+  opacity: 0;
+  will-change: transform, opacity;
+  text-shadow: 0 0 2px rgba(4, 8, 16, 0.95), 0 0 5px rgba(4, 8, 16, 0.85), 0 0 1px rgba(4, 8, 16, 1);
+}
+html.is-mobile {
+  .constel-page { min-height: 520px; }
+  /* 移动端屏幕小：地表中文标签整体缩小，避免糊成一片 */
+  .pass-label-country { font-size: 10px; }
+  .pass-label-province { font-size: 9px; }
+  .pass-label-city { font-size: 9px; }
+  /* 移动端：星官名称一并缩小，避免与地表标签抢视觉 */
+  .mansion-label { font-size: 10px; letter-spacing: 0.5px; }
+  /* 移动端：星座名同步缩小 */
+  .constellation-label { font-size: 9px; letter-spacing: 0.3px; }
+  /* 移动端图例上移到右上角，躲避底部 Tab 导航 dock；空间极致压缩（字重与间距收窄，仍保证可读） */
+  .constel-legend {
+    top: 10px; right: 10px; bottom: auto; width: auto; max-width: 46vw;
+    padding: 6px 8px; border-radius: 8px;
+    .lg-title { min-height: 0; font-size: 10.5px; letter-spacing: 0.2px; margin-bottom: 4px; }
+    .lg-row { gap: 5px; padding: 1px 0;
+      .lg-check { gap: 4px; input { width: 11px; height: 11px; } }
+      .lg-dot { width: 11px; height: 11px; }
+      .lg-name { font-size: 10.5px; }
+      .lg-desc { font-size: 9.5px; }
+      .lg-force { font-size: 9px; height: 14px; line-height: 13px; padding: 0 4px; }
+    }
+    &.is-collapsed { padding: 4px 6px !important; }
+  }
+  .constel-detail { top: 48px; right: 8px; left: 8px; width: auto; max-width: calc(100% - 16px); max-height: calc(100% - 104px); padding: 7px 8px; border-radius: 10px; }
+  /* 移动端：弹窗空间压到极致——元素间距与字号全面收窄，保留最小可读字号（10px 上下），
+     目标是「一屏塞下尽可能多的信息、尽量不遮地球」 */
+  .constel-detail .cd-head { padding-bottom: 5px; margin-bottom: 6px; gap: 6px; }
+  .constel-detail .cd-head .cd-head-main { gap: 1px; }
+  .constel-detail .cd-head .cd-name { font-size: 13px; line-height: 1.25; }
+  .constel-detail .cd-head .cd-sub { font-size: 10px; line-height: 1.3; }
+  .constel-detail .cd-head .cd-owner { gap: 3px; margin-left: 4px; padding: 0 5px 0 3px;
+    .cd-owner-flag { width: 13px; height: 9px; }
+    .cd-owner-name { font-size: 9.5px; } }
+  .constel-detail .cd-close { width: 20px; height: 20px; line-height: 18px; font-size: 11px; }
+  .constel-detail .cd-head-actions { gap: 4px; }
+  .constel-detail .cd-collapse-all { height: 20px; padding: 0 7px; border-radius: 10px; font-size: 9.5px; line-height: 18px; }
+  .constel-detail .cd-block { margin-bottom: 6px; padding: 6px 6px 3px; border-radius: 7px; }
+  .constel-detail .cd-title { font-size: 10.5px; margin-bottom: 4px; letter-spacing: 0.3px; gap: 4px; }
+  .constel-detail .cd-title::before { height: 9px; width: 2px; }
+  .constel-detail .cd-title .cd-caret { font-size: 9px; }
+  .constel-detail .cd-grid { gap: 3px 5px; }
+  .constel-detail .cd-item { gap: 0; padding: 3px 5px; border-radius: 5px; }
+  .constel-detail .cd-item span { font-size: 9.5px; line-height: 1.3; }
+  .constel-detail .cd-item b { font-size: 11px; line-height: 1.28; }
+  .constel-detail .cd-item .cd-norad { font-size: 9px; margin-top: 0; }
+  /* 紧凑单行变体：移动端进一步压低行距与内边距，仍保持「标签+值」单行完整 */
+  .constel-detail .cd-grid.is-inline { gap: 1px; }
+  .constel-detail .cd-grid.is-inline .cd-item { gap: 8px; padding: 1px 5px; }
+  .constel-detail .cd-cons { gap: 4px; }
+  .constel-detail .cd-cons-item { padding: 1px 7px; font-size: 9.5px;
+    i { font-size: 8.5px; } }
+  .constel-detail .cd-none { font-size: 9.5px; }
+  .constel-detail .cd-tle { padding: 4px 6px; font-size: 9px; }
+  .constel-detail .cd-tle-copy { padding: 3px 7px; font-size: 9.5px; }
+  .constel-detail .cd-kg { gap: 5px; }
+  .constel-detail .cd-kg-canvas { height: 150px; }
+  .constel-detail .cd-kg-legend { gap: 3px 8px; }
+  .constel-detail .cd-kg-legend-item { font-size: 9.5px;
+    em { font-size: 8.5px; } }
+  .constel-detail .cd-cat-flag { width: 14px; height: 10px; }
+  .constel-detail .heat-strong { font-size: 13px; }
+  .constel-detail .cdm-item { padding: 5px 6px; margin-bottom: 4px; border-radius: 7px; }
+  .constel-detail .cdm-item .cdm-main { margin-bottom: 3px; }
+  .constel-detail .cdm-item .cdm-main b { font-size: 11px; }
+  .constel-detail .cdm-item .cdm-main .cdm-tag { font-size: 9px; padding: 1px 5px; }
+  .constel-detail .cdm-item .cdm-grid { gap: 5px; font-size: 9.5px; }
+  /* 过境明细：移动端由「左右各 8px 全宽」规则接管宽度（覆盖 PC 的 380px 定宽），列表再压矮，
+     保证上栏过境列表 + 下栏过境参数在同一屏内可读 */
+  .constel-detail.detail-pass { width: auto; }
+  /* 发射站详情：移动端同样全宽接管，两个列表再压矮，保证「即将发射 + 发射历史」在同一屏内可读 */
+  .constel-detail.detail-site { width: auto; }
+  .constel-detail .site-up-list { max-height: 18vh; }
+  .constel-detail .site-up-item { padding: 5px 6px; margin-bottom: 4px; border-radius: 7px; }
+  .constel-detail .site-up-item .site-up-main b { font-size: 11px; }
+  .constel-detail .site-up-item .site-up-main .site-up-net { font-size: 10.5px; }
+  .constel-detail .site-up-item .site-up-grid { gap: 2px 8px; margin-top: 2px; font-size: 9.5px; }
+  .constel-detail .site-his-list { max-height: 22vh; }
+  .constel-detail .site-his-item { padding: 5px 6px; margin-bottom: 4px; border-radius: 7px; }
+  .constel-detail .site-his-item .site-his-main b { font-size: 10.5px; }
+  .constel-detail .site-his-item .site-his-main .site-his-out { font-size: 9px; padding: 1px 5px; }
+  .constel-detail .site-his-item .site-his-grid { gap: 2px 8px; margin-top: 2px; font-size: 9.5px; }
+  .constel-detail .site-his-page { margin-top: 6px; font-size: 10px; }
+  .constel-detail .site-his-page button { padding: 2px 7px; font-size: 10px; }
+  .constel-detail .pass-list { max-height: 20vh; }
+  .constel-detail .pass-item { padding: 4px 6px; margin-bottom: 3px; border-radius: 6px; }
+  .constel-detail .pass-item .pass-item-top .pass-sat,
+  .constel-detail .pass-item .pass-item-top .pass-elev { font-size: 11px; }
+  .constel-detail .pass-item .pass-item-sub { margin-top: 1px; font-size: 9.5px; }
+  .constel-detail .pass-none { padding: 8px 0; font-size: 11px; }
+  .constel-detail .pass-hint,
+  .constel-detail .pass-err { font-size: 11px; line-height: 1.45; }
+  .constel-detail .cons-sat-list { max-height: 26vh; }
+  .constel-detail .cons-sat-item { padding: 5px 6px; margin-bottom: 3px; border-radius: 6px; }
+  .constel-detail .cons-sat-item .cons-sat-name { font-size: 11px; }
+  .constel-detail .cons-sat-item .cons-sat-nor { font-size: 9.5px; }
+  .constel-detail-tab { top: 48px; right: 8px; width: 32px; height: 32px; font-size: 15px; }
+  /* 列表收起浮标：面板已移到底部，浮标同步贴住底部 Tab 导航上沿（与抽屉同一入口位置） */
+  .side-panel-tab { top: auto; bottom: calc(96px + env(safe-area-inset-bottom)); left: 8px; width: 32px; height: 32px; font-size: 15px; }
+  /* 顶部通知条：移动端压缩内边距与字号，尽量少占屏幕 */
+  .constel-toast { max-width: 88%; top: 8px; padding: 5px 11px; font-size: 11px; }
+  /* 列表面板 → 移动端「底部抽屉」：自屏幕底部升起，上半屏始终留给地球观察；
+     停靠在底部 Tab 导航 dock 之上（dock≈88px+safe-area），不遮挡 dock。
+     高度由 --drawer-h CSS 变量控制（各面板绑定 :style），自由拖拽：
+       默认 20vh → 抓手条上拉 / 下拉可停在任意高度（下限 15vh，下拉越过则关闭面板）
+     拖拽时 .is-dragging 禁用过渡使高度实时跟手；松手后停在当前位置。
+     max-height 上限：顶边不得越过右下角（收起态）图例（.constel-legend，top:10px）下沿，
+     预留顶部图例区 128px + 底部 dock 占位 88px + 安全区（与 scene.ts 的 drawerMaxVh 同源）。
+     高度固定而非 auto：卫星 / 过境列表由 .sp-list 自身滚动触发「到底加载更多」，
+     自适应高度会让列表不滚动导致只加载第一页。
+     空间压到极致：内边距 / 行距 / 字号全面收窄，条目按「能看清即可」定尺寸（约 34-36px 行高）。 */
+  .side-panel {
+    top: auto;
+    bottom: calc(88px + env(safe-area-inset-bottom));
+    left: 0;
+    right: 0;
+    width: auto;
+    height: var(--drawer-h, 20vh);
+    max-height: calc(100% - 128px - env(safe-area-inset-bottom));
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: 7px 9px 7px;
+    background: rgba(8,13,24,0.96);
+    border-right: none;
+    border-top: 1px solid rgba(120,160,220,0.28);
+    border-radius: 14px 14px 0 0;
+    box-shadow: 0 -10px 26px rgba(2,6,16,0.55);
+    pointer-events: auto;
+    /* 高度变化（含松手收敛）平滑过渡；拖拽中通过 .is-dragging 关闭过渡使跟手 */
+    transition: height 0.28s ease;
+    &.is-dragging { transition: none; }
+  }
+  /* 抽屉过渡方向：移动端自底部升起（覆盖 PC 的「从左滑入」） */
+  .panel-enter-from, .panel-leave-to { transform: translateY(100%); }
+  /* 抓手条 + 头部触摸拖拽：.sp-head 是拖拽手柄区域，touch-action:none 阻止浏览器拦截触摸手势（滚动/双击缩放） */
+  .side-panel .sp-head {
+    flex: none;
+    position: relative;
+    padding-bottom: 5px;
+    touch-action: none;
+    /* 抓手条：原来作为 flex 项排在标题左边，被 auto 外边距挤在文字中间；
+       改为绝对定位到头部上沿居中——占位落在抽屉 7px 上内边距里（top:-4px），
+       不额外增加高度，抓手条自成一行，标题等文字完整排在它下面 */
+    &::before {
+      content: '';
+      position: absolute;
+      top: -4px; left: 50%;
+      transform: translateX(-50%);
+      width: 30px; height: 3px; border-radius: 2px;
+      background: rgba(255,255,255,0.2);
+    }
+    /* 头部信息横排：标题 · 条数 · 数据来源 由竖排三行改为一行的横向排列，进一步压缩头部高度；
+       窄屏放不下时由 .sp-meta 收缩出省略号，避免把右侧关闭按钮挤出可视区 */
+    .sp-head-main {
+      flex: 1 1 auto;
+      min-width: 0;
+      flex-direction: row;
+      align-items: baseline;
+      gap: 6px;
+      .sp-title { flex: none; }
+      .sp-count { flex: none; }
+      .sp-meta { flex: 0 1 auto; min-width: 0; }
+    }
+    .sp-title { font-size: 12px; }
+    .sp-count { font-size: 10px; }
+    .sp-meta { font-size: 9.5px; }
+  }
+  /* 收起按钮：底部抽屉里「»（向左收）」不再达意，改用「✕」 */
+  .side-panel .sp-close { width: 24px; height: 24px; line-height: 22px; font-size: 0;
+    &::after { content: '✕'; font-size: 12px; } }
+  .side-panel .sp-search { margin: 6px 0 6px; }
+  /* 搜索框与列表条目同级压缩：字号对齐条目名（11.5px），高度收到 26px，避免在底部抽屉里显得突兀偏大 */
+  .side-panel .sp-search .sp-input { height: 26px; padding: 0 24px 0 8px; font-size: 11.5px; }
+  .side-panel .sp-search .sp-clear { width: 15px; height: 15px; line-height: 13px; right: 5px; font-size: 11px; }
+  /* 数据源切换：窄屏进一步压高度，与搜索框同级 */
+  .side-panel .sp-src { margin-top: 6px; padding: 2px;
+    .sp-src-btn { height: 22px; font-size: 10.5px; }
+  }
+  .side-panel .sp-types,
+  .side-panel .sp-regimes { gap: 4px; margin-bottom: 6px; }
+  .side-panel .sp-type,
+  .side-panel .sp-regime { padding: 3px 7px; font-size: 10.5px; border-radius: 10px; gap: 4px;
+    .sp-type-dot { width: 7px; height: 7px; } }
+  /* 列表项：全宽抽屉下压缩行高（≈34-36px）与行间距，字号收窄到「能看清即可」，单屏多塞条目 */
+  .side-panel .sp-list .sp-item {
+    gap: 7px; padding: 5px 7px; margin-bottom: 3px; border-radius: 7px;
+    background: rgba(255,255,255,0.04); border: 1px solid rgba(120,160,220,0.12);
+    .sp-item-dot { width: 7px; height: 7px; }
+    .sp-item-main { gap: 0;
+      .sp-item-name { font-size: 11.5px; }
+      .sp-item-nor { font-size: 9.5px; }
+      .sp-item-net { font-size: 9px; }
+    }
+    .sp-item-type { font-size: 9.5px; }
+    .sp-item-badge { min-width: 16px; height: 15px; line-height: 14px; padding: 0 5px; font-size: 9.5px; }
+    /* 选中态需在移动端同步覆写，否则被上面更高特异性的底色规则盖掉 */
+    &.active { background: rgba(79,195,247,0.18); border-color: rgba(79,195,247,0.5); }
+  }
+  .side-panel .sp-list .sp-empty { padding: 14px 0; font-size: 11px; }
+  .side-panel .sp-list .sp-more { padding: 5px 0; font-size: 10px; }
+  .side-panel .sp-state { padding: 14px 0; font-size: 11px; line-height: 1.45; }
+
+  /* 宽屏移动端（平板 / 大屏 Pad / 手机横屏，宽度 ≥600px）：
+     抽屉此时横跨整屏，若仍按单列铺排，条目会被拉成又长又空的一整行（名字挤在左侧、右侧大片留白），
+     搜索框也会被拉成横贯整屏的长条。此处只用 CSS 重排，不新增任何高度：
+     ① 搜索框收窄，不再横向拉伸；
+     ② 列表改为自适应多列网格（一排多个），每屏可见条目成倍增加，右侧空白消除。
+     空态「无匹配」与「加载更多」提示需横跨整行，否则会被塞进单个网格单元里。 */
+  @media (min-width: 600px) {
+    .side-panel {
+      .sp-search { width: 240px; }
+      .sp-list {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+        gap: 4px;
+        align-content: start;
+        .sp-item { margin-bottom: 0; }
+        .sp-empty,
+        .sp-more { grid-column: 1 / -1; }
+      }
+    }
+  }
+
+  /* 底部导航 → 手机 App 底部菜单（Tab Bar） */
+  .constel-dock {
+    position: absolute; left: 0; right: 0; bottom: 0; transform: none;
+    width: 100%; max-width: 100%;
+    flex-wrap: wrap; gap: 0;
+    padding: 6px 6px calc(6px + env(safe-area-inset-bottom));
+    border-radius: 14px 14px 0 0;
+    border-left: none; border-right: none; border-bottom: none;
+  }
+  /* 子菜单锚点：移动端 dock 满屏宽、按钮仅约 1/5 屏，菜单贴着按钮居中会顶出屏幕，
+     故退回 position: static（菜单相对 dock 居中于屏幕），与合并前的行为一致 */
+  .constel-dock > .dock-item { position: static; display: flex;
+    & > .dock-btn { width: 100%; } }
+  /* 主 Tab（仅 dock 直接子按钮 / 子菜单锚点内的按钮）：图标 + 文字竖排，均分占满一行 */
+  .constel-dock > .dock-btn,
+  .constel-dock > .dock-item { flex: 1 1 0; }
+  .constel-dock > .dock-btn,
+  .constel-dock > .dock-item > .dock-btn {
+    flex-direction: column; gap: 2px;
+    height: auto; padding: 7px 2px 5px;
+    border-radius: 10px;
+  }
+  .constel-dock > .dock-btn .dock-ico,
+  .constel-dock > .dock-item > .dock-btn .dock-ico { font-size: 18px; line-height: 1; }
+  .constel-dock > .dock-btn .dock-txt,
+  .constel-dock > .dock-item > .dock-btn .dock-txt { font-size: 11px; }
+  /* 来源菜单：移动端 dock 全宽，菜单居中于屏幕、宽度自适应，条目空间压到极致 */
+  .constel-dock .dock-menu {
+    min-width: 0; width: min(240px, calc(100vw - 24px));
+    padding: 6px; gap: 5px; border-radius: 10px;
+    .dock-menu-title { font-size: 11px; padding: 0 2px 1px; }
+    .dock-menu-item { padding: 5px 8px; border-radius: 7px;
+      b { font-size: 12px; }
+      i { font-size: 10px; } }
+  }
+}

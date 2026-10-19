@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      PWA：让 iOS / Android「添加到主屏幕」后以独立窗口打开（不再显示浏览器自带工具栏）。
+      注意：浏览器自带工具栏属浏览器外壳 UI，普通浏览器标签页内无法由网页隐藏，
+      微信内置浏览器同样无法隐藏；只有「添加到主屏幕」以 standalone 启动才生效。
+      资源路径写绝对路径即可：vite 会按 base（如 /zxsd/）自动补前缀，
+      不要再用 %BASE_URL% —— 它会被先替换、再被 base 重写一次，得到 /zxsd/zxsd/... 这种重复前缀而 404。
+      iOS 的主屏幕图标只认 apple-touch-icon（不读 manifest 里的 maskable），安卓才会用 maskable。
+    -->
+    <meta name="theme-color" content="#409EFF" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="开放空间安全平台" />
+    <link rel="icon" href="/favicon.ico" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="manifest" href="/manifest.json" />
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+    <title>Loading...</title>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

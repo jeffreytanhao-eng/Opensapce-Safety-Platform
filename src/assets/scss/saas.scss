@@ -1,0 +1,703 @@
+/* ===========================================================
+ *  开源太空安全 · 日间 · SaaS 变体（商用 SaaS 风格）
+ *  作用域 html[data-theme="saas"]；与「日间 · 经典」（light.scss，data-theme="light"）
+ *  以及暗月（html.dark，tech.scss）三选一，互不干扰。
+ *
+ *  设计语言（对齐主流商用 SaaS 后台）：
+ *    ・平面白卡 + 极浅中性灰底（无金属渐变、无高光边、无机加工角）
+ *    ・单一品牌蓝做强调色，边框一律 1px 浅灰，阴影轻且少
+ *    ・圆角更大（10/12px）、字重层级清晰、留白更足
+ *    ・表格/表单/弹窗走"轻边框 + 悬浮反馈"的克制表达
+ *
+ *  色板参考（中性灰 + 品牌蓝）：
+ *    底色 #f7f8fa / 卡片 #fff / 边框 #e4e7ec / 填充 #f2f4f7
+ *    文字 #101828 → #475467 → #667085 → #98a2b3
+ *    主色 #2563eb（hover #1d4ed8）/ 成功 #12b76a / 警告 #f79009 / 危险 #f04438
+ * =========================================================== */
+
+html[data-theme="saas"] {
+  /* —— 基底与卡片 —— */
+  --bg-0: #f7f8fa;
+  --bg-1: #ffffff;
+  --bg-2: #ffffff;
+  --bg-3: #f2f4f7;
+
+  /* —— 面板：平面白卡（不再是金属渐变） —— */
+  --panel: #ffffff;
+  --panel-edge: #e4e7ec;
+  --panel-edge-dark: #eaecf0;
+  --panel-inner: rgba(16, 24, 40, 0.02);
+
+  /* —— 文字层级 —— */
+  --text-1: #101828;
+  --text-2: #475467;
+  --text-3: #667085;
+  --text-4: #98a2b3;
+
+  /* —— 品牌蓝 —— */
+  --steel: #2563eb;
+  --steel-dim: #1d4ed8;
+  --steel-glow: rgba(37, 99, 235, 0.16);
+
+  /* —— 状态色 —— */
+  --ok: #12b76a;
+  --warn: #f79009;
+  --err: #f04438;
+
+  /* —— 尺寸：SaaS 用更大的圆角 —— */
+  --r: 10px;
+  --r-sm: 6px;
+
+  /* —— 本主题专用令牌 —— */
+  --saas-line: #e4e7ec;          /* 常规分隔线 */
+  --saas-line-soft: #eaecf0;     /* 更浅的分隔线 */
+  --saas-fill: #f2f4f7;          /* 次级填充（hover / 标签底） */
+  --saas-fill-blue: #eff4ff;     /* 选中态浅蓝底 */
+  --saas-input-line: #d0d5dd;    /* 输入框描边 */
+  --saas-shadow-card: 0 1px 3px rgba(16, 24, 40, 0.06), 0 1px 2px rgba(16, 24, 40, 0.04);
+  --saas-shadow-pop: 0 12px 32px rgba(16, 24, 40, 0.12);
+  --saas-shadow-dialog: 0 20px 48px rgba(16, 24, 40, 0.16);
+  --saas-ring: 0 0 0 3px rgba(37, 99, 235, 0.12);
+
+  /* —— 页面底色：纯色，去掉深色底纹与光晕 —— */
+  #app::before {
+    background: var(--bg-0);
+  }
+
+  /* ===========================================================
+   *  一、去掉工业/金属风装饰
+   * =========================================================== */
+
+  /* 机加工角（.bevel::before/::after 的四个小三角） */
+  .bevel {
+    &::before,
+    &::after {
+      display: none;
+    }
+  }
+  /* 拉丝纹理 */
+  .brushed { background-image: none; }
+  /* 凹陷金属槽 → 浅灰填充块 */
+  .metal-sunken {
+    background: var(--saas-fill);
+    box-shadow: none;
+  }
+  /* 侧栏顶部细线高光 */
+  .app-aside::after { display: none; }
+
+  /* —— 面板卡片：平面白卡 + 1px 浅边 + 轻阴影 —— */
+  .panel,
+  .metal-card {
+    background: var(--panel);
+    border: 1px solid var(--saas-line);
+    border-radius: var(--r);
+    box-shadow: var(--saas-shadow-card);
+  }
+  .metal-card::before { display: none; }
+
+  /* —— 区块标题：小色标 + 中文标题（替代等宽大写工业风） —— */
+  .metal-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-family: inherit;
+    font-size: 14px;
+    font-weight: 600;
+    letter-spacing: 0;
+    text-transform: none;
+    color: var(--text-1);
+    padding-left: 0;
+    border-left: 0;
+    margin-bottom: 16px;
+
+    strong {
+      flex: none;
+      order: -1;
+      font-family: inherit;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--steel);
+      background: var(--saas-fill-blue);
+      padding: 2px 7px;
+      border-radius: 5px;
+      margin-right: 0;
+    }
+    /* 标题右侧小角标（如「超 7 天 N 个」） */
+    .tag,
+    .age-badge {
+      font-family: inherit;
+      border: 0;
+      border-radius: 5px;
+      background: var(--saas-fill);
+      color: var(--text-2);
+      letter-spacing: 0;
+      padding: 1px 7px;
+    }
+  }
+
+  /* 折叠箭头：去掉描边框，改纯色 chevron */
+  .collapsible-title::after {
+    border: 0;
+    color: var(--text-4);
+    font-size: 12px;
+  }
+
+  /* ===========================================================
+   *  二、布局：侧栏 / 顶栏 / 页签栏 → 白色平面 + 细分隔线
+   * =========================================================== */
+
+  .app-aside {
+    background: #ffffff;
+    border-right: 1px solid var(--saas-line);
+    box-shadow: none;
+  }
+  .app-header {
+    background: #ffffff;
+    border-bottom: 1px solid var(--saas-line);
+    box-shadow: none;
+  }
+  .logo { box-shadow: none; }
+  .page-title {
+    font-family: inherit;
+    font-size: 16px;
+    font-weight: 600;
+    letter-spacing: 0;
+    text-transform: none;
+    color: var(--text-1);
+  }
+  .user-info { background: var(--saas-fill); }
+  .theme-toggle:hover { background: var(--saas-fill); color: var(--text-1); }
+  .login-theme-toggle:hover { background: var(--saas-fill); }
+  .m-theme-btn:active { background: var(--saas-fill); }
+
+  /* 侧栏菜单：选中 = 浅蓝药丸（去掉左侧 LED 与金属渐变） */
+  .app-menu {
+    .el-menu-item,
+    .el-sub-menu__title {
+      border-radius: 8px;
+      color: var(--text-2);
+    }
+    .el-menu-item:hover,
+    .el-sub-menu__title:hover {
+      background: var(--saas-fill) !important;
+      color: var(--text-1);
+    }
+    .el-menu-item.is-active {
+      background: var(--saas-fill-blue) !important;
+      color: var(--steel) !important;
+      border-left: 0;
+      box-shadow: none;
+      font-weight: 600;
+      &::before { display: none; }
+    }
+    &::-webkit-scrollbar-thumb { background: var(--saas-line); }
+  }
+
+  /* 页签栏（TabsBar，原为硬编码深色） */
+  .tabs-bar {
+    background: #ffffff;
+    border-bottom: 1px solid var(--saas-line);
+    box-shadow: none;
+
+    .scroll-btn:hover:not(:disabled) { background: var(--saas-fill); }
+    .tab {
+      background: transparent;
+      border-color: transparent;
+      border-radius: 8px;
+      box-shadow: none;
+      color: var(--text-2);
+
+      &:hover {
+        background: var(--saas-fill);
+        border-color: transparent;
+      }
+      &.active {
+        background: var(--saas-fill-blue);
+        border-color: transparent;
+        box-shadow: none;
+        color: var(--steel);
+        font-weight: 600;
+      }
+      .close:hover { background: rgba(16, 24, 40, 0.06); }
+    }
+    .ctx-menu { box-shadow: var(--saas-shadow-pop); }
+  }
+
+  /* ===========================================================
+   *  三、Element Plus 商用化（覆盖 tech.scss 的深色 !important）
+   * =========================================================== */
+
+  /* —— 卡片 —— */
+  .el-card {
+    border: 1px solid var(--saas-line);
+    border-radius: 12px;
+    box-shadow: var(--saas-shadow-card) !important;
+    > .el-card__header {
+      background: #fff !important;
+      border-bottom: 1px solid var(--saas-line-soft) !important;
+      font-weight: 600;
+    }
+  }
+
+  /* —— 表格：浅灰表头 + 只留横向分隔线 —— */
+  .el-table {
+    --el-table-row-hover-bg-color: var(--saas-fill);
+    --el-table-border-color: var(--saas-line-soft);
+    --el-table-border: 1px solid var(--saas-line-soft);
+    --el-table-header-bg-color: #f9fafb;
+    --el-table-header-text-color: var(--text-2);
+    --el-table-text-color: var(--text-1);
+    --el-table-current-row-bg-color: var(--saas-fill-blue);
+
+    border-radius: 10px;
+    overflow: hidden;
+
+    th.el-table__cell {
+      background: #f9fafb !important;
+      background-color: #f9fafb !important;
+      border-bottom: 1px solid var(--saas-line) !important;
+      font-weight: 600;
+      font-size: 12.5px;
+      color: var(--text-2) !important;
+    }
+    td.el-table__cell {
+      border-bottom: 1px solid var(--saas-line-soft) !important;
+    }
+    .el-table__row:hover > td,
+    .el-table__body tr:hover > td,
+    .el-table--enable-row-hover .el-table__row:hover > td {
+      background: var(--saas-fill) !important;
+      background-color: var(--saas-fill) !important;
+    }
+    /* fixed 列 hover 必须用不透明色，否则横向滚动会透视下层内容盖住操作按钮 */
+    .el-table__body tr.el-table__row:hover td.el-table-fixed-column--right,
+    .el-table__body tr.el-table__row:hover td.el-table-fixed-column--left,
+    .el-table__fixed-right .el-table__row:hover > td,
+    .el-table__fixed-left .el-table__row:hover > td {
+      background: #f2f4f7 !important;
+      background-color: #f2f4f7 !important;
+    }
+  }
+  .el-table--striped .el-table__body tr.el-table__row--striped td {
+    background: #fafbfc !important;
+  }
+  .el-table--border::after,
+  .el-table--border::before,
+  .el-table__inner-wrapper::before {
+    background-color: var(--saas-line-soft) !important;
+  }
+  .el-table__loading-mask { background-color: rgba(255, 255, 255, 0.72) !important; }
+
+  /* —— 按钮：主色实心 / 次级白底描边（去掉渐变） —— */
+  .el-button {
+    border-radius: 8px;
+    font-weight: 500;
+    border: 1px solid var(--saas-input-line) !important;
+    background: #ffffff !important;
+    color: var(--text-1) !important;
+    box-shadow: 0 1px 2px rgba(16, 24, 40, 0.05) !important;
+
+    &:hover {
+      background: #f9fafb !important;
+      border-color: var(--saas-input-line) !important;
+      color: var(--text-1) !important;
+    }
+    &:active,
+    &.is-active {
+      background: var(--saas-fill) !important;
+      color: var(--text-1) !important;
+      box-shadow: none !important;
+    }
+    &.is-disabled,
+    &.is-disabled:hover {
+      background: #f9fafb !important;
+      color: var(--text-4) !important;
+      border-color: var(--saas-line) !important;
+    }
+  }
+  .el-button--primary {
+    background: var(--steel) !important;
+    border-color: var(--steel) !important;
+    color: #fff !important;
+    box-shadow: 0 1px 2px rgba(16, 24, 40, 0.08) !important;
+  }
+  .el-button--primary:hover {
+    background: var(--steel-dim) !important;
+    border-color: var(--steel-dim) !important;
+    color: #fff !important;
+  }
+  .el-button--success {
+    background: var(--ok) !important;
+    border-color: var(--ok) !important;
+    color: #fff !important;
+  }
+  .el-button--success:hover {
+    background: #0f9d5a !important;
+    border-color: #0f9d5a !important;
+    color: #fff !important;
+  }
+  .el-button--warning {
+    background: var(--warn) !important;
+    border-color: var(--warn) !important;
+    color: #fff !important;
+  }
+  .el-button--warning:hover {
+    background: #dc6803 !important;
+    border-color: #dc6803 !important;
+    color: #fff !important;
+  }
+  .el-button--danger {
+    background: var(--err) !important;
+    border-color: var(--err) !important;
+    color: #fff !important;
+  }
+  .el-button--danger:hover {
+    background: #d92d20 !important;
+    border-color: #d92d20 !important;
+    color: #fff !important;
+  }
+  /* 朴素按钮：浅色底 + 同色文字（无边框） */
+  .el-button.is-plain {
+    background: #fff !important;
+    color: var(--text-1) !important;
+  }
+  .el-button--primary.is-plain {
+    background: var(--saas-fill-blue) !important;
+    border-color: #cddafe !important;
+    color: var(--steel) !important;
+  }
+  .el-button--primary.is-plain:hover {
+    background: #e0e9ff !important;
+    color: var(--steel-dim) !important;
+  }
+  .el-button--danger.is-plain {
+    background: #fef3f2 !important;
+    border-color: #fecdca !important;
+    color: #b42318 !important;
+  }
+  /* 文字 / link 按钮：去掉按钮底，仅留品牌蓝文字 */
+  .el-button.is-link,
+  .el-button.is-text,
+  .el-button--text {
+    background: transparent !important;
+    border: 0 !important;
+    box-shadow: none !important;
+    color: var(--steel) !important;
+  }
+  .el-button.is-link:hover,
+  .el-button.is-text:hover,
+  .el-button--text:hover {
+    color: var(--steel-dim) !important;
+    background: transparent !important;
+  }
+  /* link/text 按钮保留语义色（表格里的「删除」「启用」等不能一律变蓝） */
+  .el-button--danger.is-link,
+  .el-button--danger.is-text,
+  .el-button--danger.el-button--text { color: var(--err) !important; }
+  .el-button--danger.is-link:hover,
+  .el-button--danger.is-text:hover { color: #b42318 !important; }
+  .el-button--success.is-link,
+  .el-button--success.is-text,
+  .el-button--success.el-button--text { color: #0f9d5a !important; }
+  .el-button--warning.is-link,
+  .el-button--warning.is-text,
+  .el-button--warning.el-button--text { color: #dc6803 !important; }
+  .el-button--info.is-link,
+  .el-button--info.is-text,
+  .el-button--info.el-button--text { color: var(--text-2) !important; }
+
+  /* —— 表单控件：白底 + 浅描边 + 聚焦光圈 —— */
+  .el-input__wrapper,
+  .el-textarea__inner,
+  .el-select__wrapper {
+    background: #ffffff !important;
+    border-radius: 8px;
+    box-shadow: 0 0 0 1px var(--saas-input-line) inset !important;
+  }
+  .el-input__wrapper:hover,
+  .el-select__wrapper:hover,
+  .el-textarea__inner:hover {
+    box-shadow: 0 0 0 1px var(--text-3) inset !important;
+  }
+  .el-input__wrapper.is-focus,
+  .el-select__wrapper.is-focused,
+  .el-textarea__inner:focus {
+    box-shadow: 0 0 0 1px var(--steel) inset, var(--saas-ring) !important;
+  }
+  .el-input__inner,
+  .el-textarea__inner { color: var(--text-1); }
+  .el-input__inner::placeholder,
+  .el-textarea__inner::placeholder { color: var(--text-4); }
+  .el-form-item__label { color: var(--text-2); font-weight: 500; }
+
+  /* 下拉 / 日期 / 时间浮层：白底 + 轻阴影 + 圆角 */
+  .el-select-dropdown,
+  .el-date-picker,
+  .el-time-panel,
+  .el-time-select,
+  .el-picker-panel,
+  .el-dropdown-menu,
+  .el-menu--popup {
+    background: #ffffff !important;
+    border: 1px solid var(--saas-line) !important;
+    border-radius: 10px !important;
+    box-shadow: var(--saas-shadow-pop) !important;
+  }
+  .el-select-dropdown__item.is-selected,
+  .el-dropdown-menu__item:not(.is-disabled):focus {
+    background: var(--saas-fill-blue) !important;
+    color: var(--steel) !important;
+    font-weight: 600;
+  }
+  .el-select-dropdown__item.is-hovering,
+  .el-dropdown-menu__item:not(.is-disabled):hover {
+    background: var(--saas-fill) !important;
+  }
+  .el-select__tags-text,
+  .el-tag { border-radius: 6px; }
+
+  /* —— 弹窗 / 抽屉 / 确认框 —— */
+  .el-dialog,
+  .el-drawer,
+  .el-message-box {
+    background: #ffffff !important;
+    border: 0 !important;
+    border-radius: 14px !important;
+    box-shadow: var(--saas-shadow-dialog) !important;
+  }
+  .el-drawer { border-radius: 0 !important; }
+  .el-dialog__header,
+  .el-drawer__header {
+    border-bottom: 1px solid var(--saas-line-soft) !important;
+    font-weight: 600;
+    color: var(--text-1);
+  }
+  .el-dialog__footer { border-top: 1px solid var(--saas-line-soft) !important; }
+  .el-overlay { background-color: rgba(16, 24, 40, 0.45) !important; }
+  .el-dialog__body,
+  .el-drawer__body { background: #ffffff !important; }
+  .el-dialog__body .el-card,
+  .el-drawer__body .el-card { background: #ffffff !important; }
+
+  /* —— Tooltip / Popover —— */
+  .el-popper.is-light,
+  .el-popper,
+  .el-popover.el-popper,
+  .el-popover {
+    border: 1px solid var(--saas-line) !important;
+    border-radius: 10px !important;
+    box-shadow: var(--saas-shadow-pop) !important;
+  }
+  .el-tooltip__popper.is-dark {
+    background: #ffffff !important;
+    color: var(--text-1) !important;
+    border: 1px solid var(--saas-line) !important;
+    box-shadow: var(--saas-shadow-pop) !important;
+    .el-popper__arrow::before {
+      background: #ffffff !important;
+      border-color: var(--saas-line) !important;
+    }
+  }
+  .el-popper.is-light .el-popper__arrow::before {
+    background: #ffffff !important;
+    border-color: var(--saas-line) !important;
+  }
+
+  /* —— 分页：扁平化，当前页实心蓝 —— */
+  .el-pagination {
+    font-weight: 500;
+    .btn-prev,
+    .btn-next,
+    .el-pager li {
+      background: transparent !important;
+      border: 1px solid transparent !important;
+      border-radius: 8px;
+      color: var(--text-2) !important;
+      min-width: 30px;
+      &:hover { background: var(--saas-fill) !important; }
+    }
+    .el-pager li.is-active {
+      background: var(--steel) !important;
+      border-color: var(--steel) !important;
+      color: #fff !important;
+      font-weight: 600;
+    }
+    .btn-prev:disabled,
+    .btn-next:disabled,
+    .el-pager li.is-disabled,
+    .el-pager li:disabled { color: var(--text-4) !important; }
+  }
+
+  /* —— 上传 / 加载 —— */
+  .el-upload,
+  .el-upload-dragger,
+  .el-upload-list__item {
+    background: #ffffff !important;
+    border-radius: 10px;
+  }
+  .el-upload-dragger {
+    border: 1px dashed var(--saas-input-line) !important;
+    &:hover { border-color: var(--steel) !important; }
+  }
+  .el-loading-mask { background-color: rgba(255, 255, 255, 0.72) !important; }
+
+  /* —— 图片查看器 / 轮播 —— */
+  .el-image-viewer__canvas,
+  .el-image-viewer__mask,
+  .el-image-viewer__wrapper { background: rgba(16, 24, 40, 0.7) !important; }
+  .el-carousel__button,
+  .el-carousel__arrow { background: rgba(16, 24, 40, 0.5) !important; }
+
+  /* —— 水印 / 勾选控件 —— */
+  .el-watermark { color: rgba(16, 24, 40, 0.05) !important; }
+  .el-checkbox__inner,
+  .el-radio__inner { background: #ffffff !important; border-radius: 4px; }
+  .el-checkbox__inner:hover { border-color: var(--steel) !important; }
+
+  /* —— 描述列表（详情抽屉） —— */
+  .el-descriptions {
+    --el-descriptions-item-bordered-label-background: #f9fafb;
+    .el-descriptions__label { color: var(--text-2) !important; font-weight: 500; }
+    .el-descriptions__content { color: var(--text-1) !important; }
+  }
+
+  /* ===========================================================
+   *  四、页面通用小块（原为深色硬编码）
+   * =========================================================== */
+
+  /* 统计卡（仪表盘 / 各模块概览）：浅灰底平面卡 */
+  .stat-card {
+    background: #f9fafb;
+    border: 1px solid var(--saas-line);
+    border-radius: 10px;
+    box-shadow: none;
+  }
+  .stat-tag { background: var(--saas-fill); }
+  .tick { background: var(--saas-line); }
+  .tips li { border-bottom: 1px dashed var(--saas-line); }
+  .tips code {
+    background: var(--saas-fill);
+    color: var(--text-1);
+  }
+  .drop-mask {
+    background: rgba(247, 248, 250, 0.85);
+    backdrop-filter: blur(2px);
+  }
+  .drop-box {
+    background: var(--saas-fill-blue);
+    color: var(--steel);
+  }
+
+  /* 文件存储页 */
+  .crumbs,
+  .up-list,
+  .sort-bar {
+    background: var(--saas-fill);
+    border-color: var(--saas-line);
+  }
+  .file-card {
+    background: #ffffff;
+    border-color: var(--saas-line);
+    border-radius: 10px;
+    box-shadow: var(--saas-shadow-card);
+    &:hover {
+      background: #ffffff;
+      border-color: var(--steel);
+    }
+    &.selected {
+      background: var(--saas-fill-blue);
+      border-color: var(--steel);
+    }
+    &.drop-target {
+      background: var(--saas-fill-blue);
+      border-color: var(--steel);
+    }
+  }
+  .preview-text,
+  .preview-xlsx-wrap {
+    background: var(--saas-fill);
+    border-color: var(--saas-line);
+  }
+  .preview-xlsx-table td {
+    background: #ffffff;
+    border-color: var(--saas-line);
+  }
+  .icon-picker-pop { box-shadow: var(--saas-shadow-pop) !important; }
+
+  /* ===========================================================
+   *  五、角色授权页（sys_role/add）
+   * =========================================================== */
+  .title {
+    color: var(--text-3);
+    strong { color: var(--text-1); }
+  }
+  .perm-group {
+    border-color: var(--saas-line);
+    background: #ffffff;
+    border-radius: 10px;
+  }
+  .group-name { color: var(--text-1); }
+  .group-count { color: var(--text-3); }
+  .perm-item {
+    border-color: var(--saas-line-soft);
+    background: #f9fafb;
+    border-radius: 8px;
+  }
+  .item-name { color: var(--text-1); }
+  .item-code { color: var(--text-3); }
+  .item-actions .el-checkbox__label { color: var(--text-2); }
+
+  /* ===========================================================
+   *  六、登录页：浅底 + 白卡 + 大圆角
+   * =========================================================== */
+  .login-page {
+    background: linear-gradient(180deg, #f7f8fa 0%, #eef2f7 100%);
+  }
+  .login-box {
+    background: #ffffff;
+    border: 1px solid var(--saas-line);
+    border-radius: 16px;
+    box-shadow: var(--saas-shadow-dialog);
+  }
+
+  /* ===========================================================
+   *  七、移动端（覆盖 mobile.scss 硬编码深色）
+   * =========================================================== */
+  .mobile-header {
+    background: #ffffff;
+    box-shadow: none;
+    border-bottom: 1px solid var(--saas-line);
+    .m-back-btn:active { background: var(--saas-fill); }
+    .m-avatar-btn { background: var(--saas-fill); }
+  }
+  .mobile-tabbar {
+    background: #ffffff;
+    box-shadow: none;
+    border-top: 1px solid var(--saas-line);
+    .m-tab-item:active { background: var(--saas-fill); }
+  }
+  .m-drawer-mask { background: rgba(16, 24, 40, 0.45); }
+  .m-drawer {
+    background: #ffffff;
+    box-shadow: 4px 0 24px rgba(16, 24, 40, 0.12);
+    .m-menu-item {
+      border-radius: 8px;
+      &:active { background: var(--saas-fill); }
+      &.active {
+        background: var(--saas-fill-blue);
+        color: var(--steel);
+      }
+    }
+  }
+  .m-data-card {
+    background: #ffffff;
+    border: 1px solid var(--saas-line);
+    border-radius: 10px;
+    box-shadow: var(--saas-shadow-card);
+    .m-card-actions {
+      border-top: 1px solid var(--saas-line-soft);
+    }
+  }
+}

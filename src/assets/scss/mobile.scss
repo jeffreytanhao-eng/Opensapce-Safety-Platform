@@ -1,0 +1,975 @@
+/* ===========================================================
+ *  开源太空安全 · 移动端全局优化样式
+ *  仅在 isMobile 时生效（html.is-mobile 类）
+ *  涵盖：触摸区域、输入防缩放、滚动、弹窗、表格横向滚动、栅格适配
+ * ============================================================ */
+
+/* —— 移动端根元数据 —— */
+html.is-mobile {
+  /* 移动端布局高度（顶栏/底栏），供弹窗避让偏移使用，与 MobileLayout 的 mobile.scss 保持一致 */
+  --m-header-h: 48px;
+  --m-tabbar-h: calc(56px + env(safe-area-inset-bottom, 0px));
+
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  -webkit-tap-highlight-color: transparent;
+  overflow: hidden;
+  touch-action: manipulation;
+
+  body {
+    overflow: hidden;
+    touch-action: manipulation;
+    user-select: none;
+    -webkit-user-select: none;
+    font-size: 13px;
+  }
+
+  /* 输入框允许选择，防止iOS缩放 */
+  .el-input__inner,
+  .el-textarea__inner,
+  input,
+  textarea {
+    user-select: text;
+    -webkit-user-select: text;
+    font-size: 16px !important;
+  }
+
+  /* —— 内容区padding统一 —— */
+  .mobile-main,
+  .el-main {
+    padding: 12px !important;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
+    overflow-x: hidden;
+  }
+
+  /* —— 页面内容基础字体 —— */
+  .module-page,
+  .panel,
+  .el-card {
+    font-size: 13px !important;
+  }
+  .panel {
+    padding: 14px 12px !important;
+  }
+
+  /* ========================================
+   *  栅格系统 el-row / el-col 移动端适配
+   *  核心：所有列全宽堆叠，row-gap 处理行内间距，margin 处理 row 间距
+   *  注意：不用 !important，让页面 scoped 能覆盖（如 dashboard 一行2个）
+   * ======================================== */
+  .el-row {
+    flex-wrap: wrap;
+    margin-left: 0;
+    margin-right: 0;
+    margin-bottom: 12px;
+    row-gap: 12px;
+
+    &:last-child {
+      margin-bottom: 0;
+    }
+
+    > [class*="el-col-"] {
+      max-width: 100%;
+      flex: 0 0 100%;
+      padding-left: 0;
+      padding-right: 0;
+    }
+  }
+
+  /* ========================================
+   *  表格：卡片形式（移动端核心）
+   *  未处理的表格保持横向滚动；JS添加data-card-ready后变为卡片
+   * ======================================== */
+  .el-table {
+    font-size: 13px !important;
+  }
+
+  /* —— 未处理时：横向滚动兜底 —— */
+  .el-table:not([data-card-ready]) {
+    .el-table__inner-wrapper,
+    .el-table__body-wrapper,
+    .el-table__header-wrapper {
+      overflow-x: auto !important;
+      -webkit-overflow-scrolling: touch;
+    }
+    .el-table .cell {
+      padding-left: 8px !important;
+      padding-right: 8px !important;
+      white-space: nowrap;
+    }
+  }
+
+  /* —— 卡片模式 —— */
+  .el-table[data-card-ready] {
+    background: transparent !important;
+    border: none !important;
+    /* 根节点 EP 设了 overflow:hidden + max-height，卡片阴影/空状态会被裁切 */
+    overflow: visible !important;
+    height: auto !important;
+    max-height: none !important;
+
+    /* 隐藏表头 / 旧版固定列容器 */
+    .el-table__header-wrapper,
+    .el-table__fixed,
+    .el-table__fixed-right,
+    .el-table__fixed-body-wrapper,
+    .el-table__fixed-header-wrapper,
+    .el-table__fixed-footer-wrapper {
+      display: none !important;
+    }
+
+    /* 干掉 border 表格画在四边的 1px 伪元素线 */
+    &::before,
+    &::after,
+    .el-table__inner-wrapper::before,
+    .el-table__inner-wrapper::after {
+      content: none !important;
+      display: none !important;
+    }
+
+    /* 内包装全宽可见 */
+    .el-table__inner-wrapper,
+    .el-table__body-wrapper {
+      overflow: visible !important;
+      width: 100% !important;
+      height: auto !important;
+    }
+    .el-table__body-wrapper {
+      scrollbar-width: none;
+      &::-webkit-scrollbar { display: none; }
+
+      /* ⚠ EP 表体其实是 el-scrollbar 包着的：
+         .el-scrollbar__wrap{overflow:auto;height:100%} 会把内容裁一半，
+         .el-scrollbar__view{display:inline-block} 会让 width:100% 算错基准宽度。
+         这两条不复位，卡片/空状态就永远「加不到位置上」。 */
+      .el-scrollbar,
+      .el-scrollbar__wrap {
+        overflow: visible !important;
+        width: 100% !important;
+        height: auto !important;
+        max-height: none !important;
+      }
+      .el-scrollbar__view {
+        display: block !important;
+        width: 100% !important;
+        height: auto !important;
+      }
+      .el-scrollbar__bar { display: none !important; }
+
+      table {
+        display: block !important;
+        width: 100% !important;
+        max-width: 100% !important;
+        table-layout: auto !important;
+      }
+    }
+
+    /* 销毁 colgroup 列宽限制，tbody/tr 转块级
+       （展开行 tr 与数据行 tr 平级，也要块化，否则退化成 table-row 错位） */
+    colgroup, col { display: none !important; }
+    .el-table__body-wrapper tbody {
+      display: block !important;
+      width: 100% !important;
+    }
+    .el-table__body-wrapper tbody > tr {
+      display: block !important;
+      width: 100% !important;
+    }
+    /* 每行 = 一张卡片
+       box-sizing 必须是 border-box，否则 width:100% + padding 会溢出面板右侧被裁切 */
+    .el-table__row {
+      display: block !important;
+      box-sizing: border-box !important;
+      width: 100% !important;
+      max-width: 100% !important;
+      /* 卡片底色用 --bg-2（面板内的嵌套卡片色），
+         与 .panel 的渐变底拉开层次，否则卡片和面板同色看不出边界 */
+      background: var(--bg-2, #161c27) !important;
+      border: 1px solid var(--panel-edge, #3d465a) !important;
+      border-radius: 12px !important;
+      /* 卡片之间留足呼吸间距，卡片不挤在一起 */
+      margin: 0 0 16px !important;
+      /* 卡片内部：左右留白，上下收紧（不贴边即可），避免卡片被撑高 */
+      padding: 8px 14px !important;
+      line-height: 1.3 !important;
+      box-shadow:
+        inset 0 1px 0 rgba(255,255,255,0.06),
+        0 3px 12px rgba(0,0,0,0.32) !important;
+      position: relative;
+      overflow: visible !important;
+
+      /* 取消条纹/hover背景 */
+      &:hover > td {
+        background: transparent !important;
+      }
+      td.el-table__cell {
+        background: transparent !important;
+      }
+      /* 斑马纹行也正常 */
+      &.el-table__row--striped {
+        background: var(--bg-2, #161c27) !important;
+      }
+      /* 最后一张卡不再留底部间距，避免与分页之间空一大截 */
+      &:last-child {
+        margin-bottom: 0 !important;
+      }
+    }
+
+    /* 每个 td = 卡片内一行：固定标签列 + 值列
+       ⚠ 用 grid 而不是 flex：标签列宽统一，每行值的起点对齐，才显得精致
+       ⚠ EP 给固定列 td 设了 position:sticky / z-index / border-right，
+         还给固定列 td::before 设了 position:absolute / width:10px / overflow:hidden，
+         卡片模式下必须全部复位，否则标签会跑到卡片角落并被裁切（NORAD 错位问题） */
+    .el-table__row td.el-table__cell {
+      display: grid !important;
+      /* 标签列按内容自适应（用 max-content），而不是写死宽度：
+         写死宽（如 72px）时「类型」这种短标签后面会空出一大截，
+         值和标签离得太远，显得松散不精致；自适应后标签紧贴值 */
+      grid-template-columns: max-content minmax(0, 1fr) !important;
+      align-items: center !important;
+      column-gap: 10px !important;
+      border: none !important;
+      border-bottom: 1px solid rgba(255,255,255,0.05) !important;
+      padding: 4px 0 !important;
+      text-align: left !important;
+      white-space: normal !important;
+      box-sizing: border-box !important;
+      width: 100% !important;
+      max-width: 100% !important;
+      left: auto !important;
+      right: auto !important;
+      position: static !important;
+      z-index: auto !important;
+      border-right: none !important;
+      box-shadow: none !important;
+
+      &:last-child {
+        border-bottom: none !important;
+      }
+      /* 操作列自带顶部分隔线，前一行不再画线，避免出现双线 */
+      &:has(+ td.el-table__cell[data-label="操作"]),
+      &:has(+ td.el-table__cell[data-label="动作"]) {
+        border-bottom: none !important;
+      }
+
+      .cell {
+        grid-column: 2 !important;
+        width: auto !important;
+        max-width: none !important;
+        min-width: 0 !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        overflow: visible !important;
+        white-space: normal !important;
+        word-break: break-word !important;
+        line-height: 1.3 !important;
+        font-size: 13px !important;
+        color: var(--text-1, #e8edf5) !important;
+        text-align: left !important;
+        letter-spacing: 0 !important;
+      }
+      /* show-overflow-tooltip 的单元格 EP 会加 .el-tooltip(nowrap + min-width:50px) */
+      .cell.el-tooltip {
+        white-space: normal !important;
+        min-width: 0 !important;
+      }
+
+      /* 标签来自 data-label 属性 */
+      &::before {
+        content: attr(data-label) !important;
+        grid-column: 1 !important;
+        position: static !important;
+        top: auto !important;
+        bottom: auto !important;
+        left: auto !important;
+        right: auto !important;
+        width: auto !important;
+        height: auto !important;
+        overflow: visible !important;
+        box-shadow: none !important;
+        font-weight: 500;
+        font-size: 12px !important;
+        color: var(--text-3, #9fb3c8);
+        line-height: 1.3 !important;
+        text-align: left;
+        letter-spacing: 0 !important;
+        padding: 0 !important;
+        word-break: break-word;
+      }
+    }
+
+    /* 无标签列（展开图标列 / 无表头的列）：值独占整行，不预留标签列 */
+    .el-table__row td.el-table__cell:not([data-label]) {
+      grid-template-columns: minmax(0, 1fr) !important;
+      &::before {
+        content: none !important;
+      }
+    }
+
+    /* 选择列（checkbox）：一行，checkbox靠右 */
+    .el-table__row td.el-table-column--selection {
+      display: flex !important;
+      padding: 4px 0 !important;
+      justify-content: flex-end !important;
+      &::before {
+        content: none !important;
+      }
+      .cell {
+        flex: 0 0 auto !important;
+        max-width: none !important;
+        display: flex !important;
+        justify-content: flex-end !important;
+      }
+    }
+
+    /* 操作列：与信息区隔开，按钮靠右 */
+    .el-table__row td.el-table__cell[data-label="操作"],
+    .el-table__row td.el-table__cell[data-label="动作"] {
+      display: flex !important;
+      padding: 8px 0 4px !important;
+      margin-top: 4px !important;
+      border-top: 1px solid rgba(255,255,255,0.08) !important;
+      border-bottom: none !important;
+      &::before {
+        content: none !important;
+      }
+      .cell {
+        flex: 1 1 100% !important;
+        max-width: none !important;
+        display: flex !important;
+        justify-content: flex-end !important;
+        gap: 6px !important;
+        flex-wrap: wrap !important;
+        text-align: right !important;
+        .el-button {
+          flex: 0 0 auto !important;
+          margin: 0 !important;
+        }
+      }
+    }
+
+    /* 展开行（与数据行平级的 tr，其 td 带 el-table__expanded-cell）
+       给它和数据卡片一致的外观，否则展开内容会裸贴在面板上 */
+    .el-table__expanded-cell {
+      display: block !important;
+      box-sizing: border-box !important;
+      width: 100% !important;
+      padding: 10px 12px !important;
+      margin: 0 0 10px !important;
+      background: var(--bg-2, #161c27) !important;
+      border: 1px solid var(--panel-edge, #3d465a) !important;
+      border-radius: 8px !important;
+      &::before {
+        content: none !important;
+      }
+    }
+
+    /* 卡片内标签/开关等行内控件收紧，避免把整行撑高 */
+    .el-table__row .el-tag {
+      min-height: 20px !important;
+      line-height: 1.2 !important;
+      padding: 1px 8px !important;
+      font-size: 11.5px !important;
+    }
+  }
+
+  /* 空状态（表格内外通用）
+     ⚠ EP 的 #empty 插槽内容（如 el-empty）是被塞进 span.el-table__empty-text 的，
+        而该 span 默认 width:50% + line-height:60px 且是 inline，会把内容挤扁/截一半，
+        这里必须改成 block + 自适应。
+     ⚠ EP JS 还会给 .el-table__empty-block 写内联像素宽 + height:100%，
+        不压掉就会被方框裁成一半（卡片模式与普通表格都一样）。 */
+  .el-table__empty-block {
+    /* EP 默认是 display:flex + justify-content:center，
+       会把 .el-table__empty-text 当成 flex item 按内容宽度收缩（实测只剩 94px），
+       长文案被挤成一列窄字；这里改回 block，让文字占满整行再居中 */
+    display: block !important;
+    width: 100% !important;
+    height: auto !important;
+    max-width: 100% !important;
+    min-height: 0 !important;
+    position: static !important;
+    padding: 16px 8px !important;
+    box-sizing: border-box !important;
+    overflow: visible !important;
+  }
+  .el-table__empty-text {
+    display: block !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    line-height: 1.6 !important;
+    font-size: 13px !important;
+    padding: 0 !important;
+    letter-spacing: 0 !important;
+    text-align: center !important;
+    color: var(--text-3);
+  }
+  .el-empty {
+    padding: 8px 8px !important;
+    .el-empty__image {
+      width: 72px !important;
+      height: 72px !important;
+    }
+    .el-empty__description {
+      max-width: 100% !important;
+      margin-top: 6px !important;
+      p {
+        margin: 0 !important;
+        font-size: 13px !important;
+        line-height: 1.6 !important;
+        text-align: center !important;
+        color: var(--text-3);
+      }
+    }
+  }
+
+  /* 操作列按钮紧凑 */
+  .el-table .el-button--small {
+    padding: 4px 8px !important;
+    min-height: 30px;
+  }
+
+  /* ========================================
+   *  搜索表单：多列网格（label 在上）
+   *  手机 2 列、平板 3 列，避免一个条件占一整行
+   *  宽控件（日期区间/多选/文本域）与按钮行跨整行
+   * ======================================== */
+  .el-form--inline {
+    display: grid !important;
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    align-items: start !important;
+    column-gap: 10px !important;
+    row-gap: 10px !important;
+
+    .el-form-item {
+      display: block !important;
+      margin: 0 !important;
+      width: 100% !important;
+      min-width: 0 !important;
+    }
+    .el-form-item__label {
+      float: none !important;
+      display: block !important;
+      width: auto !important;
+      text-align: left !important;
+      padding: 0 0 5px 0 !important;
+      font-size: 13px !important;
+      line-height: 1.4 !important;
+    }
+    .el-form-item__content {
+      display: block !important;
+      margin-left: 0 !important;
+      line-height: normal !important;
+      min-width: 0 !important;
+    }
+    .el-input,
+    .el-select,
+    .el-date-editor,
+    .el-input-number {
+      width: 100% !important;
+      max-width: 100% !important;
+    }
+    /* 宽控件跨整行 */
+    .el-form-item:has(.el-date-editor--daterange),
+    .el-form-item:has(.el-date-editor--datetimerange),
+    .el-form-item:has(.el-textarea),
+    .el-form-item:has(.el-checkbox-group),
+    .el-form-item:has(.el-radio-group) {
+      grid-column: 1 / -1 !important;
+    }
+    /* 最后一行按钮跨整行 */
+    .el-form-item:last-child {
+      grid-column: 1 / -1 !important;
+      margin-bottom: 0 !important;
+      .el-form-item__content {
+        display: flex !important;
+        gap: 8px;
+      }
+      .el-button {
+        flex: 1;
+        min-height: 34px;
+      }
+    }
+  }
+  /* 表单内所有固定宽度元素全宽 */
+  .el-form-item .el-input,
+  .el-form-item .el-select,
+  .el-form-item .el-date-editor,
+  .el-form-item .el-input-number {
+    width: 100% !important;
+  }
+
+  /* ========================================
+   *  按钮：增大触摸区域
+   *  所有 button 统一 min-height，避免 toolbar 高低不齐
+   * ======================================== */
+  .el-button {
+    min-height: 34px;
+    box-sizing: border-box;
+    padding: 5px 12px !important;
+    font-size: 13px !important;
+    border-radius: 6px !important;
+    &.el-button--small {
+      min-height: 30px;
+      padding: 4px 9px !important;
+      font-size: 12px !important;
+    }
+    &.el-button--large {
+      min-height: 40px;
+    }
+    /* link/text 按钮也保持同样高度，避免 toolbar 内高低不齐 */
+    &.is-link,
+    &.el-button--text,
+    &.el-button--text.el-button,
+    &.is-text {
+      min-height: 32px;
+      padding: 5px 10px !important;
+      font-size: 13px !important;
+    }
+    &.el-button--small.is-link,
+    &.el-button--small.el-button--text {
+      min-height: 28px;
+      padding: 3px 8px !important;
+      font-size: 12px !important;
+    }
+  }
+  /* 清除 Element Plus 默认 .el-button + .el-button { margin-left: 12px }
+     移动端用 flex gap 统一管理间距，避免首按钮突兀偏移 */
+  .el-button + .el-button {
+    margin-left: 0 !important;
+  }
+
+  /* ========================================
+   *  输入框增大触摸区域
+   * ======================================== */
+  .el-input__wrapper {
+    min-height: 36px;
+    padding: 3px 12px !important;
+    border-radius: 6px !important;
+  }
+  .el-input--small .el-input__wrapper {
+    min-height: 32px;
+  }
+  .el-select__wrapper {
+    min-height: 36px;
+    border-radius: 6px !important;
+  }
+  .el-select--small .el-select__wrapper {
+    min-height: 32px;
+  }
+  .el-textarea__inner {
+    min-height: 90px;
+    font-size: 16px !important;
+    border-radius: 6px !important;
+  }
+  .el-input-number {
+    width: 100% !important;
+  }
+  .el-input-number__decrease,
+  .el-input-number__increase {
+    min-height: 40px !important;
+    width: 40px !important;
+  }
+
+  /* ========================================
+   *  弹窗：接近全屏，避开顶栏/底栏
+   *  顶部从 mobile-header 下方开始、底部到 mobile-tabbar 上方，各留间距
+   * ======================================== */
+  .el-dialog {
+    width: 96% !important;
+    max-width: 96% !important;
+    margin: 0 !important;
+    border-radius: 10px !important;
+    max-height: calc(100dvh - var(--m-header-h) - var(--m-tabbar-h) - 20px) !important;
+    display: flex !important;
+    flex-direction: column;
+    position: fixed !important;
+    top: calc(var(--m-header-h) + 10px) !important;
+    bottom: calc(var(--m-tabbar-h) + 10px) !important;
+    left: 2% !important;
+    right: 2% !important;
+  }
+
+  /* 版本更新弹窗：内容只有几行版本信息，不应套用上面的「接近全屏」策略。
+     解除 top/bottom 同时固定造成的纵向拉伸，改为按内容自适应 + 屏幕居中。 */
+  .el-dialog.app-update-dialog {
+    width: 78% !important;
+    max-width: 360px !important;
+    height: auto !important;
+    max-height: 70vh !important;
+    top: 50% !important;
+    bottom: auto !important;
+    left: 50% !important;
+    right: auto !important;
+    transform: translate(-50%, -50%) !important;
+  }
+  .el-dialog__header {
+    padding: 14px 16px !important;
+    flex-shrink: 0;
+    border-bottom: 1px solid var(--panel-edge);
+  }
+  .el-dialog__title {
+    font-size: 16px !important;
+  }
+  .el-dialog__body {
+    flex: 1;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    padding: 16px !important;
+  }
+  .el-dialog__footer {
+    flex-shrink: 0;
+    padding: 12px 16px !important;
+    display: flex;
+    gap: 10px;
+    border-top: 1px solid var(--panel-edge);
+    .el-button { flex: 1; min-height: 44px; font-size: 15px !important; }
+  }
+
+  /* MessageBox 确认框（居中，超高时限制高度避免被顶栏/底栏遮挡） */
+  .el-message-box {
+    width: 88% !important;
+    max-width: 88% !important;
+    border-radius: 10px !important;
+    max-height: calc(100dvh - var(--m-header-h) - var(--m-tabbar-h) - 20px) !important;
+    display: flex;
+    flex-direction: column;
+  }
+  .el-message-box__title {
+    font-size: 16px !important;
+  }
+  .el-message-box__message {
+    font-size: 15px !important;
+    padding: 10px 0 !important;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  .el-message-box__btns {
+    display: flex !important;
+    gap: 10px;
+    padding-top: 10px !important;
+    flex-shrink: 0;
+    .el-button { flex: 1; min-height: 42px; font-size: 15px !important; }
+  }
+
+  /* Drawer 抽屉全宽，避开顶栏/底栏 */
+  .el-drawer {
+    width: 88% !important;
+    max-width: 100% !important;
+    top: var(--m-header-h) !important;
+    max-height: calc(100dvh - var(--m-header-h) - var(--m-tabbar-h) - 12px) !important;
+  }
+  .el-drawer__body {
+    padding: 12px !important;
+  }
+
+  /* ========================================
+   *  分页：简化，居中
+   * ======================================== */
+  .el-pagination {
+    justify-content: center !important;
+    flex-wrap: wrap;
+    padding: 10px 0 !important;
+    .el-pagination__sizes,
+    .el-pagination__jump {
+      display: none !important;
+    }
+    .el-pager li,
+    .btn-prev,
+    .btn-next {
+      min-width: 36px !important;
+      min-height: 36px !important;
+      line-height: 36px !important;
+      font-size: 14px !important;
+    }
+    .el-pagination__total {
+      width: 100%;
+      text-align: center;
+      margin-bottom: 8px;
+      font-size: 13px !important;
+    }
+  }
+
+  /* ========================================
+   *  工具栏/按钮组：移动端自适应换行
+   *  - 用 flex + wrap，按钮/标签/文本按内容宽度，不被强行拉伸到半屏
+   *    （旧的 2 列 grid 会把「共 N 条」标签和后面的说明文字各塞一格 → 错位）
+   *  - 输入/日期等宽控件占满整行
+   * ======================================== */
+  .list-toolbar,
+  .toolbar,
+  .page-header {
+    display: flex !important;
+    flex-wrap: wrap !important;
+    gap: 8px !important;
+    margin-bottom: 12px !important;
+    align-items: center !important;
+
+    > * {
+      margin: 0 !important;
+      box-sizing: border-box !important;
+      max-width: 100% !important;
+    }
+    /* 宽控件跨整行 */
+    .el-alert,
+    .el-input,
+    .el-input-group,
+    .el-select,
+    .el-date-editor {
+      flex: 1 1 100% !important;
+    }
+    /* 按钮/标签/纯文本保持内容宽度 */
+    > .el-button,
+    > .el-tag,
+    > .el-dropdown,
+    > .muted,
+    > span {
+      flex: 0 0 auto !important;
+      width: auto !important;
+    }
+  }
+  /* 表格上方操作按钮：保持 flex wrap */
+  .el-card-header,
+  .panel-header {
+    flex-wrap: wrap !important;
+    align-items: center !important;
+    gap: 8px !important;
+  }
+
+  /* ========================================
+   *  标签/卡片/面板基础适配
+   * ======================================== */
+  .el-tag {
+    min-height: 24px;
+    line-height: 1.4;
+    padding: 3px 10px !important;
+    font-size: 12px !important;
+    border-radius: 4px !important;
+  }
+  .el-card__body {
+    padding: 14px !important;
+  }
+  .panel,
+  .metal-card {
+    padding: 14px !important;
+    border-radius: 10px !important;
+  }
+  /* 金属面板装饰角在移动端隐藏，避免边角挤压 */
+  .bevel::before,
+  .bevel::after {
+    display: none !important;
+  }
+  .metal-title {
+    letter-spacing: 1px !important;
+    font-size: 14px !important;
+    margin-bottom: 12px !important;
+    padding-left: 10px !important;
+    .tag {
+      font-size: 11px !important;
+      margin-left: 8px !important;
+      padding: 1px 6px !important;
+    }
+  }
+
+  /* 下拉菜单项增大 */
+  .el-select-dropdown__item {
+    min-height: 44px;
+    line-height: 44px;
+    font-size: 15px !important;
+    padding: 0 16px !important;
+  }
+  .el-dropdown-menu__item {
+    min-height: 44px;
+    line-height: 44px;
+    font-size: 15px !important;
+    padding: 0 16px !important;
+  }
+
+  /* 描述列表 */
+  .el-descriptions {
+    font-size: 14px !important;
+    .el-descriptions__label {
+      font-size: 13px !important;
+      min-width: 90px !important;
+      width: 90px !important;
+    }
+    .el-descriptions__content {
+      font-size: 14px !important;
+    }
+  }
+  .el-descriptions-item__label {
+    font-weight: 600 !important;
+  }
+
+  /* 日期选择器 */
+  .el-date-editor {
+    width: 100% !important;
+  }
+
+  /* Tabs标签页 */
+  .el-tabs__nav-wrap::after {
+    height: 1px;
+  }
+  .el-tabs__item {
+    padding: 0 16px !important;
+    font-size: 14px !important;
+    height: 44px;
+    line-height: 44px;
+  }
+  .el-tabs__content {
+    padding-top: 12px !important;
+  }
+
+  /* 消息提示居中 */
+  .el-message {
+    max-width: 90% !important;
+    top: 60px !important;
+    font-size: 14px !important;
+  }
+
+  /* Switch开关增大 */
+  .el-switch {
+    --el-switch-height: 28px;
+    --el-switch-core-width: 50px;
+  }
+
+  /* Checkbox/Radio 增大点击区域 */
+  .el-checkbox,
+  .el-radio {
+    min-height: 32px;
+    line-height: 32px;
+    margin-right: 16px !important;
+    .el-checkbox__label,
+    .el-radio__label {
+      font-size: 14px !important;
+      padding-left: 8px !important;
+    }
+  }
+  .el-checkbox__inner,
+  .el-radio__inner {
+    width: 18px !important;
+    height: 18px !important;
+  }
+
+  /* 隐藏PC端专用元素 */
+  .pc-only { display: none !important; }
+  .mobile-only { display: block !important; }
+
+  /* 弹窗内表单全宽 */
+  .el-dialog__body .el-form-item {
+    margin-bottom: 16px !important;
+    .el-form-item__label {
+      font-size: 14px !important;
+      line-height: 1.5 !important;
+      padding-bottom: 5px !important;
+    }
+    .el-form-item__content {
+      margin-left: 0 !important;
+      line-height: 1.5 !important;
+      .el-input,
+      .el-select,
+      .el-date-editor,
+      .el-input-number {
+        width: 100% !important;
+      }
+    }
+  }
+
+  /* 进度条 */
+  .el-progress {
+    .el-progress__text {
+      font-size: 13px !important;
+    }
+  }
+
+  /* 统计数字发光效果减弱 */
+  .glow-num {
+    text-shadow: 0 0 8px currentColor !important;
+  }
+
+  /* ========================================
+   *  标准CRUD页面 .module-page 通用适配
+   * ======================================== */
+  .module-page {
+    gap: 10px !important;
+  }
+  .module-page > .panel,
+  .module-page > .metal-card {
+    padding: 12px 10px !important;
+    border-radius: 10px !important;
+  }
+  .module-page .toolbar {
+    margin-bottom: 10px !important;
+    gap: 8px !important;
+    flex-wrap: wrap !important;
+  }
+  .module-page .pagination {
+    margin-top: 12px !important;
+    justify-content: center !important;
+  }
+  /* 有alert提示的toolbar垂直排列 */
+  .module-page .toolbar:has(.el-alert) {
+    flex-direction: column !important;
+    align-items: stretch !important;
+    .el-alert {
+      margin: 0 !important;
+      padding: 8px 10px !important;
+      .el-alert__content { font-size: 12px !important; }
+    }
+  }
+
+  /* ========================================
+   *  平板（宽度 ≥ 768px 且判为移动端）
+   *  横向空间充足，横向铺开而不是拉长
+   * ======================================== */
+  @media (min-width: 768px) {
+    /* 检索条件 3 列 */
+    .el-form--inline {
+      grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+    }
+    /* 卡片式表格：一张卡不再占满整屏，两列排布 */
+    .el-table[data-card-ready] .el-table__body-wrapper tbody {
+      display: grid !important;
+      grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+      gap: 16px !important;
+      align-content: start !important;
+    }
+    .el-table[data-card-ready] .el-table__row {
+      margin-bottom: 0 !important;
+      height: auto !important;
+    }
+    /* 展开行是独立的 tr，必须跨整行，否则会占掉网格其中一格 */
+    .el-table[data-card-ready] .el-table__body-wrapper tbody > tr:not(.el-table__row) {
+      grid-column: 1 / -1 !important;
+    }
+  }
+}
+
+/* 非移动端隐藏 mobile-only */
+html:not(.is-mobile) {
+  .mobile-only { display: none !important; }
+}
+
+/* —— 移动端下拉刷新指示器 —— */
+.m-pull-indicator {
+  position: absolute;
+  top: 0;
+  left: 0; right: 0;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-3);
+  font-size: 13px;
+  gap: 6px;
+  transform: translateY(-40px);
+  transition: transform .15s;
+  .el-icon { font-size: 16px; }
+  &.spinning .el-icon { animation: m-spin 0.8s linear infinite; }
+  &.ready .el-icon { transform: rotate(180deg); }
+}
+@keyframes m-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}

@@ -1,0 +1,32 @@
+# 前端镜像构建忽略清单（构建上下文 = 仓库根目录）
+
+# 依赖与构建产物
+node_modules
+**/node_modules
+dist
+**/dist
+*.tsbuildinfo
+
+# 版本库 / 编辑器 / 日志
+.git
+.gitignore
+.idea
+.vscode
+*.log
+logs
+
+# 移动端（APK）工程，与服务器部署无关
+android
+
+# CI / 规则 / 文档
+.github
+.trae
+MANUAL.md
+
+# 后端源码不在前端镜像中使用（后端单独构建，见 server/Dockerfile）
+server
+
+# 配置文件不进前端镜像（唯一配置源为仓库根 .env，凭据严禁进镜像 / 构建上下文）
+.env
+.env.*
+deploy/*.env

@@ -1,0 +1,719 @@
+/**
+ * 区域过境 / 多区域过境 两个面板**共用的一份样式**（rg- 前缀）
+ *
+ * 为什么单独成文件：两个面板在视觉上必须是同一套风格（用户明确要求「不能开发出两种风格」）。
+ * 此前多区域面板另写了一套 mr-* 类，按钮、进度块、结果卡片、日志框全都不一样，改一处漏一处。
+ * 现在两边都 `@use './region-shared.scss'`（在各自的 <style scoped> 里），类名与取值只有这一处来源：
+ *   RegionSection.vue   —— 区域过境面板内容区（含框选 / 区域库选择）
+ *   MultiRegionPanel.vue —— 多区域过境面板（除「多区域列表」与「区域库/组合选择」两块外，结构与之对齐）
+ *
+ * 面板整体 pointer-events:none（空白区域穿透拾取），所以内容区必须显式恢复 auto。
+ */
+
+.rg-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 0 4px;
+  /* 面板整体 pointer-events:none（空白区域穿透拾取城市），交互控件必须恢复事件 */
+  pointer-events: auto;
+}
+
+.rg-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  font-size: 11.5px;
+  color: #a7b6cc;
+  b {
+    color: #e6edf7;
+    font-weight: 600;
+  }
+}
+
+.rg-tools {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  .rg-count {
+    margin-left: auto;
+    font-size: 11.5px;
+    color: #ffd166;
+  }
+}
+
+.rg-btn {
+  padding: 5px 10px;
+  font-size: 12px;
+  border-radius: 6px;
+  border: 1px solid rgba(120, 160, 220, 0.28);
+  background: rgba(20, 28, 44, 0.96);
+  color: #e6edf7;
+  cursor: pointer;
+  &:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+  &.primary {
+    border-color: #4da3ff;
+    color: #9ed0ff;
+  }
+  /* 播放条里的小号按钮 */
+  &.sm {
+    padding: 3px 8px;
+    font-size: 11.5px;
+  }
+}
+
+.rg-hint {
+  font-size: 11.5px;
+  color: #8fa3bf;
+  line-height: 1.5;
+  &.dim {
+    color: #7d8fa8;
+    b {
+      color: #ffd166;
+      font-weight: 600;
+    }
+  }
+}
+
+/* 缺参数卫星的兜底参数行：开关 + 两个数值输入 */
+.rg-fb {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: rgba(20, 28, 44, 0.72);
+  border: 1px solid rgba(120, 160, 220, 0.16);
+  .rg-fb-switch {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 11.5px;
+    color: #c8d6e8;
+    cursor: pointer;
+    input {
+      accent-color: #4da3ff;
+      cursor: pointer;
+    }
+  }
+  .rg-fb-item {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11.5px;
+    color: #a7b6cc;
+    i {
+      font-style: normal;
+      color: #7d8fa8;
+    }
+  }
+}
+
+/* 数值输入框（兜底参数的幅宽 / 侧摆、「同时覆盖分析」的最少区域数）：顶层类，两处共用同一观感 */
+.rg-num {
+  width: 62px;
+  padding: 3px 6px;
+  font-size: 11.5px;
+  border-radius: 5px;
+  background: rgba(20, 28, 44, 0.96);
+  border: 1px solid rgba(120, 160, 220, 0.28);
+  color: #e6edf7;
+  &:focus {
+    outline: none;
+    border-color: #4da3ff;
+  }
+  &:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+}
+
+/* 通用浅框容器（与 .rg-fb 同一观感）：多区域的「区域列表 / 组合库」两块用它承载 */
+.rg-box {
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: rgba(20, 28, 44, 0.72);
+  border: 1px solid rgba(120, 160, 220, 0.16);
+}
+
+/* 「参数缺失」标记：该行用的是本次扫描的默认幅宽/侧摆，不是该星的真实载荷 */
+.rg-tag {
+  display: inline-block;
+  margin-right: 4px;
+  padding: 0 4px;
+  border-radius: 3px;
+  font-size: 10px;
+  color: #0e1622;
+  background: #ffd166;
+}
+
+.rg-pick {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  .rg-pick-label {
+    font-size: 12px;
+    color: #a7b6cc;
+    white-space: nowrap;
+  }
+}
+
+.rg-select {
+  flex: 1;
+  min-width: 0;
+  padding: 5px 8px;
+  font-size: 12px;
+  border-radius: 6px;
+  background: rgba(20, 28, 44, 0.96);
+  border: 1px solid rgba(120, 160, 220, 0.28);
+  color: #e6edf7;
+  color-scheme: dark;
+  cursor: pointer;
+  &:focus {
+    outline: none;
+    border-color: #4da3ff;
+  }
+  option {
+    background: #1b2130;
+    color: #e6edf7;
+  }
+  &.sm {
+    flex: 0 1 auto;
+    padding: 4px 6px;
+    font-size: 11.5px;
+  }
+}
+
+/* 预报窗口选择：三档时长，选中态用主色描边 + 底色 */
+.rg-win {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  .rg-win-label {
+    font-size: 12px;
+    color: #a7b6cc;
+    white-space: nowrap;
+  }
+  .rg-win-btn {
+    flex: 1;
+    padding: 5px 8px;
+    font-size: 12px;
+    border-radius: 6px;
+    border: 1px solid rgba(120, 160, 220, 0.28);
+    background: rgba(20, 28, 44, 0.96);
+    color: #a7b6cc;
+    cursor: pointer;
+    &.active {
+      border-color: #4da3ff;
+      background: rgba(30, 70, 120, 0.55);
+      color: #cfe8ff;
+    }
+  }
+}
+
+.rg-submit {
+  padding: 8px 10px;
+  font-size: 12.5px;
+  border-radius: 6px;
+  border: 1px solid #4da3ff;
+  background: rgba(30, 70, 120, 0.55);
+  color: #cfe8ff;
+  cursor: pointer;
+  &:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+}
+
+.rg-tip {
+  font-size: 11.5px;
+  color: #9ed0ff;
+  line-height: 1.5;
+}
+
+/* 折叠块标题行（本组件自绘口径，与 .rg-log-toggle 同一风格）：整行可点，右侧 ▼/▲ 指示展开态。
+ * rg-warn / rg-progress 默认折叠，折叠时保留可读摘要（数量 / 阶段 + 百分比），展开才给完整内容。 */
+.rg-fold-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 0;
+  border: none;
+  background: none;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  .rg-fold {
+    margin-left: auto;
+    white-space: nowrap;
+    color: inherit;
+    opacity: 0.75;
+  }
+}
+
+/* TLE 时效提示：陈旧 TLE（深空探测器 / 失联卫星）混在候选集里，只提示不拦截 */
+.rg-warn {
+  padding: 6px 8px;
+  border-radius: 6px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: #ffd166;
+  background: rgba(74, 56, 16, 0.55);
+  border: 1px solid rgba(255, 209, 102, 0.35);
+  b {
+    color: #ffe6a3;
+    font-weight: 600;
+  }
+  .rg-fold-text {
+    flex: 1;
+    min-width: 0;
+  }
+  .rg-warn-body {
+    margin-top: 4px;
+    color: #e6c877;
+  }
+}
+
+.rg-progress {
+  padding: 8px;
+  border-radius: 6px;
+  background: rgba(16, 24, 38, 0.9);
+  border: 1px solid rgba(120, 160, 220, 0.2);
+}
+.rg-progress-head {
+  font-size: 12px;
+  color: #e6edf7;
+  .rg-stage {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .rg-pct {
+    color: #66e0ff;
+    white-space: nowrap;
+  }
+}
+.rg-bar {
+  margin-top: 6px;
+  height: 6px;
+  border-radius: 3px;
+  background: rgba(120, 160, 220, 0.18);
+  overflow: hidden;
+  i {
+    display: block;
+    height: 100%;
+    background: linear-gradient(90deg, #4da3ff, #66e0ff);
+    transition: width 0.3s;
+  }
+}
+.rg-detail {
+  margin-top: 4px;
+  font-size: 11.5px;
+  color: #a7b6cc;
+  line-height: 1.5;
+  &.dim {
+    color: #7d8fa8;
+  }
+  &.warn {
+    color: #ffb454;
+  }
+}
+.rg-log-toggle {
+  margin-top: 6px;
+  padding: 0;
+  border: none;
+  background: none;
+  font-size: 11.5px;
+  color: #66e0ff;
+  cursor: pointer;
+}
+.rg-log {
+  margin-top: 6px;
+  max-height: 160px;
+  overflow-y: auto;
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.6;
+  .rg-log-line {
+    color: #b8c6da;
+    &.ok { color: #6ee7a8; }
+    &.warn { color: #ffb454; }
+    &.error { color: #ff7b7b; }
+    &.sep { color: #4a5b74; }
+  }
+  .rg-log-time {
+    color: #6b7f99;
+    margin-right: 6px;
+  }
+}
+
+.rg-result-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  .rg-total {
+    margin-left: auto;
+    font-size: 11.5px;
+    color: #a7b6cc;
+  }
+}
+
+/* 选中记录的播放条（点击列表项后出现）：播放/暂停 + 可点击定位的进度条 + 取消选中 */
+.rg-play {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: rgba(20, 28, 44, 0.86);
+  border: 1px solid rgba(77, 163, 255, 0.42);
+  .rg-play-bar {
+    flex: 1;
+    min-width: 0;
+    height: 6px;
+    border-radius: 3px;
+    background: rgba(120, 160, 220, 0.18);
+    overflow: hidden;
+    cursor: pointer;
+    i {
+      display: block;
+      height: 100%;
+      background: linear-gradient(90deg, #4da3ff, #66e0ff);
+    }
+  }
+  .rg-play-pct {
+    font-size: 11.5px;
+    color: #9ed0ff;
+    white-space: nowrap;
+  }
+}
+
+/* 结果列表：不再自占高度、不再自己滚动 —— 滚动统一交给外层 .rg-wrap（面板里设为 flex:1 + overflow-y:auto）。
+ * 此前这里是 flex:1 + max-height:42vh + overflow-y:auto，会在面板内再套一层滚动条并吃掉 42vh，
+ * 把上方的框选 / 参数 / 提交等操作区挤得只剩很窄一条；改为按内容自然增高后，操作区高度恢复。 */
+.rg-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+/* 分页条：结果动辄上万条，一次只渲染一页（20 条），避免 DOM 爆炸拖垮浏览器 */
+.rg-page {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  .rg-page-num {
+    font-size: 11.5px;
+    color: #c8d6e8;
+    white-space: nowrap;
+  }
+  .rg-page-hint {
+    font-size: 11px;
+    color: #7d8fa8;
+    white-space: nowrap;
+  }
+}
+.rg-item {
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: rgba(20, 28, 44, 0.72);
+  border: 1px solid rgba(120, 160, 220, 0.16);
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+  &:hover {
+    background: rgba(28, 40, 62, 0.9);
+    border-color: rgba(120, 160, 220, 0.4);
+  }
+  /* 选中态：三维地球上已按该记录绘制卫星模型 / 轨道 / 扫描区域 */
+  &.on {
+    background: rgba(30, 54, 88, 0.95);
+    border-color: #4da3ff;
+    box-shadow: inset 0 0 0 1px rgba(77, 163, 255, 0.35);
+  }
+}
+.rg-item-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  .rg-item-name {
+    flex: 1;
+    min-width: 0;
+    font-size: 12.5px;
+    color: #e6edf7;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  /* NORAD 号：名称被压缩时也不换行，方便按号核对 */
+  .rg-item-norad {
+    flex: none;
+    font-size: 11px;
+    color: #7d8fa8;
+    white-space: nowrap;
+  }
+  .rg-item-cov {
+    font-size: 12px;
+    color: #ffd166;
+    &.full {
+      color: #6ee7a8;
+    }
+  }
+}
+.rg-item-sub {
+  margin-top: 2px;
+  font-size: 11px;
+  color: #9db0c8;
+  &.dim {
+    color: #7d8fa8;
+  }
+}
+/* 光照条件：区域中心太阳高度档 + 可成像/夜间标记 + 卫星地影（供电/热控参考） */
+.rg-item-light {
+  margin-top: 4px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.rg-light-tag {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 10px;
+  line-height: 1.5;
+  white-space: nowrap;
+  color: #8ea4c4;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  &.ok {
+    color: #7ee0a8;
+    background: rgba(60, 210, 130, 0.12);
+    border-color: rgba(60, 210, 130, 0.34);
+  }
+  &.warn {
+    color: #ffd980;
+    background: rgba(255, 190, 60, 0.12);
+    border-color: rgba(255, 190, 60, 0.32);
+  }
+  &.dark {
+    color: #7f8da3;
+    background: rgba(90, 105, 130, 0.16);
+    border-color: rgba(90, 105, 130, 0.36);
+  }
+  &.tw {
+    color: #8ea4c4;
+  }
+}
+/* 「只看可光学成像」开关（结果栏内，与两个下拉同排） */
+.rg-optical {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11.5px;
+  color: #9fb4d0;
+  cursor: pointer;
+  user-select: none;
+  input {
+    width: 12px;
+    height: 12px;
+    margin: 0;
+    cursor: pointer;
+    accent-color: #4da3ff;
+  }
+}
+.rg-empty {
+  padding: 16px 8px;
+  text-align: center;
+  font-size: 12px;
+  color: #7d8fa8;
+}
+
+.rg-sensors {
+  border-top: 1px solid rgba(120, 160, 220, 0.16);
+  padding-top: 6px;
+}
+.rg-sensor-list {
+  margin-top: 6px;
+  max-height: 160px;
+  overflow-y: auto;
+}
+/* 型号名搜索框：放在滚动容器之外，滚动列表时保持可见 */
+.rg-search {
+  width: 100%;
+  box-sizing: border-box;
+  margin-top: 6px;
+  padding: 5px 8px;
+  font-size: 12px;
+  border-radius: 6px;
+  background: rgba(20, 28, 44, 0.96);
+  border: 1px solid rgba(120, 160, 220, 0.28);
+  color: #e6edf7;
+  &::placeholder {
+    color: #6b7d96;
+  }
+  &:focus {
+    outline: none;
+    border-color: #4da3ff;
+  }
+}
+.rg-sensor-row {
+  display: flex;
+  gap: 8px;
+  font-size: 11.5px;
+  line-height: 1.8;
+  .rg-sensor-name {
+    flex: 1;
+    min-width: 0;
+    color: #c8d6e8;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .rg-sensor-val {
+    color: #8fa3bf;
+    white-space: nowrap;
+  }
+}
+
+/* ------------------------------------------------------------------
+ * 以下为「多区域过境」专有的两块（多区域列表 / 区域库·组合选择 / 同时覆盖表）
+ * 的排版类：只补结构，不另立配色 —— 取值全部沿用上面的 rg- 口径。
+ * ------------------------------------------------------------------ */
+/* 区域行：序号 + 名称输入 + 顶点数/来源 + 移除 */
+.rg-area-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  & + & {
+    margin-top: 5px;
+  }
+}
+.rg-idx {
+  flex: none;
+  width: 30px;
+  font-size: 11px;
+  color: #7d8fa8;
+  text-align: center;
+}
+/* 行内文本输入（与 .rg-num 同一观感，但占满剩余宽度） */
+.rg-text {
+  flex: 1;
+  min-width: 0;
+  padding: 3px 6px;
+  font-size: 11.5px;
+  border-radius: 5px;
+  background: rgba(20, 28, 44, 0.96);
+  border: 1px solid rgba(120, 160, 220, 0.28);
+  color: #e6edf7;
+  &::placeholder {
+    color: #6b7d96;
+  }
+  &:focus {
+    outline: none;
+    border-color: #4da3ff;
+  }
+  &:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+}
+/* 行内移除按钮（×） */
+.rg-x {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  line-height: 1;
+  border-radius: 6px;
+  border: 1px solid rgba(120, 160, 220, 0.28);
+  background: rgba(20, 28, 44, 0.96);
+  color: #e6edf7;
+  cursor: pointer;
+}
+.rg-sub {
+  flex: none;
+  font-size: 11px;
+  color: #7d8fa8;
+  white-space: nowrap;
+}
+/* 汇总 / 同时覆盖表格（与明细卡片同一深色口径） */
+.rg-table {
+  width: 100%;
+  margin-top: 6px;
+  border-collapse: collapse;
+  font-size: 11px;
+  th,
+  td {
+    border-bottom: 1px solid rgba(120, 160, 220, 0.18);
+    padding: 3px 5px;
+    text-align: center;
+    color: #c8d6e8;
+  }
+  th {
+    font-weight: 600;
+    color: #a7b6cc;
+  }
+  .rg-l {
+    text-align: left;
+  }
+}
+/* 同时覆盖卡片内的「命中区域」标签：各区域独立成 tag 并自动换行。
+   原先是 7 列宽表里的一格 join(' · ')，区域一多文字就被严重挤压 —— 标签化后不再互相挤占宽度。 */
+.rg-cov-areas {
+  margin-top: 4px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.rg-cov-tag {
+  flex: none;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  max-width: 100%;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 10px;
+  line-height: 1.6;
+  color: #8ea4c4;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  b {
+    font-weight: 500;
+    color: #c8d6e8;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  i {
+    flex: none;
+    font-style: normal;
+    color: #ffd166;
+  }
+}
+/* 折叠块（明细展开 / 收起） */
+.rg-details {
+  margin-top: 8px;
+  summary {
+    font-size: 12px;
+    cursor: pointer;
+    color: #9ed0ff;
+  }
+}
+
+html.is-mobile {
+  .rg-stats {
+    gap: 8px;
+  }
+  /* 移动端抽屉本身可滚动，明细不再单独限高，避免出现「里外两层滚动」 */
+  .rg-scroll-cap {
+    max-height: none;
+  }
+}

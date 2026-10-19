@@ -1,0 +1,38 @@
+{
+  "name": "openspace-safety-platform",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc -b && vite build",
+    "preview": "vite preview",
+    "dev:web": "vite",
+    "dev:server": "npm --prefix server run dev",
+    "dev:all": "concurrently -n server,web -c yellow,cyan \"npm --prefix server run dev\" \"npm run dev:web\""
+  },
+  "dependencies": {
+    "@element-plus/icons-vue": "^2.3.1",
+    "axios": "^1.7.9",
+    "echarts": "^6.1.0",
+    "element-plus": "^2.9.1",
+    "normalize.css": "^8.0.1",
+    "pinia": "^2.3.0",
+    "satellite.js": "^7.1.0",
+    "three": "^0.185.1",
+    "vue": "^3.5.13",
+    "vue-router": "^4.5.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.3.0",
+    "@types/three": "^0.185.4",
+    "@vitejs/plugin-vue": "^5.2.1",
+    "concurrently": "^10.0.5",
+    "sass": "^1.103.1",
+    "typescript": "~5.6.3",
+    "unplugin-vue-components": "^32.1.0",
+    "vite": "^6.0.5",
+    "vite-plugin-compression": "^0.5.1",
+    "vue-tsc": "^2.2.0"
+  }
+}
