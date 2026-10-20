@@ -37,7 +37,7 @@ import {
   eciToScene, sunDirection, moonDirection, parseEpoch, orbitSteps, disposeGroup, disposeScene,
   g, loading, error, notice, modelNotice,
   sel, hasSel, selDetail, detailOpen, selConstellations,
-  constellations, filterKw, filterConst, altMin, altMax, filterNorads, satSetActive,
+  constellations, filterKw, filterConst, altMin, altMax, filterNorads, satSetActive, cloudRevealed,
   compareConsts, compareActive,
   visibleCount, orbitTotal, orbitSkipped, loadProgress, orbitBuilding, orbitProgress, filterActive,
   consHighlightNorad, CONS_HIGHLIGHT_COLOR, rebuildConsSatIndex,
@@ -163,13 +163,15 @@ let matrixDrift = 0
  *    写死的方向在不同时刻进入会指向不同海域（原实现固定 (3.0, 1.9, 4.6)，进入时常落在太平洋）；
  *  - 时间仍只体现在地球自转与晨昏线上，不影响「进入时看到哪里」。
  * ============================================================ */
-/** 目标地表点（°）：东北亚（缺省打开系统时的屏幕定位中心） */
-const HOME_LON = 127
-const HOME_LAT = 42
-/** 初始/复位机位距地心距离：3.5 —— 地球直径约占视口高 64%（用户口径：应用打开时地球要更大）。
- *  原值 Math.hypot(3.0, 1.9, 4.6) ≈ 5.83 时仅约 37%，观感偏小；3.5 仍远大于穿地限位
- *  EARTH_ORBIT_MIN_DIST(1.08)，滚轮缩放不受影响。 */
-const HOME_CAM_DIST = 3.5
+/** 目标地表点（°）：武汉（缺省打开系统时的屏幕定位中心，南北极与屏幕垂直中线重合——
+ *  相机 up 恒为世界 +Y（北极轴），正对点居中即极轴竖直） */
+const HOME_LON = 114.3
+const HOME_LAT = 30.6
+/** 初始/复位机位距地心距离：4.5 —— 地球直径约占视口高 50%（外置浏览器窗口较矮时，
+ *  顶部仍留出标题栏与余量，不再遮挡球体；866px 高视口下观感依然饱满）。
+ *  原值 3.5（直径约 64%）在矮窗口下顶部会被标题栏遮住；历史值 Math.hypot(3.0, 1.9, 4.6) ≈ 5.83 时仅约 37%。
+ *  4.5 仍远大于穿地限位 EARTH_ORBIT_MIN_DIST(1.08)，滚轮缩放不受影响。 */
+const HOME_CAM_DIST = 4.5
 
 /** 当前时刻该地表点在场景世界坐标中的方向（含 passGroup 自转相位） */
 function homeDirection(): THREE.Vector3 {
@@ -206,7 +208,7 @@ function applyHomeCamera() {
   }
 }
 
-/** 仅复位镜头：回到初始机位（东北亚 + 初始地球大小），不清选中与过滤（区别于 resetSelected） */
+/** 仅复位镜头：回到初始机位（武汉 + 初始地球大小），不清选中与过滤（区别于 resetSelected） */
 function resetCameraToHome() {
   restoreEarthOrbitLimits()
   applyHomeCamera()
@@ -369,6 +371,10 @@ function initScene() {
   constellationLineMat = constellation.lineMaterial
   constellation.lineMaterial.resolution.set(Math.max(1, skySize?.x || 1), Math.max(1, skySize?.y || 1))
   buildEarth(scene, quality.earthSeg, quality.atmoSeg)
+  // Cesium 接管前先隐藏 Three 地球（含大气辉光子节点）：刷新时 initCesium 异步就绪有间隙，
+  // 若此时 Three 地球先上屏会「闪一下旧贴图/夜光地球」再切高清影像（用户反馈的闪旧底层贴图）。
+  // Cesium 成功后保持隐藏（见 applyCesiumBase），失败降级回纯 Three 时在 applyCesiumBase 内恢复显示。
+  if (g.earthMesh) g.earthMesh.visible = false
   buildSky(scene)
   // 场景重建时 passMode 可能仍为 true（keep-alive 切回）：watch 不会补触发，这里按当前模式对齐夜晚灯光层
   applyEarthNightLights(!passMode.value)
@@ -420,6 +426,9 @@ const _cesiumFlyDir = new THREE.Vector3()
 async function applyCesiumBase() {
   const el = container.value
   if (!el) return
+  // 首屏遮罩此刻仍在（onMounted 延迟到 Cesium 首帧才撤，避免「骨架撤罩 → Cesium 未就绪」的黑屏间隙，
+  // 也不再闪 Three 旧贴图地球），这里同步阶段文案
+  loadStage.value = '正在启动三维地球底座…'
   // 离线数据源地址（影像瓦片包 / DEM 地形包）：后续由 /cgi/config 下发后在此注入；
   // 未配置时 cesiumEarth 内部用 ArcGIS Online 公网影像兜底、椭球面无地形。
   // 地形包生成：node scripts/build-terrain-tiles.mjs --input <DEM.tif>（产物输出到 public/terrain），
@@ -429,9 +438,15 @@ async function applyCesiumBase() {
     // 对齐原 OrbitControls 'start'/'end'：相机交互期间冻结虚拟时间（simStepSec=0），帧率让给交互
     onMoveStart: () => { g.userInteracting = true },
     onMoveEnd: () => { g.userInteracting = false }
-  })
+  }).catch(() => false)
   // 异步期间组件可能已卸载 / 场景可能已重建
-  if (!ok || disposed || !g.scene || !g.renderer) return
+  if (!ok || disposed || !g.scene || !g.renderer) {
+    // Cesium 失败降级回纯 Three 套路：恢复 Three 地球显示（initScene 里为避闪旧贴图先藏了它；
+    // disposed 卸载场景无需恢复），并撤掉首屏遮罩（此时 Three 地球已可见，黑屏结束）
+    if (!disposed && g.scene && g.earthMesh) g.earthMesh.visible = true
+    if (!disposed) loading.value = false
+    return
+  }
   cesiumActive = true
   // Three 背景转透明，露出下层 Cesium 地球
   g.scene.background = null
@@ -469,8 +484,11 @@ async function applyCesiumBase() {
   resizeCesium()
   // 就绪后立刻渲一帧 Cesium（动画循环下一帧也会带，这里让地球与 Three 叠加层同帧出现，避免闪纯色底）
   renderCesium(g.simTimeMs)
+  // Cesium 首帧已渲染：地球此刻真实可见，此刻才撤首屏遮罩（取代 onMounted 骨架期撤除——
+  // 那会在「遮罩撤了但 Cesium 还没就绪」留下黑屏/闪旧贴图间隙）
+  loading.value = false
   // Cesium 默认视图（本初子午线/赤道上空）会经 syncCameraToThree 反灌成初始机位，
-  // 这里在其之前主动写入 home 机位：缺省打开系统时定位到东北亚
+  // 这里在其之前主动写入 home 机位：缺省打开系统时定位到武汉（极轴与屏幕垂直中线重合）
   applyHomeCamera()
   syncCameraToThree(g.camera!, g.simTimeMs)
 }
@@ -2160,6 +2178,28 @@ function applyPointColors() {
   syncFocusPointPaint()
 }
 
+/** 首页「无目标」门控：进入页面缺省隐藏全部卫星/碎片/箭体/未知物体点云（数据仍后台加载）。
+ *  例外 = NORAD 集合展示态（satSetActive）：它是显式 URL 深链的分析叠加层，直接显示。 */
+function cloudGate() {
+  return cloudRevealed.value || satSetActive.value
+}
+
+/** 门控变化时统一重算点云与过滤轨道线显隐（揭示 = 恢复普通模式口径；未揭示 = 全隐藏） */
+function applyCloudGateVisible() {
+  const gate = cloudGate()
+  for (const model of modelKeys()) {
+    const im = g.modelMeshes[model]
+    // 与 buildModelInstances 同口径：热力 / 过境视图整片隐藏卫星云，但集合叠加层（satSetActive）例外
+    if (im) im.visible = gate && (satSetActive.value || (!heatMode.value && !passMode.value)) && modelVisible(model)
+  }
+  // 未揭示时过滤轨道线一并隐藏（line.visible 只控制类型勾选/总开关，组级显隐在这里收口）
+  if (g.filterOrbitGroup) g.filterOrbitGroup.visible = gate && orbitVisible.value
+  if (!gate) {
+    if (g.orbitLine) g.orbitLine.visible = false
+    if (g.previewOrbitLine) g.previewOrbitLine.visible = false
+  }
+}
+
 /** 为每个非空型号创建（或换档重建）InstancedMesh，填充初始矩阵。
  *  先粗后精：首屏传 'low' 快速出图，之后 maybeUpgradeLod 判定需要升档时以新档位重跑本函数；
  *  新批全部建好后再原子替换旧批（旧批在新批挂上之前一直显示，避免切档空窗闪烁）。 */
@@ -2193,7 +2233,7 @@ async function buildModelInstances(lod: ModelLod) {
     imesh.instanceMatrix.needsUpdate = true
     // 显隐口径与外部一致：图例按粗类型勾选（modelVisible 换算），热力 / 过境视图整片隐藏卫星云；
     // 例外 = NORAD 集合展示态（satSetActive）：它是「分析叠加层」，在这两个视图下仍要显示。
-    imesh.visible = (satSetActive.value || (!heatMode.value && !passMode.value)) && modelVisible(p.model)
+    imesh.visible = cloudGate() && (satSetActive.value || (!heatMode.value && !passMode.value)) && modelVisible(p.model)
     built[p.model] = imesh
   }
   for (const model of models) if (built[model]) scene.add(built[model])
@@ -2686,6 +2726,8 @@ function stepFilterOrbits(budget: { n: number }) {
     }
     if (group.children.length) {
       g.filterOrbitGroup = group
+      // 首页「无目标」门控：未揭示前连过滤轨道线也不显示（揭示后由 applyCloudGateVisible / 各模式重算）
+      group.visible = cloudGate()
       g.scene?.add(group)
     }
     g.filterOrbitSegs = {}
@@ -3051,7 +3093,7 @@ function restoreSatVisible() {
   const hideCloud = (heatMode.value || passMode.value) && !satSetActive.value
   for (const model of modelKeys()) {
     const im = g.modelMeshes[model]
-    if (im) im.visible = hideCloud ? false : true
+    if (im) im.visible = cloudGate() && (hideCloud ? false : true)
   }
   if (!list.length) return
   rewriteInstanceMatrices((gi) => !!list[gi])
@@ -3108,6 +3150,9 @@ function pickNearestSat(ev: MouseEvent): number | null {
 function pickNearestAt(px: number, py: number): number | null {
   const renderer = g.renderer, cam = g.camera
   if (!renderer || !cam || !g.scenePos.length) return null
+  // 首页「无目标」门控：点云未揭示时卫星不可见也不可交互——hover 预览轨道线 / 点击选中一并禁用
+  // （本函数是屏幕空间投影拾取，不感知 mesh.visible，必须在此收口）
+  if (!cloudGate()) return null
   const rect = renderer.domElement.getBoundingClientRect()
   // 屏幕空间最近投影点拾取（PICK_TOLERANCE_PX 内吸附）：直接遍历 scenePos 做投影+遮挡判定。
   // 不再用 raycaster.intersectObjects(InstancedMesh)：three 对实例化网格是「逐实例包围球+三角形求交」，
@@ -3814,10 +3859,10 @@ function applyHeatMode() {
   const hideCloud = (on || passMode.value) && !satSetActive.value
   for (const model of modelKeys()) {
     const im = g.modelMeshes[model]
-    if (im) im.visible = hideCloud ? false : modelVisible(model)
+    if (im) im.visible = cloudGate() && (hideCloud ? false : modelVisible(model))
   }
   // 轨道线：热力/过境视图隐藏卫星云时一并隐藏，同时叠加图例的「轨道线」总开关
-  const orbitOn = !hideCloud && orbitVisible.value
+  const orbitOn = cloudGate() && !hideCloud && orbitVisible.value
   // 集合叠加层在过境视图下改由「目标明细过境轨道环」（passCityOrbitGroup）呈现，故隐藏批量过滤轨道线组，
   // 避免同一颗星出现两条轨道线；热力视图（on=false）仍保留过滤轨道线。
   if (g.filterOrbitGroup) g.filterOrbitGroup.visible = orbitOn && !(on && satSetActive.value)
@@ -6290,8 +6335,11 @@ async function applyRoutePreset() {
     // 卫星拾取：点云未就绪（cloudList 为空）时挂起 —— 首次挂载点云尚未到达，待 onMounted 就绪后重放
     if (Number.isFinite(norad) && norad > 0) {
       const gi = g.cloudList.findIndex((p) => Number(p.norad_id) === norad)
-      if (gi >= 0) requestAnimationFrame(() => selectSatelliteByIndex(gi))
-      else if (!g.cloudList.length) pending = true
+      if (gi >= 0) {
+        // URL 深链预置选中目标：视为用户显式要看目标，揭示点云
+        cloudRevealed.value = true
+        requestAnimationFrame(() => selectSatelliteByIndex(gi))
+      } else if (!g.cloudList.length) pending = true
     }
 
     // 发射站拾取：站点列表未就绪（异步 loadLaunchSites）时挂起，由 watch(launchSites) 重放
@@ -7136,10 +7184,10 @@ function applyPassMode() {
   const hideCloud = (on || heatMode.value) && !satSetActive.value
   for (const model of modelKeys()) {
     const im = g.modelMeshes[model]
-    if (im) im.visible = hideCloud ? false : modelVisible(model)
+    if (im) im.visible = cloudGate() && (hideCloud ? false : modelVisible(model))
   }
   // 轨道线：热力/过境视图隐藏卫星云时一并隐藏，同时叠加图例的「轨道线」总开关
-  const orbitOn = !hideCloud && orbitVisible.value
+  const orbitOn = cloudGate() && !hideCloud && orbitVisible.value
   if (g.filterOrbitGroup) g.filterOrbitGroup.visible = orbitOn
   if (g.orbitLine) g.orbitLine.visible = orbitOn
   if (g.previewOrbitLine) g.previewOrbitLine.visible = orbitOn
@@ -7463,6 +7511,9 @@ watch(orbitVisible, () => applyOrbitToggle())
 // 切换着色维度（图例顶部按钮）：只重涂 instanceColor + 刷新图例，几何 / 矩阵 / 实例分组都不重建
 // （点云尚未加载时也照样刷新，图例先把各分档列出来、计数为 0，避免切换后图例空白）
 watch(colorMode, () => applyPointColors())
+// 首页「无目标」门控：揭示由用户主动入口触发（index.vue 的 openSatPanel / chooseSatView / toggleSatDock
+// 与 URL 深链预置选中），不能 watch dockMode —— restoreDock 静默恢复也会把 dockMode 置 'sat'
+watch(cloudRevealed, () => applyCloudGateVisible())
 // 拾取状态依赖「选中目标所属类型」的图例可见性：隐藏该类型（含「全部物体」总开关一次性关掉 4 类）即取消选中，
 // 与「环境图层隐藏也取消选中」同一口径（见下方 skyLayers.groundTrack 的 watch）。
 watch(hasSel, () => applyOrbitPolarLimits())
@@ -7472,8 +7523,9 @@ watch(
     // 点云按「型号」分 Mesh，图例按「粗类型」勾选 → 用 modelVisible 换算（型号 -> 粗类型见 MODEL_COARSE）
     for (const model of modelKeys()) {
       const im = g.modelMeshes[model]
-      // 与 buildModelInstances 同口径：热力 / 过境视图整片隐藏卫星云，但集合叠加层（satSetActive）例外
-      if (im) im.visible = (satSetActive.value || (!heatMode.value && !passMode.value)) && modelVisible(model)
+      // 与 buildModelInstances 同口径：热力 / 过境视图整片隐藏卫星云，但集合叠加层（satSetActive）例外；
+      // 叠加首页「无目标」门控（cloudGate）
+      if (im) im.visible = cloudGate() && (satSetActive.value || (!heatMode.value && !passMode.value)) && modelVisible(model)
     }
     const grp = g.filterOrbitGroup
     if (grp) {
@@ -7639,12 +7691,16 @@ function scheduleIdleWarmup() {
 onMounted(async () => {
   try {
     initScene()
-    // 骨架优先：地球 / 星空 / 光照一建好就立刻开始渲染并撤掉整屏遮罩，不再等点云与模型。
+    // 骨架优先：地球 / 星空 / 光照一建好就立刻开始渲染，不再等点云与模型。
     // 这样首帧（可交互时间）只取决于本地场景构建（毫秒级），卫星云随后在后台补上：
     // 有本地缓存时几乎同时就位；首次冷启动无缓存时先看到地球，再由中央小提示兜底。
+    // 首屏整屏遮罩（loading）不在这里撤：Cesium 底座异步就绪有间隙，提前撤会露出
+    // 「黑屏 / 闪 Three 旧贴图地球」，改由 applyCesiumBase 在 Cesium 首帧渲染后撤除；
+    // 下方 10s 兜底只防极端挂起（本地分包 + 影像层元数据正常毫秒~秒级）。
     startAnimation()
     if (g.renderer && g.scene && g.camera) g.renderer.render(g.scene, g.camera)
-    loading.value = false
+    const bootGuard = window.setTimeout(() => { loading.value = false }, 10000)
+    void bootGuard
     // 交互事件紧跟骨架挂上：卫星云未就绪时也允许先转动地球观察。
     // 挂容器而非 Three canvas：Cesium 底座模式下 Three canvas 是 pointer-events:none 的叠加层，
     // 事件由下层 Cesium canvas 接收后冒泡到容器，两种模式同一套监听（见 applyCesiumBase）
@@ -7767,7 +7823,7 @@ defineExpose({
   resetSelected,
   /** 三维还原到初始状态（清过滤 + 取消选中 + 镜头复位） */
   resetToInitial,
-  /** 仅复位镜头：回到初始机位（东北亚 + 初始地球大小），不清选中与过滤 */
+  /** 仅复位镜头：回到初始机位（武汉 + 初始地球大小），不清选中与过滤 */
   resetCameraToHome,
   /** 重算卫星列表过滤索引（面板数据就绪后调用一次；搜索/类型变化由 watch 自动触发） */
   rebuildSatIndex,
@@ -7895,51 +7951,6 @@ const _ndc = new THREE.Vector2()
 
   <div v-if="loading" class="constel-mask">
     <div class="loading-box">
-      <!-- 首屏加载动画：原地跳跃的小人 + 落地阴影 + 轨迹弧线（纯 SVG，SMIL 动画，
-           安卓 WebView 兼容性优于 CSS transform-box，不依赖外部资源） -->
-      <svg class="load-svg" viewBox="0 0 120 120" aria-hidden="true">
-        <!-- 跳跃轨迹弧线：随节拍呼吸的淡青虚线 -->
-        <path class="lj-arc" d="M 34 92 Q 60 44 86 92">
-          <animate attributeName="opacity" values="0.15;0.5;0.15" dur="1.8s" repeatCount="indefinite" />
-        </path>
-
-        <!-- 地面线 -->
-        <line class="lj-ground" x1="30" y1="92" x2="90" y2="92" />
-
-        <!-- 落地阴影：跳起时收缩变淡，落地时铺开变深 -->
-        <ellipse class="lj-shadow" cx="60" cy="93" rx="15" ry="3.4">
-          <animate attributeName="rx" values="15;9;15" dur="0.9s" repeatCount="indefinite" />
-          <animate attributeName="opacity" values="0.5;0.18;0.5" dur="0.9s" repeatCount="indefinite" />
-        </ellipse>
-
-        <!-- 小人：整体上下跳跃（先减速上升、再加速下落），四肢随节拍摆动 -->
-        <g class="lj-guy">
-          <animateTransform
-            attributeName="transform" type="translate"
-            values="0 0; 0 -18; 0 0" keyTimes="0; 0.5; 1"
-            keySplines="0.35 0 0.65 1; 0.35 0 0.65 1" calcMode="spline"
-            dur="0.9s" repeatCount="indefinite"
-          />
-          <circle class="lj-head" cx="60" cy="48" r="7" />
-          <line class="lj-limb" x1="60" y1="55" x2="60" y2="70" />
-          <g>
-            <line class="lj-limb" x1="60" y1="58" x2="47" y2="65" />
-            <animateTransform attributeName="transform" type="rotate" values="0 60 58; 40 60 58; 0 60 58" dur="0.9s" repeatCount="indefinite" />
-          </g>
-          <g>
-            <line class="lj-limb" x1="60" y1="58" x2="73" y2="65" />
-            <animateTransform attributeName="transform" type="rotate" values="0 60 58; -40 60 58; 0 60 58" dur="0.9s" repeatCount="indefinite" />
-          </g>
-          <g>
-            <line class="lj-limb" x1="60" y1="70" x2="51" y2="84" />
-            <animateTransform attributeName="transform" type="rotate" values="0 60 70; -22 60 70; 0 60 70" dur="0.9s" repeatCount="indefinite" />
-          </g>
-          <g>
-            <line class="lj-limb" x1="60" y1="70" x2="69" y2="84" />
-            <animateTransform attributeName="transform" type="rotate" values="0 60 70; 22 60 70; 0 60 70" dur="0.9s" repeatCount="indefinite" />
-          </g>
-        </g>
-      </svg>
       <span class="loading-txt">{{ loadStage }} {{ loadProgress }}%</span>
       <div class="load-bar"><i :style="{ width: loadProgress + '%' }"></i></div>
     </div>

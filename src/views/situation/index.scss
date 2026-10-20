@@ -7,17 +7,6 @@
     border: 3px solid rgba(79,195,247,0.18); border-top-color: #4fc3f7;
     animation: cspin 0.9s linear infinite;
   }
-  /* 首屏加载 SVG（跳跃小人 + 落地阴影 + 轨迹弧线）：动画由 SVG 内 SMIL 驱动，此处只负责配色尺寸 */
-  .load-svg {
-    width: 104px; height: 104px;
-    overflow: visible;
-    filter: drop-shadow(0 0 10px rgba(79,195,247,0.35));
-    .lj-arc { fill: none; stroke: rgba(160,233,255,0.4); stroke-width: 1; stroke-dasharray: 3 4; }
-    .lj-ground { stroke: rgba(79,195,247,0.35); stroke-width: 1.6; stroke-linecap: round; }
-    .lj-shadow { fill: rgba(79,195,247,0.3); }
-    .lj-head { fill: rgba(127,216,255,0.16); stroke: #7fd8ff; stroke-width: 2.4; }
-    .lj-limb { stroke: #7fd8ff; stroke-width: 2.4; stroke-linecap: round; }
-  }
   .loading-txt { font-size: 13px; letter-spacing: 1px; color: #bcd6f7; }
   .load-bar {
     width: 180px; height: 4px; border-radius: 2px; overflow: hidden;
@@ -42,6 +31,13 @@
     background: rgba(8,13,24,0.72); border: 1px solid rgba(120,160,220,0.22); backdrop-filter: blur(8px); }
 }
 @keyframes cspin { to { transform: rotate(360deg); } }
+/* 左上角平台 logo：原图自带透明底，不添加任何背景；高度 60px，宽度按原图比例自适应 */
+.app-logo {
+  position: absolute; top: 12px; left: 16px; z-index: 9;
+  height: 60px; width: auto; max-width: 40vw; object-fit: contain;
+  pointer-events: none; user-select: none;
+  filter: drop-shadow(0 0 6px rgba(0, 0, 0, 0.6));
+}
 /* 大屏标题栏：固定顶部正中（冻结纯装饰层，pointer-events:none 不拦截画布交互） */
 .constel-titlebar {
   position: absolute; top: 10px; left: 50%; transform: translateX(-50%);
@@ -74,10 +70,14 @@
     &.tb-wing-r { transform: scaleX(-1); }
   }
   /* 渐变字 + 辉光；letter-spacing 会在末字后多出一份空隙，text-indent 等值补偿保持视觉居中 */
+  .tb-texts { display: flex; flex-direction: column; align-items: center; }
   .tb-title { margin: 0; font-size: 21px; font-weight: 800; letter-spacing: 7px; text-indent: 7px; line-height: 1.2;
     background: linear-gradient(180deg, #f2faff 15%, #a8e2ff 55%, #4fa8f7 100%);
     -webkit-background-clip: text; background-clip: text; color: transparent;
     filter: drop-shadow(0 0 9px rgba(79,195,247,0.45)); }
+  /* 标题下方英文副标题：弱化色调，与大标题同轴居中 */
+  .tb-sub { margin-top: 3px; font-size: 10px; font-weight: 500; letter-spacing: 2.5px; text-indent: 2.5px;
+    color: rgba(168, 226, 255, 0.72); text-shadow: 0 0 6px rgba(79,195,247,0.35); }
 }
 /* 顶部通知条（标题栏在其上方，top 让出标题栏高度） */
 .constel-toast {
@@ -86,7 +86,7 @@
   background: rgba(10,16,28,0.8); border: 1px solid rgba(120,160,220,0.28); backdrop-filter: blur(8px);
   &.err { color: #ff8a80; border-color: rgba(255,138,128,0.3); }
 }
-/* 左下角复位按钮：回初始机位（东北亚）与初始地球大小（不清选中与过滤） */
+/* 左下角复位按钮：回初始机位（武汉）与初始地球大小（不清选中与过滤） */
 .constel-reset {
   position: absolute; left: 14px; bottom: 14px; z-index: 9;
   display: inline-flex; align-items: center; gap: 7px; height: 34px; padding: 0 14px;
@@ -100,9 +100,10 @@
 }
 /* 左侧滑出面板 */
 .side-panel {
-  /* top:0 + bottom:62px 撑出高度（原 height:100%）：底部让出左下角「复位」按钮
-     （bottom:14px + 高约 34px），面板完全弹出后最下端不再遮挡它；.sp-list 自身 flex 滚动不受影响 */
-  position: absolute; top: 0; left: 0; bottom: 62px; z-index: 7; width: 300px;
+  /* top:76px + bottom:62px 撑出高度：顶部让出左上角 logo（top:12px + 高 60px → 底沿 72px），
+     底部让出左下角「复位」按钮（bottom:14px + 高约 34px），面板完全弹出后两端都不遮挡；
+     相比原 top:0 同时缩减了面板高度并整体下移。.sp-list 自身 flex 滚动不受影响 */
+  position: absolute; top: 76px; left: 0; bottom: 62px; z-index: 7; width: 300px;
   display: flex; flex-direction: column; padding: 14px 12px 12px;
   background: rgba(8,13,24,0.86); border-right: 1px solid rgba(120,160,220,0.22); backdrop-filter: blur(12px);
   /* 面板空白/半透明区域点击穿透到画布拾取卫星；仅需交互的控件恢复事件 */
@@ -118,6 +119,10 @@
       pointer-events: auto; /* 关闭按钮可点击 */
       background: rgba(120,160,220,0.12); border: 1px solid rgba(120,160,220,0.25); color: #cfdcea; cursor: pointer;
       &:hover { background: rgba(255,255,255,0.14); }
+      /* 向左三角变体（太空安全目标列表收起键）：内联 SVG 替代文本符号，按钮转 flex 居中 */
+      &.sp-close-tri { display: inline-flex; align-items: center; justify-content: center; padding: 0; line-height: 0;
+        svg { width: 9px; height: 9px; fill: currentColor; display: block; }
+      }
     }
   }
   /* 数据源切换（国际库 / AOE 库）：分段控件，默认国际库。
@@ -934,7 +939,9 @@ html.is-mobile {
     .tb-frame { padding: 5px 14px; gap: 8px; }
     .tb-wing { width: 26px; }
     .tb-title { font-size: 14px; letter-spacing: 3px; text-indent: 3px; }
+    .tb-sub { font-size: 8px; letter-spacing: 1.5px; text-indent: 1.5px; margin-top: 2px; }
   }
+  .app-logo { top: 8px; left: 10px; height: 48px; }
   .constel-toast { max-width: 88%; top: 42px; padding: 5px 11px; font-size: 11px; }
   /* 左下角复位按钮：移动端 dock 变为全宽底部 Tab 栏，抬到 dock 上方躲避 */
   .constel-reset { left: 10px; bottom: calc(96px + env(safe-area-inset-bottom)); }
@@ -1004,9 +1011,11 @@ html.is-mobile {
     .sp-count { font-size: 10px; }
     .sp-meta { font-size: 9.5px; }
   }
-  /* 收起按钮：底部抽屉里「»（向左收）」不再达意，改用「✕」 */
+  /* 收起按钮：底部抽屉里「»（向左收）」不再达意，改用「✕」；
+     三角变体（太空安全目标列表）统一仍用向左三角，抑制 ✕ 伪元素避免双图案 */
   .side-panel .sp-close { width: 24px; height: 24px; line-height: 22px; font-size: 0;
     &::after { content: '✕'; font-size: 12px; } }
+  .side-panel .sp-close.sp-close-tri { &::after { content: none; } }
   .side-panel .sp-search { margin: 6px 0 6px; }
   /* 搜索框与列表条目同级压缩：字号对齐条目名（11.5px），高度收到 26px，避免在底部抽屉里显得突兀偏大 */
   .side-panel .sp-search .sp-input { height: 26px; padding: 0 24px 0 8px; font-size: 11.5px; }

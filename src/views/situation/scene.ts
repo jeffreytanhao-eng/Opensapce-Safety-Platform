@@ -762,6 +762,10 @@ export const filterActive = computed(() =>
 /** 是否处于「NORAD 集合展示」态：供 heat/pass 视图的**集合叠加层**做单开关门控
  *  （集合展示要能与热力/过境视图叠加，不能像普通卫星云那样在这两个视图里被整体隐藏）。 */
 export const satSetActive = computed(() => (filterNorads.value?.length ?? 0) > 0)
+/** 首页「无目标」门控：进入页面缺省不显示任何卫星/碎片/火箭箭体/未知物体（点云整体隐藏），
+ *  用户首次展开「太空安全目标列表」面板（dockMode='sat'）或通过 URL 预置选中某目标后才揭示，
+ *  一旦揭示不再回收。数据仍在后台正常加载（列表统计/搜索不受影响），只控制三维点云的可见性。 */
+export const cloudRevealed = ref(false)
 
 /* ============================================================
  * dock 导航 / 面板数据（卫星列表 / 星座列表）

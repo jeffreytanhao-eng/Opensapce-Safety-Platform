@@ -31,6 +31,7 @@ import AiChatDrawer from './AiChatDrawer.vue'
 import OrbitHistoryChart from './OrbitHistoryChart.vue'
 import KgMiniGraph from './KgMiniGraph.vue'
 import { buildAiTarget } from './aiTarget'
+import logoUrl from '@/assets/logo/openspace-logo.png'
 import type { AiAction } from '@/utils/aiStream'
 import {
   LEGEND, TYPE_LABEL, TYPE_KEYS, TYPE_HEX, fmtNum, parseEpoch, TWILIGHT_LABEL, SHADOW_LABEL,
@@ -52,7 +53,8 @@ import {
   PASS_SOURCES, SAT_SOURCES,
   launchSites, siteLoading, siteError, siteMarkersVisible,
   siteSel, siteOpen, siteUpcoming, siteUpcomingLoading, siteUpcomingError,
-  siteHistory, siteHistoryTotal, siteHistoryPage, siteHistoryLoading, siteHistoryError, SITE_HISTORY_PAGE_SIZE
+  siteHistory, siteHistoryTotal, siteHistoryPage, siteHistoryLoading, siteHistoryError, SITE_HISTORY_PAGE_SIZE,
+  cloudRevealed
 } from './scene'
 import type { CdmHeatEvent, ColorMode, HeatSource, PassSource, SatView } from './scene'
 import {
@@ -547,10 +549,12 @@ const showSatTag = computed(() => {
   return dockMode.value === '' && dockActive.value === 'sat'
 })
 
-/** 点左缘外拉 tag：拉出「太空安全目标列表」面板（模块未激活时按 dock 正常入口切入） */
+/** 点左缘外拉 tag：只拉出「太空安全目标列表」面板，不揭示三维点云（用户口径：打开列表 ≠ 加载目标；
+ *  目标点云在列表中点选具体目标（satSetActive）或 URL 深链时才显示）。
+ *  chooseSatView 传 reveal=false 避免其内部揭示逻辑被间接触发 */
 function openSatPanel() {
   satPanelClosed.value = false
-  if (dockMode.value !== 'sat') chooseSatView('sat')
+  if (dockMode.value !== 'sat') chooseSatView('sat', false)
 }
 
 /** 收起星座列表面板：仅收起面板，保留当前三维与 dock 激活态（过滤轨道线/选中/拾取/镜头） */
@@ -821,15 +825,20 @@ const satMenuOpen = ref(false)
 /** 默认子项：卫星列表（进入本模块 / 从其它模块切过来时落在这里） */
 const SAT_DEFAULT: SatView = 'sat'
 
-/** 选定子项：切入对应面板（模块间切换先彻底还原，等价于手动切菜单） */
-function chooseSatView(key: SatView) {
+/** 选定子项：切入对应面板（模块间切换先彻底还原，等价于手动切菜单）；
+ *  reveal=false 时跳过点云揭示（左缘 tag 打开列表面板用：只弹窗、不加载目标） */
+function chooseSatView(key: SatView, reveal = true) {
   heatMenuOpen.value = false
   passMenuOpen.value = false
   satMenuOpen.value = false
   if (dockActive.value !== key) clearScene()
   applyDock(key)
-  // 用户从 dock 主动进入卫星列表 → 拉出面板（缺省收起只针对「应用刚打开」的静默恢复，见 restoreDock）
-  if (key === 'sat') satPanelClosed.value = false
+  // 用户从 dock 主动进入卫星列表 → 拉出面板（缺省收起只针对「应用刚打开」的静默恢复，见 restoreDock）；
+  // 同时揭示三维点云（首页「无目标」门控：只有用户主动进入目标列表才显示卫星/碎片等）
+  if (key === 'sat') {
+    satPanelClosed.value = false
+    if (reveal) cloudRevealed.value = true
+  }
 }
 
 /** 点击 dock「综合态势」：展开/收起卫星 / 星座列表面板。
@@ -848,8 +857,8 @@ function toggleSatDock() {
   }
   if (dockActive.value && !SAT_VIEWS.includes(dockActive.value)) clearScene()
   applyDock(cur)
-  // 从 dock 主动进入卫星列表 → 拉出面板（与 chooseSatView 同口径）
-  if (cur === 'sat') satPanelClosed.value = false
+  // 从 dock 主动进入卫星列表 → 拉出面板（与 chooseSatView 同口径），并揭示三维点云
+  if (cur === 'sat') { satPanelClosed.value = false; cloudRevealed.value = true }
   satMenuOpen.value = true
 }
 
@@ -937,7 +946,7 @@ function resetToInitial() {
   applyDock('sat')
 }
 
-/** 复位镜头（不清选中与过滤）：回到缺省打开系统时的初始位置（东北亚）与初始地球大小 */
+/** 复位镜头（不清选中与过滤）：回到缺省打开系统时的初始位置（武汉，南北极与屏幕垂直中线重合）与初始地球大小 */
 function resetCameraHome() {
   sceneRef.value?.resetCameraToHome()
 }
@@ -1678,11 +1687,16 @@ const aiTarget = computed(() =>
 
 <template>
   <div class="constel-page">
-    <!-- 大屏标题栏：固定顶部正中（冻结装饰层，pointer-events:none 不拦截画布交互） -->
+    <!-- 大屏标题栏：固定顶部正中（冻结装饰层，pointer-events:none 不拦截画布交互）；
+         左上角 logo 为独立定位元素（原图透明底，不叠加任何背景） -->
+    <img class="app-logo" :src="logoUrl" alt="Openspace logo" />
     <header class="constel-titlebar">
       <div class="tb-frame">
         <span class="tb-wing"></span>
-        <h1 class="tb-title">开源太空安全平台</h1>
+        <div class="tb-texts">
+          <h1 class="tb-title">开源太空安全平台</h1>
+          <div class="tb-sub">Openspace Space Safety Platform</div>
+        </div>
         <span class="tb-wing tb-wing-r"></span>
       </div>
     </header>
@@ -1823,8 +1837,8 @@ const aiTarget = computed(() =>
       </button>
     </div>
 
-    <!-- 左下角复位按钮：与「还原」不同，只把屏幕回到初始位置（东北亚）与初始地球大小，不清选中与过滤 -->
-    <button class="constel-reset" title="复位镜头：回到初始位置（东北亚）与初始地球大小" @click="resetCameraHome">
+    <!-- 左下角复位按钮：与「还原」不同，只把屏幕回到初始位置（武汉）与初始地球大小，不清选中与过滤 -->
+    <button class="constel-reset" title="复位镜头：回到初始位置（武汉）与初始地球大小" @click="resetCameraHome">
       <svg class="reset-ico" viewBox="0 0 24 24" width="15" height="15" aria-hidden="true">
         <circle cx="12" cy="12" r="6.5" fill="none" stroke="currentColor" stroke-width="1.8" />
         <path d="M12 2.5v4M12 17.5v4M2.5 12h4M17.5 12h4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />

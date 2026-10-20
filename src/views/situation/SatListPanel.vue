@@ -7,7 +7,7 @@
  */
 import {
   TYPE_KEYS, TYPE_HEX, TYPE_LABEL, REGIME_KEYS, REGIME_LABEL,
-  satPanel, sel, g, orbitTotal, orbitSkipped, visibleCount, dockMode,
+  satPanel, sel, g, dockMode,
   dataSource, SAT_SOURCE_OPTIONS,
   drawerHeightVh, isDrawerDragging, useDrawerDrag
 } from './scene'
@@ -49,12 +49,14 @@ function close() {
         @touchmove="onDragMove"
         @touchend="onDragEnd"
         @touchcancel="onDragEnd">
-        <div class="sp-head-main">
+        <div class="sp-head-main sat-head-main">
           <b class="sp-title">太空安全目标列表</b>
-          <span class="sp-count">{{ satPanel.idx.length.toLocaleString() }} 颗匹配</span>
-          <span v-if="orbitSkipped" class="sp-meta">在轨 {{ orbitTotal.toLocaleString() }} · 可渲染 {{ visibleCount.toLocaleString() }} · 跳过 {{ orbitSkipped.toLocaleString() }}</span>
+          <span class="sp-count">{{ satPanel.idx.length.toLocaleString() }}个太空目标</span>
         </div>
-        <button class="sp-close" title="收起（点底部菜单可再次展开）" @click="close">»</button>
+        <!-- 收起按钮：向左三角（CSS 矢量，替代原 » 文本符号） -->
+        <button class="sp-close sp-close-tri" title="收起（点底部菜单可再次展开）" aria-label="收起列表" @click="close">
+          <svg viewBox="0 0 10 10" aria-hidden="true"><path d="M7 1.5 L3 5 L7 8.5 Z" /></svg>
+        </button>
       </div>
       <div class="sp-src">
         <button
@@ -107,4 +109,13 @@ function close() {
 
 <style scoped lang="scss">
 @use './index.scss' as *;
+
+/* 目标列表头部定制：标题居中、标题与统计行距拉开（仅作用于本面板，scoped 隔离）。
+   基础规则是 .side-panel .sp-head .sp-head-main（特异性更高），此处须同级前缀 + 追加类才能覆盖 gap */
+.side-panel .sp-head .sp-head-main.sat-head-main {
+  align-items: center;
+  gap: 12px;
+  .sp-title { text-align: center; }
+  .sp-count { text-align: center; }
+}
 </style>
