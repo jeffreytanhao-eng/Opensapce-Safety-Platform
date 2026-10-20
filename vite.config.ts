@@ -1,6 +1,7 @@
 import { fileURLToPath, URL } from 'node:url'
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { cpSync, existsSync, mkdirSync, readFileSync } from 'node:fs'
+import { cp } from 'node:fs/promises'
+import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { defineConfig, type Plugin, type ViteDevServer } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import zlib from 'node:zlib'
@@ -18,9 +19,11 @@ import { ElementPlusResolver } from 'unplugin-vue-components/resolvers'
 function copyDracoDecoder(): Plugin {
   const src = fileURLToPath(new URL('./node_modules/three/examples/jsm/libs/draco', import.meta.url))
   const dest = fileURLToPath(new URL('./public/draco', import.meta.url))
-  const copy = () => {
+  const copy = async () => {
     mkdirSync(dest, { recursive: true })
-    cpSync(src, dest, { recursive: true, force: true })
+    // 用异步 fs.cp（线程池）而非 cpSync：Node 24 + Windows 上，rollup buildStart 内
+    // 执行同步大目录拷贝会触发 0xC0000409（STATUS_STACK_BUFFER_OVERRUN）原生崩溃
+    await cp(src, dest, { recursive: true, force: true })
   }
   return { name: 'copy-draco-decoder', buildStart: copy, configureServer: copy }
 }
@@ -33,11 +36,30 @@ function copyDracoDecoder(): Plugin {
 function copyMapAssets(): Plugin {
   const src = fileURLToPath(new URL('./src/assets/map', import.meta.url))
   const dest = fileURLToPath(new URL('./public/map', import.meta.url))
-  const copy = () => {
+  const copy = async () => {
     mkdirSync(dest, { recursive: true })
-    cpSync(src, dest, { recursive: true, force: true })
+    await cp(src, dest, { recursive: true, force: true })
   }
   return { name: 'copy-map-assets', buildStart: copy, configureServer: copy }
+}
+
+/**
+ * 复制 Cesium 引擎静态资源（Assets/Workers/ThirdParty/Widgets）到 public/cesium。
+ * Cesium ESM 构建运行时按 CESIUM_BASE_URL 拉取 workers / 底图贴图 / 第三方资源，
+ * cesiumEarth.ts 里通过 window.CESIUM_BASE_URL = BASE_URL + 'cesium/' 指向这里。
+ * dev：configureServer 写入 public（sirv 惰性读取）；build：buildStart 写入 public，
+ * vite 的 copyPublicDir 会一并复制进 dist。
+ */
+function copyCesiumAssets(): Plugin {
+  const base = fileURLToPath(new URL('./node_modules/cesium/Build/CesiumUnminified', import.meta.url))
+  const dest = fileURLToPath(new URL('./public/cesium', import.meta.url))
+  const copy = async () => {
+    mkdirSync(dest, { recursive: true })
+    for (const dir of ['Assets', 'Workers', 'ThirdParty', 'Widgets']) {
+      await cp(`${base}/${dir}`, `${dest}/${dir}`, { recursive: true, force: true })
+    }
+  }
+  return { name: 'copy-cesium-assets', buildStart: copy, configureServer: copy }
 }
 
 /**
@@ -145,6 +167,7 @@ export default defineConfig(() => ({
     devGzip(),
     copyDracoDecoder(),
     copyMapAssets(),
+    copyCesiumAssets(),
     // Element Plus 按需自动导入：模板里的 <el-xxx> 只引入用到的组件 JS，
     // 样式仍由 main.ts 全量引入 element-plus/dist/index.css（importStyle: false），
     // 避免按需样式在 dev/build 下产生切页即时编译；组件 <el-config-provider> 等也在此自动注册。
@@ -249,7 +272,9 @@ export default defineConfig(() => ({
           // Element Plus 已改按需引入（见 main.ts / unplugin-vue-components），
           // 不再整包拆独立 chunk，交由 Rollup 按各页面的实际引用做代码分割。
           vendor: ['vue', 'vue-router', 'pinia', 'axios'],
-          icons: ['@element-plus/icons-vue']
+          icons: ['@element-plus/icons-vue'],
+          // Cesium 引擎体量巨大（~10MB），独立分包并经 cesiumEarth.ts 动态 import 惰性加载
+          cesium: ['cesium']
         }
       }
     }

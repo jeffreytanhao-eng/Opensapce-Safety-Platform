@@ -9,11 +9,13 @@
     "preview": "vite preview",
     "dev:web": "vite",
     "dev:server": "npm --prefix server run dev",
-    "dev:all": "concurrently -n server,web -c yellow,cyan \"npm --prefix server run dev\" \"npm run dev:web\""
+    "dev:all": "concurrently -n server,web -c yellow,cyan \"npm --prefix server run dev\" \"npm run dev:web\"",
+    "build:terrain": "node scripts/build-terrain-tiles.mjs"
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.1",
     "axios": "^1.7.9",
+    "cesium": "^1.146.0",
     "echarts": "^6.1.0",
     "element-plus": "^2.9.1",
     "normalize.css": "^8.0.1",
@@ -28,11 +30,17 @@
     "@types/three": "^0.185.4",
     "@vitejs/plugin-vue": "^5.2.1",
     "concurrently": "^10.0.5",
+    "geotiff": "^3.0.5",
     "sass": "^1.103.1",
     "typescript": "~5.6.3",
     "unplugin-vue-components": "^32.1.0",
     "vite": "^6.0.5",
     "vite-plugin-compression": "^0.5.1",
     "vue-tsc": "^2.2.0"
+  },
+  "description": "面向空间安全场景的一体化演示与研究平台：三维全球态势底座 + 碰撞预警 / 过境分析 / 区域评估 / 报告生成 / AI 智能体问答等能力。",
+  "repository": {
+    "type": "git",
+    "url": "https://gitee.com/open-source-space_1_0/openspace-safety-platform.git"
   }
 }

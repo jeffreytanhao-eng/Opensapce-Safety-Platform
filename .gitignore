@@ -9,6 +9,10 @@ dist
 .env
 .env.*
 !.env.example
+# 本地样例配置含真实账号密码/密钥，严禁入库
+sample.env
+# 本地导入用全量数据 dump（2.7GB，不入库）
+openspace-full-*.sql
 
 # 运行时数据（上传文件 / 报告产物 / 日志）：部署后由服务写入
 server/public/uploads/*

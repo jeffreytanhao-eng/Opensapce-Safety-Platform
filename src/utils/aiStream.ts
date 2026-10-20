@@ -72,7 +72,7 @@ export type AiAction =
   /** 知识图谱定位到某节点（type 见后端 KG_TYPES，key 为节点 key） */
   | { kind: 'kg_focus'; kgType: string; key: string }
   /** 切换三维态势右下角图例里的空间环境 / 天体图层（成组开关：这组图层当前已全部打开就全部关闭，否则全部打开）。
-   *  layers 取值见 scene.ts 的 SkyLayerKey：sun/moon/mansion/constellation/aurora/solarWind/dipole/shadowCone/groundTrack/ellipsoid。
+   *  layers 取值见 scene.ts 的 SkyLayerKey：sun/moon/stars/mansion/constellation/aurora/solarWind/dipole/groundTrack/ellipsoid。
    *  例：「看看地磁情况」→ ['dipole','solarWind']；「极光」→ ['aurora','solarWind']。 */
   | { kind: 'toggle_layers'; layers: string[] }
   /** 打开外部链接（如报告下载、互联网检索来源） */

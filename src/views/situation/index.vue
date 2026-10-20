@@ -46,7 +46,7 @@ import {
   regionPassSel, multiPassSel,
   passDistrictVisible, passBorderVisible, passCityVisible,
   skyLayers, SKY_LAYER_ITEMS, spaceWeather, spaceWeatherLoading, spaceWeatherError,
-  sceneQualityTier, shadowConeForce,
+  sceneQualityTier,
   conjEllipsoid, conjEllipsoidLoading, conjEllipsoidError, covDisplayScale,
   type SkyLayerKey, type SkyViewMode,
   PASS_SOURCES, SAT_SOURCES,
@@ -78,8 +78,11 @@ const { isMobile } = useDevice()
 const route = useRoute()
 const router = useRouter()
 /** 智能体浮层开关：与 dock 的场景视图无关（问答不改变三维现场），单独一份状态。
- *  默认打开：进入 /situation 即自动展开智能体面板，用户可点 dock 按钮手动收起 */
-const aiOpen = ref(true)
+ *  默认收起：右缘留「太空安全专家」外拉 tag，点击 / 底部 dock 按钮展开（打开应用时不占屏） */
+const aiOpen = ref(false)
+/** 桌面端「太空安全目标列表」面板收起开关：默认收起，左缘留外拉 tag（点击 / 底部 dock 展开）。
+ *  仅桌面端生效 —— 移动端面板是底部抽屉，保持原「进模块即弹出」行为 */
+const satPanelClosed = ref(true)
 /** 智能体抽屉实例：区域 / 多区域过境面板点「计算」时，把组织好的提示词交给它发起一轮提问 */
 const aiDrawerRef = ref<InstanceType<typeof AiChatDrawer>>()
 /** 「轨道根数（TLE 解析）」块折叠开关：默认展开（点击块标题可切换） */
@@ -536,6 +539,20 @@ function clearScene() {
 /** 收起卫星列表面板：仅收起面板，保留选中卫星与 dock 激活态（准星/轨道线/右侧详情） */
 function closeSatPanel() { dockMode.value = '' }
 
+/** 左缘外拉 tag 可见性（桌面端）：sat 模块下面板处于收起态 ——
+ *  含缺省打开（restoreDock 后 dockMode='sat' 且 satPanelClosed）与手动收起后（dockMode='' 且模块仍激活） */
+const showSatTag = computed(() => {
+  if (isMobile.value) return false
+  if (dockMode.value === 'sat') return satPanelClosed.value
+  return dockMode.value === '' && dockActive.value === 'sat'
+})
+
+/** 点左缘外拉 tag：拉出「太空安全目标列表」面板（模块未激活时按 dock 正常入口切入） */
+function openSatPanel() {
+  satPanelClosed.value = false
+  if (dockMode.value !== 'sat') chooseSatView('sat')
+}
+
 /** 收起星座列表面板：仅收起面板，保留当前三维与 dock 激活态（过滤轨道线/选中/拾取/镜头） */
 function closeConsPanel() { dockMode.value = ''; constPanel.q = '' }
 
@@ -811,6 +828,8 @@ function chooseSatView(key: SatView) {
   satMenuOpen.value = false
   if (dockActive.value !== key) clearScene()
   applyDock(key)
+  // 用户从 dock 主动进入卫星列表 → 拉出面板（缺省收起只针对「应用刚打开」的静默恢复，见 restoreDock）
+  if (key === 'sat') satPanelClosed.value = false
 }
 
 /** 点击 dock「综合态势」：展开/收起卫星 / 星座列表面板。
@@ -829,6 +848,8 @@ function toggleSatDock() {
   }
   if (dockActive.value && !SAT_VIEWS.includes(dockActive.value)) clearScene()
   applyDock(cur)
+  // 从 dock 主动进入卫星列表 → 拉出面板（与 chooseSatView 同口径）
+  if (cur === 'sat') satPanelClosed.value = false
   satMenuOpen.value = true
 }
 
@@ -899,7 +920,7 @@ function togglePassDock() {
  * 当前不在该模块时按各自默认子项（卫星列表 / 交会热力 / 城市过境）兜底。 */
 const satMenuTitle = computed(() => {
   const cur: SatView = SAT_VIEWS.includes(dockActive.value) ? (dockActive.value as SatView) : SAT_DEFAULT
-  return `综合态势·${SAT_SOURCES.find((s) => s.key === cur)?.label || '卫星列表'}`
+  return `综合态势·${SAT_SOURCES.find((s) => s.key === cur)?.label || '太空安全目标列表'}`
 })
 const heatMenuTitle = computed(
   () => `碰撞热力·${HEAT_SOURCES.find((s) => s.key === heatSource.value)?.label || '交会热力'}`
@@ -914,6 +935,11 @@ const passMenuTitle = computed(() => {
 function resetToInitial() {
   clearScene()
   applyDock('sat')
+}
+
+/** 复位镜头（不清选中与过滤）：回到缺省打开系统时的初始位置（东北亚）与初始地球大小 */
+function resetCameraHome() {
+  sceneRef.value?.resetCameraToHome()
 }
 
 /* ============================================================
@@ -1030,21 +1056,8 @@ function layerTitle(ly: { key: SkyLayerKey; label: string; desc: string }) {
   if (ly.key === 'solarWind' && !swWindReady.value) return '太阳风粒子流：等待 NOAA 太阳风数据（定时拉取中）'
   if (ly.key === 'groundTrack' && !skyLayerReady('groundTrack')) return '星下点轨迹：先在左侧列表或地球上选中一颗卫星'
   if (ly.key === 'ellipsoid' && !skyLayerReady('ellipsoid')) return '误差椭球：先在「碰撞热力」里点选一个交会事件'
-  if (ly.key === 'shadowCone' && shadowConeSuppressed.value) {
-    return '地影锥：当前画质档为「低」（低端机 / 移动端自动降档，或帧率不足已降档），该图层被默认隐藏；点右侧「强制显示」可打开'
-  }
   return `${ly.label}（${ly.desc}）`
 }
-
-/** 地影锥是否正被当前画质档主动隐藏（开关是开的、场景里却没有锥体）：
- *  低画质档为省半透明 overdraw 会隐藏它，但必须把状态说出来，否则会被当成图层故障。 */
-const shadowConeSuppressed = computed(() =>
-  skyLayers.shadowCone && sceneQualityTier.value === 'low' && !shadowConeForce.value
-)
-/** 已在低画质档下强制显示（用于给出「恢复」入口，避免只能开不能关） */
-const shadowConeForced = computed(() => sceneQualityTier.value === 'low' && shadowConeForce.value)
-function forceShadowCone() { shadowConeForce.value = true }
-function unforceShadowCone() { shadowConeForce.value = false }
 
 /** 三维里椭球的显示放大倍数（与三维绘制共用 scene.ts 的 covDisplayScale，口径唯一） */
 const covMag = computed(() => {
@@ -1665,11 +1678,21 @@ const aiTarget = computed(() =>
 
 <template>
   <div class="constel-page">
+    <!-- 大屏标题栏：固定顶部正中（冻结装饰层，pointer-events:none 不拦截画布交互） -->
+    <header class="constel-titlebar">
+      <div class="tb-frame">
+        <span class="tb-wing"></span>
+        <h1 class="tb-title">开源太空安全平台</h1>
+        <span class="tb-wing tb-wing-r"></span>
+      </div>
+    </header>
+
     <!-- 基础场景：canvas + 准星 + 加载/错误遮罩 + 顶部通知（内部自管） -->
     <BaseScene ref="sceneRef" />
 
-    <!-- 左侧卫星列表面板（dockMode==='sat' 时显示，自管过渡动画） -->
-    <SatListPanel @pick="pickFromList" @close="closeSatPanel" @source="switchSource" />
+    <!-- 左侧太空安全目标列表面板（dockMode==='sat' 时显示，自管过渡动画）；
+         桌面端缺省收起（satPanelClosed），由左缘外拉 tag / 底部 dock 拉出 -->
+    <SatListPanel v-if="isMobile || !satPanelClosed" @pick="pickFromList" @close="closeSatPanel" @source="switchSource" />
 
     <!-- 左侧发射站列表面板（dockMode==='site' 时显示，自管过渡动画） -->
     <SiteListPanel @pick="pickFromSiteList" @close="closeSitePanel" />
@@ -1776,10 +1799,10 @@ const aiTarget = computed(() =>
           </div>
         </transition>
       </div>
-      <!-- 空间态势分析智能体入口（前台免登录，/cgi/ai 只读工具 + 限流）：
+      <!-- 太空安全专家入口（原「空间态势智能体」，前台免登录，/cgi/ai 只读工具 + 限流）：
            与 dock 的其它项不同，它不切换三维视图，只开一个右侧浮层，故不高亮 dockActive -->
-      <button class="dock-btn" :class="{ on: aiOpen }" title="空间态势智能体：用自然语言查询目标、碰撞风险与空间环境" @click="aiOpen = !aiOpen">
-        <span class="dock-ico">◈</span><span class="dock-txt">智能体</span>
+      <button class="dock-btn" :class="{ on: aiOpen }" title="太空安全专家：用自然语言查询目标、碰撞风险与空间环境" @click="aiOpen = !aiOpen">
+        <span class="dock-ico">◈</span><span class="dock-txt">专家</span>
       </button>
       <!-- 还原初始状态：置于 dock 末位（智能体之后），默认灰；存在拾取/轨道线/热力模式时亮起，点击一键清空选中与过滤并退出热力；
            长按 5 秒返回控制台首屏（/mui/dashboard）。此处不用 :disabled（disabled 元素收不到指针事件，长按会失效），
@@ -1799,6 +1822,16 @@ const aiTarget = computed(() =>
         <span class="dock-ico">↺</span><span class="dock-txt">还原</span>
       </button>
     </div>
+
+    <!-- 左下角复位按钮：与「还原」不同，只把屏幕回到初始位置（东北亚）与初始地球大小，不清选中与过滤 -->
+    <button class="constel-reset" title="复位镜头：回到初始位置（东北亚）与初始地球大小" @click="resetCameraHome">
+      <svg class="reset-ico" viewBox="0 0 24 24" width="15" height="15" aria-hidden="true">
+        <circle cx="12" cy="12" r="6.5" fill="none" stroke="currentColor" stroke-width="1.8" />
+        <path d="M12 2.5v4M12 17.5v4M2.5 12h4M17.5 12h4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+        <circle cx="12" cy="12" r="1.8" fill="currentColor" />
+      </svg>
+      <span class="reset-txt">复位</span>
+    </button>
 
     <!-- 右下角图例（三种模式共用一个容器）：
          上半部分随模式变化 —— 普通模式＝物体类型颜色对照 +「轨道线」总开关；
@@ -1898,17 +1931,6 @@ const aiTarget = computed(() =>
         <span class="lg-dot" :class="ly.dotClass"></span>
         <span class="lg-name">{{ ly.label }}</span>
         <span class="lg-desc">{{ ly.desc }}</span>
-        <!-- 被当前画质档主动隐藏的图层（地影锥）：开关是亮的却没内容，这里明示并给强制显示 / 恢复入口 -->
-        <button
-          v-if="ly.key === 'shadowCone' && shadowConeSuppressed"
-          class="lg-force"
-          @click.stop.prevent="forceShadowCone"
-        >低画质已隐藏 · 强制显示</button>
-        <button
-          v-else-if="ly.key === 'shadowCone' && shadowConeForced"
-          class="lg-force on"
-          @click.stop.prevent="unforceShadowCone"
-        >已强制显示 · 恢复</button>
       </label>
       <!-- 空间环境摘要（Kp 分档徽标 + 实测龄期）：实测滞后 1~2 天，这里明确标注「非实时」 -->
       <div class="lg-sws" :title="swTitle">
@@ -2403,11 +2425,27 @@ const aiTarget = computed(() =>
       ◎
     </button>
 
+    <!-- 桌面端：太空安全目标列表缺省收起后的左缘外拉 tag（竖排文字），点击拉出面板 -->
+    <button
+      v-if="showSatTag"
+      class="edge-tag edge-tag-left"
+      title="展开太空安全目标列表"
+      @click="openSatPanel"
+    >太空安全目标列表</button>
+
+    <!-- 右缘外拉 tag：太空安全专家（AI 问答）收起时显示，点击拉出面板 -->
+    <button
+      v-if="!aiOpen"
+      class="edge-tag edge-tag-right"
+      title="展开太空安全专家"
+      @click="aiOpen = true"
+    >太空安全专家</button>
+
     <!-- 移动端：列表收起后的左上角浮标（面板被收起但 dock 仍激活），点击重新展开对应列表 -->
     <button
       v-if="isMobile && dockActive !== '' && dockMode === ''"
       class="side-panel-tab"
-      :title="dockActive === 'sat' ? '展开卫星列表' : dockActive === 'cons' ? '展开星座列表' : dockActive === 'site' ? '展开发射站列表' : dockActive === 'heat' ? '展开碰撞热力' : dockActive === 'pass' ? '展开城市过境' : dockActive === 'multi' ? '展开多区域过境' : '展开区域过境'"
+      :title="dockActive === 'sat' ? '展开太空安全目标列表' : dockActive === 'cons' ? '展开星座列表' : dockActive === 'site' ? '展开发射站列表' : dockActive === 'heat' ? '展开碰撞热力' : dockActive === 'pass' ? '展开城市过境' : dockActive === 'multi' ? '展开多区域过境' : '展开区域过境'"
       @click="dockMode = dockActive"
     >{{ dockActive === 'sat' ? '▤' : dockActive === 'cons' ? '✦' : dockActive === 'site' ? '⌖' : dockActive === 'heat' ? '✱' : dockActive === 'pass' ? '➤' : '◆' }}</button>
 

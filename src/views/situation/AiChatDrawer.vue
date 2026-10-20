@@ -80,8 +80,8 @@ const ACTION_LABEL: Record<string, string> = {
 }
 /** 空间环境 / 天体图层 key → 中文名（与 scene.ts 的 SKY_LAYER_ITEMS 对齐，仅用于对话轨迹文案） */
 const SKY_LAYER_LABEL: Record<string, string> = {
-  sun: '太阳', moon: '月亮', mansion: '三垣二十八宿', constellation: '西方88星座', aurora: '极光椭圆环',
-  solarWind: '太阳风粒子流', dipole: '地磁偶极磁力线', shadowCone: '地影锥', groundTrack: '星下点轨迹', ellipsoid: '误差椭球'
+  sun: '太阳', moon: '月亮', stars: '星空', mansion: '三垣二十八宿', constellation: '西方88星座', aurora: '极光椭圆环',
+  solarWind: '太阳风粒子流', dipole: '地磁偶极磁力线', groundTrack: '星下点轨迹', ellipsoid: '误差椭球'
 }
 /** 会改变三维态势的动作：命中它们就把覆盖层收成右侧小框，让左边态势露出来 */
 const SITUATION_KINDS = new Set(['select_satellite', 'select_constellation', 'compare_constellations', 'select_site', 'select_conj_event', 'select_pass_city', 'open_panel', 'draw_region', 'kg_focus', 'toggle_layers', 'show_satellites'])
@@ -741,7 +741,7 @@ watch(() => props.target?.key || '', (k, old) => {
         @pointerup="onHeadPointerUp"
         @pointercancel="onHeadPointerUp"
       >
-        <span class="ag-title"><i class="dot"></i>空间态势智能体<b>AI</b></span>
+        <span class="ag-title"><i class="dot"></i>太空安全专家<b>AI</b></span>
         <span class="ag-links">
           <button class="ag-link" type="button" @click="openFeedback">问题反馈</button>
           <i class="ag-link-sep"></i>

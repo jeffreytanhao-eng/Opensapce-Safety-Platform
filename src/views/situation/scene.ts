@@ -122,26 +122,20 @@ export const SHADOW_LABEL: Record<string, string> = {
  *  - 需要数据才有内容的图层（极光椭圆环、太阳风、误差椭球、星下点轨迹）：
  *    数据/选中未就绪时该图层不绘制，开关状态保持用户的选择
  * ============================================================ */
-export type SkyLayerKey = 'sun' | 'moon' | 'mansion' | 'constellation' | 'aurora' | 'solarWind' | 'dipole' | 'shadowCone' | 'groundTrack' | 'ellipsoid'
-/** 图层默认开关：太阳 / 月亮 / 地影锥 默认开启；
+export type SkyLayerKey = 'sun' | 'moon' | 'stars' | 'mansion' | 'constellation' | 'aurora' | 'solarWind' | 'dipole' | 'groundTrack' | 'ellipsoid'
+/** 图层默认开关：太阳 / 月亮 / 背景星空 默认开启；
  *  三垣二十八宿、西方 88 星座、极光椭圆环、地磁偶极磁力线、星下点轨迹、误差椭球、太阳风粒子流默认关闭
  *  （三垣二十八宿 / 西方 88 星座是「认识星空」的观感层，但星点多、连线密，两套又互为不同体系，易混淆，故默认关闭）；
  *  （其余默认关闭者只在「选中卫星 / 选中交会事件」时才有内容，极光 / 偶极 / 粒子流属空间环境示意、易干扰观察）
  *  ——都可在图例里手动打开。 */
 export const skyLayers = reactive<Record<SkyLayerKey, boolean>>({
-  sun: true, moon: true, shadowCone: true, mansion: false, constellation: false,
+  sun: true, moon: true, stars: true, mansion: false, constellation: false,
   aurora: false, dipole: false, groundTrack: false, ellipsoid: false, solarWind: false
 })
 
-/** 当前画质档（由 BaseScene 运行时同步：静态硬件探测 + 帧率自适应降档后的真实档位）。
- *  用途：图例上标注「该图层被当前画质档主动隐藏」—— 否则开关亮着却看不到东西，
- *  使用者会以为功能坏了（地影锥在低档就是被隐藏的，见 BaseScene.updateSky）。 */
+/** 当前画质档（由 BaseScene 运行时同步：静态硬件探测 + 帧率自适应降档后的真实档位）。 */
 export const sceneQualityTier = ref<QualityTier>('high')
 
-/** 低画质档隐藏地影锥时，是否由用户强制显示。
- *  低档隐藏它的理由是「大面积半透明几何的 overdraw」；使用者明确需要时（判断卫星是否进地影）
- *  可自行覆盖，代价是低端机可能出现掉帧。 */
-export const shadowConeForce = ref(false)
 /** 图例图层适用的视图模式（图例按当前模式过滤，不适用的图层整行不展示）：
  *  normal = 卫星云 / 星座轨道视图；heat = 碰撞热力视图；pass = 过境分析视图（城市 / 区域） */
 export type SkyViewMode = 'normal' | 'heat' | 'pass'
@@ -153,7 +147,7 @@ const ALL_VIEW_MODES: SkyViewMode[] = ['normal', 'heat', 'pass']
 export const SKY_LAYER_ITEMS: { key: SkyLayerKey; label: string; desc: string; dotClass: string; modes: SkyViewMode[] }[] = [
   { key: 'sun', label: '太阳', desc: '光照方向', dotClass: 'lg-sun', modes: ALL_VIEW_MODES },
   { key: 'moon', label: '月亮', desc: '月相', dotClass: 'lg-moon', modes: ALL_VIEW_MODES },
-  { key: 'shadowCone', label: '地影锥', desc: '本影 / 半影', dotClass: 'lg-shadow', modes: ALL_VIEW_MODES },
+  { key: 'stars', label: '星空', desc: '背景星点', dotClass: 'lg-stars', modes: ALL_VIEW_MODES },
   { key: 'mansion', label: '三垣二十八宿', desc: '三垣 · 四象 · 距星', dotClass: 'lg-mansion', modes: ALL_VIEW_MODES },
   { key: 'constellation', label: '西方88星座', desc: 'IAU 88 天区 · 连线', dotClass: 'lg-constellation', modes: ALL_VIEW_MODES },
   { key: 'aurora', label: '极光椭圆环', desc: '按 Kp', dotClass: 'lg-aurora', modes: ALL_VIEW_MODES },
@@ -516,19 +510,21 @@ export interface GState {
   simTimeMs: number
   lastLive: number
   earthMat: import('three').MeshPhongMaterial | null
+  /** Three 地球本体（Cesium 底座就绪后整体隐藏让位：影像/地形/晨昏线由 Cesium 渲染；大气辉光壳是其子节点） */
+  earthMesh: import('three').Mesh | null
   sunLight: import('three').DirectionalLight | null
   /** 二十八星宿图层（28 距星点 + 四象连线，挂场景根、惯性系不随地球自转；宿名标签由 BaseScene 的 DOM 层呈现） */
   mansionGroup: import('three').Group | null
   /** 西方 88 星座连线图层（IAU 天区连线，挂场景根、惯性系不随地球自转；星座名标签由 BaseScene 的 DOM 层呈现） */
   constellationGroup: import('three').Group | null
+  /** 背景星空（装饰性星点壳，挂场景根、惯性系固定不动；见 starfield.ts） */
+  starfieldGroup: import('three').Group | null
   /** 大气层辉光壳（运行时降档可整体隐藏） */
   atmo: import('three').Mesh | null
   /** 太阳标记（发光球 + 光晕，方向真实、距离压缩到场景内） */
   sunMarker: import('three').Group | null
   /** 月亮（方向与月相真实，按真实地心距放置、半径放大便于观察） */
   moonMesh: import('three').Mesh | null
-  /** 地球地影锥（本影 + 半影，随太阳方向实时定向） */
-  shadowGroup: import('three').Group | null
   /** 地固系叠加层（随地球自转，rotation.y = GMST）：极光椭圆环、星下点轨迹等贴地元素都挂这里 */
   earthFixedGroup: import('three').Group | null
   /** 极光椭圆环（南北两环，圆心为偶极磁极；环下沿/宽度/亮度由当日 Kp 驱动） */
@@ -640,8 +636,8 @@ export interface GState {
 export const g: GState = {
   renderer: null, scene: null, camera: null, controls: null,
   rafId: 0, lastTs: 0, simTimeMs: Date.now(), lastLive: 0,
-  earthMat: null, sunLight: null, mansionGroup: null, constellationGroup: null, atmo: null,
-  sunMarker: null, moonMesh: null, shadowGroup: null, earthFixedGroup: null, auroraGroup: null, dipoleGroup: null, solarWind: null,
+  earthMat: null, earthMesh: null, sunLight: null, mansionGroup: null, constellationGroup: null, starfieldGroup: null, atmo: null,
+  sunMarker: null, moonMesh: null, earthFixedGroup: null, auroraGroup: null, dipoleGroup: null, solarWind: null,
   groundTrack: null, covGroup: null, cloudList: [], satrecs: [],
   scenePos: [], sceneVel: [], instOf: [], modelIndices: {},
   modelMeshes: {}, modelLod: 'low',
@@ -783,7 +779,7 @@ export const dockActive = ref<DockMode>('')
  */
 export type SatView = 'sat' | 'cons' | 'site'
 export const SAT_SOURCES: { key: SatView; label: string; desc: string }[] = [
-  { key: 'sat', label: '卫星列表', desc: '按名称 / 类型 / 轨道区域检索 · 拾取单星' },
+  { key: 'sat', label: '太空安全目标列表', desc: '按名称 / 类型 / 轨道区域检索 · 拾取单星' },
   { key: 'cons', label: '星座列表', desc: '按星座检索 · 过滤成员并绘出轨道线' },
   { key: 'site', label: '发射站列表', desc: '地球按经纬度打点 · 点站看即将发射与发射历史' }
 ]

@@ -55,12 +55,19 @@ import {
   regionPassSel, regionPassPlaying, regionPassProgress,
   multiPassSel, multiPassPlaying, multiPassProgress,
   skyLayers, spaceWeather, spaceWeatherError, spaceWeatherLoading, spaceWeatherAt,
-  sceneQualityTier, shadowConeForce,
+  sceneQualityTier,
   conjEllipsoid, conjEllipsoidError, conjEllipsoidLoading, covDisplayScale,
   launchSites, siteMarkersVisible, siteSel, siteOpen
 } from './scene'
+import {
+  configureEarthBase, initCesium,
+  renderCesium, syncCameraToThree, setCameraFromScene,
+  resizeCesium, destroyCesium, applyCesiumQuality,
+  pickEarthLonLat as cesiumPickEarthLonLat
+} from './cesiumEarth'
 import { buildLunarMansions, SKY_LABELS } from './lunarMansions'
 import { buildWesternConstellations, WESTERN_LABELS } from './westernConstellations'
+import { buildStarfield } from './starfield'
 import {
   getPassMap, getPassBatches, getPassCityIds, getPassCityDetail,
   type PassTargetItem, type PassDetailItem
@@ -129,7 +136,7 @@ const centerLoading = computed<{ text: string; bar: number | null } | null>(() =
  * ============================================================ */
 let qualityTier: QualityTier = detectDeviceTier()
 let quality: QualityPreset = QUALITY_PRESETS[qualityTier]
-// 把实际生效的档位同步到响应式状态：图例据此标注「该图层被当前画质档隐藏」（如低档的地影锥）
+// 把实际生效的档位同步到响应式状态：供调试与运行时参考
 sceneQualityTier.value = qualityTier
 /** 每轮 SGP4 传播预算（随档位变化：低端机下调，避免播放/交互掉帧） */
 let propBudget = quality.propBudget
@@ -156,11 +163,13 @@ let matrixDrift = 0
  *    写死的方向在不同时刻进入会指向不同海域（原实现固定 (3.0, 1.9, 4.6)，进入时常落在太平洋）；
  *  - 时间仍只体现在地球自转与晨昏线上，不影响「进入时看到哪里」。
  * ============================================================ */
-/** 目标地表点（°）：中国中部 */
-const HOME_LON = 105
-const HOME_LAT = 35
-/** 初始/复位机位距地心距离：沿用原固定机位的模长，保持视觉观感不变 */
-const HOME_CAM_DIST = Math.hypot(3.0, 1.9, 4.6)
+/** 目标地表点（°）：东北亚（缺省打开系统时的屏幕定位中心） */
+const HOME_LON = 127
+const HOME_LAT = 42
+/** 初始/复位机位距地心距离：3.5 —— 地球直径约占视口高 64%（用户口径：应用打开时地球要更大）。
+ *  原值 Math.hypot(3.0, 1.9, 4.6) ≈ 5.83 时仅约 37%，观感偏小；3.5 仍远大于穿地限位
+ *  EARTH_ORBIT_MIN_DIST(1.08)，滚轮缩放不受影响。 */
+const HOME_CAM_DIST = 3.5
 
 /** 当前时刻该地表点在场景世界坐标中的方向（含 passGroup 自转相位） */
 function homeDirection(): THREE.Vector3 {
@@ -189,6 +198,18 @@ function applyHomeCamera() {
     applyOrbitPolarLimits()
     g.controls.update()
   }
+  // Cesium 模式：同一机位写入 Cesium 相机（Cesium 是相机主控，只写 Three 会被下一帧
+  // syncCameraToThree 反灌覆盖；setView 立即生效，不触发 moveStart/End）
+  if (cesiumActive) {
+    const dir = homeDirection().negate() // 望向地心（homeDirection 每次返回新向量，negate 安全）
+    setCameraFromScene(cam.position, dir, cam.up, g.simTimeMs)
+  }
+}
+
+/** 仅复位镜头：回到初始机位（东北亚 + 初始地球大小），不清选中与过滤（区别于 resetSelected） */
+function resetCameraToHome() {
+  restoreEarthOrbitLimits()
+  applyHomeCamera()
 }
 
 /* 运行时帧率自适应状态：滚动窗口统计帧耗时，连续偏低才降一档（只降不升，避免反复抖动） */
@@ -210,7 +231,8 @@ function applyRuntimeQuality() {
   sceneQualityTier.value = next
   // 低档隐藏大气辉光壳（半透明大球最耗填充率）
   if (g.atmo) g.atmo.visible = next !== 'low'
-  // 地影锥的低档隐藏由 updateSky 每帧按 qualityTier 统一决定（见那里的图层显隐判定），此处不重复设置
+  // Cesium 底座同档降开销（影像误差阈值 / MSAA / 分辨率）
+  if (cesiumActive) applyCesiumQuality(next)
   // 降采样：重建帧缓冲尺寸（一次性开销，仅降档时发生）
   const renderer = g.renderer
   const el = container.value
@@ -288,7 +310,9 @@ function initScene() {
   g.camera = camera
   applyHomeCamera()
 
-  const renderer = new THREE.WebGLRenderer({ antialias: quality.antialias })
+  // alpha:true：Cesium 底座就绪后 Three 背景转透明（scene.background 置 null），地球由下层 Cesium canvas 呈现；
+  // Cesium 初始化失败时降级回纯 Three（此时 scene.background 仍为深色，alpha 不影响视觉）
+  const renderer = new THREE.WebGLRenderer({ antialias: quality.antialias, alpha: true })
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, quality.pixelRatio))
   renderer.setSize(el.clientWidth, el.clientHeight)
   el.appendChild(renderer.domElement)
@@ -327,6 +351,10 @@ function initScene() {
   fill.position.set(-6, -2, -5)
   scene.add(fill)
 
+  // 背景星空：装饰性星点壳（挂场景根，惯性系固定不动；默认开启，可在图例关闭；见 starfield.ts）
+  const starfield = buildStarfield()
+  scene.add(starfield)
+  g.starfieldGroup = starfield
   // 三垣二十八宿：取代原先的随机星空背景（挂场景根，惯性系固定不动；星官名称标签由模板的 mansionLabelLayer 呈现）
   const mansion = buildLunarMansions()
   scene.add(mansion.group)
@@ -357,6 +385,10 @@ function initScene() {
     })
     ro.observe(el)
   }
+
+  // Cesium 底座接线（异步）：成功 = 双引擎混合（Cesium 画地球、Three 画卫星/轨道/星空），
+  // 失败 = 自动降级回纯 Three 套路（OrbitControls + Three 地球），交互与视觉全部保持原行为
+  void applyCesiumBase()
 }
 
 /** 相机距地心硬约束：controls.minDistance 只约束「相机到 target」的距离，target 一旦被
@@ -372,7 +404,79 @@ function clampCameraOutsideEarth() {
 }
 
 /* ============================================================
- * 太阳 / 月亮 / 地球地影（把「光照条件」画进场景）
+ * Cesium 底座接线（双引擎混合模式）
+ * 成功后：Cesium canvas 在下层（zIndex 0）承载影像/地形/大气/晨昏线并接收全部相机交互；
+ * Three 画布退居透明叠加层（zIndex 1 + pointer-events:none），只画卫星/轨道/星空/标签。
+ * 相机由 Cesium 的 ScreenSpaceCameraController 驱动，动画循环每帧被动同步到 g.camera
+ * （见 renderCesium / syncCameraToThree / setCameraFromScene），Three 层拾取与投影口径不变。
+ * 失败（WebGL 上下文不足 / 资源缺失等）时 cesiumActive 保持 false，一切走原 Three 套路。
+ * ============================================================ */
+let cesiumActive = false
+/** 隐形遮挡球（只写深度不写颜色的 WGS84 椭球）：Three 叠加层不共享 Cesium 深度，
+ *  卫星/轨道/星空的地球背面遮挡靠它实现（视觉透明，行为与被隐藏的 Three 地球 mesh 一致） */
+let cesiumOccluder: THREE.Mesh | null = null
+/** 飞行期间逐帧转递 g.camera 姿态用（避免每帧新建向量） */
+const _cesiumFlyDir = new THREE.Vector3()
+async function applyCesiumBase() {
+  const el = container.value
+  if (!el) return
+  // 离线数据源地址（影像瓦片包 / DEM 地形包）：后续由 /cgi/config 下发后在此注入；
+  // 未配置时 cesiumEarth 内部用 ArcGIS Online 公网影像兜底、椭球面无地形。
+  // 地形包生成：node scripts/build-terrain-tiles.mjs --input <DEM.tif>（产物输出到 public/terrain），
+  // 启用示例：configureEarthBase({ terrainUrl: import.meta.env.BASE_URL + 'terrain' })
+  configureEarthBase({})
+  const ok = await initCesium(el, {
+    // 对齐原 OrbitControls 'start'/'end'：相机交互期间冻结虚拟时间（simStepSec=0），帧率让给交互
+    onMoveStart: () => { g.userInteracting = true },
+    onMoveEnd: () => { g.userInteracting = false }
+  })
+  // 异步期间组件可能已卸载 / 场景可能已重建
+  if (!ok || disposed || !g.scene || !g.renderer) return
+  cesiumActive = true
+  // Three 背景转透明，露出下层 Cesium 地球
+  g.scene.background = null
+  // Three 画布退居叠加层：绝对定位铺满 + 置顶 + 不再接收输入（事件由 Cesium canvas 接收后冒泡到容器，
+  // onMounted 里的 pointer 监听挂的就是容器，拾取/框选链路不用改）
+  const canvas = g.renderer.domElement
+  canvas.style.position = 'absolute'
+  canvas.style.inset = '0'
+  canvas.style.zIndex = '1'
+  canvas.style.pointerEvents = 'none'
+  // 相机交互权整体移交 Cesium（OrbitControls 保留对象用于降级兜底，仅停用）
+  if (g.controls) g.controls.enabled = false
+  // Three 地球（含大气辉光子节点与夜光 emissiveMap）整体让位：影像/地形/晨昏线由 Cesium 渲染
+  if (g.earthMesh) g.earthMesh.visible = false
+  // 隐形遮挡球：WGS84 椭球口径（正球沿赤道/极轴缩放），与 Cesium 地球表面同形，
+  // 深度遮挡贴合影像表面；colorWrite=false 只写深度，视觉完全透明。
+  // raycast 置空：过境目标面拾取（intersectObjects）不应命中山体。
+  const occ = new THREE.Mesh(
+    new THREE.SphereGeometry(1, 96, 96),
+    new THREE.MeshBasicMaterial({ colorWrite: false })
+  )
+  occ.scale.set(WGS84_A_KM / EARTH_RADIUS_KM, WGS84_B_KM / EARTH_RADIUS_KM, WGS84_A_KM / EARTH_RADIUS_KM)
+  occ.raycast = () => {}
+  // ⚠ 必须最先渲染：Three 不透明队列按 renderOrder → material.id（创建顺序）→ 距离排序
+  //（见 three.module.js painterSortStable），而本材质在 buildSky 的太阳/月亮之后才创建，
+  //  若不加 renderOrder，日月会先上屏、遮挡球后写深度 —— 背面日月「透过地球」可见。
+  //  renderOrder=-1 强制深度先落盘，其后所有不透明/透明对象都会被正确遮挡。
+  occ.renderOrder = -1
+  g.scene.add(occ)
+  cesiumOccluder = occ
+  applyCesiumQuality(qualityTier)
+  // Cesium 异步就绪晚于首帧布局，而默认渲染循环已关闭（useDefaultRenderLoop=false，
+  // 每帧 resize 不再由 Cesium 自跑），ResizeObserver 首班车赶不上：canvas 停在 300×150
+  // 默认尺寸。这里按当前容器补一次画布尺寸，让 Cesium canvas 铺满容器（地球居中）。
+  resizeCesium()
+  // 就绪后立刻渲一帧 Cesium（动画循环下一帧也会带，这里让地球与 Three 叠加层同帧出现，避免闪纯色底）
+  renderCesium(g.simTimeMs)
+  // Cesium 默认视图（本初子午线/赤道上空）会经 syncCameraToThree 反灌成初始机位，
+  // 这里在其之前主动写入 home 机位：缺省打开系统时定位到东北亚
+  applyHomeCamera()
+  syncCameraToThree(g.camera!, g.simTimeMs)
+}
+
+/* ============================================================
+ * 太阳 / 月亮（把「光照条件」画进场景）
  *
  * 为什么方向真实、距离压缩：
  *   太阳真实距离 1 AU = 23481 倍地球半径、月亮 60.3 倍地球半径。太阳按真实比例根本进不了
@@ -384,11 +488,10 @@ function clampCameraOutsideEarth() {
  *   月亮与地球共用同一盏太阳平行光（g.sunLight），朝向太阳的一面被照亮、背面全黑，
  *   月相天然正确。地球同理——昼夜分界线由太阳方向决定，这正是 sunDirection 必须准确的原因。
  *
- * 地影锥：
- *   本影 / 半影按圆锥模型（半径随背阳距离线性收敛 / 张开），随太阳方向实时定向，
- *   用于直观判断卫星是否处于地影（对应后端落库的 pass_detail.shadow_state）。
- *   实体锥（不画轮廓线）：本影深色、半影浅色外壳；锥体只画 SHADOW_LEN 长（约 5.1 万 km），
- *   刚好覆盖到 GEO（4.2 万 km）——再长只是视觉噪音。
+ * 注：曾经画过的「地影锥」（本影 / 半影实体锥）已移除 —— 半透明锥壁在相机掠过背阳侧时
+ *   会呈现为覆盖半个屏幕的巨大扇形暗区（时隐时现、难以预期）。昼夜明暗已由 Cesium
+ *   globe.enableLighting 与太阳平行光表达，卫星是否处于地影仍由后端 illumination 计算
+ *   （pass_detail.shadow_state），不再需要这层视觉示意。
  * ============================================================ */
 /** 太阳标记到地心的场景距离（地球半径 = 1）：取在星空壳 110~170 之外，避免与星点重叠 */
 const SUN_MARKER_DIST = 200
@@ -396,10 +499,6 @@ const SUN_MARKER_R = 5
 /** 月亮：真实地心距 384400 km / 6371 ≈ 60.3 场景单位；半径真实仅 0.27，放大 4 倍便于观察 */
 const MOON_MARKER_DIST = 60.3
 const MOON_MARKER_R = 1.1
-/** 地影锥绘制长度（场景单位）≈ 5.1 万 km：只需覆盖到 GEO（4.2 万 km，约 7.6 单位），再长只是视觉噪音 */
-const SHADOW_LEN = 8
-/** 太阳视半径（弧度）：0.2666°，与 server/lib/illumination.js 同口径 */
-const SUN_ANG_RAD = 0.2666 * Math.PI / 180
 
 /** 极光椭圆环：贴地半径取地球半径的 1.004 倍，避免与地表贴图 z-fighting */
 const AURORA_R = EARTH_R * 1.004
@@ -515,33 +614,6 @@ function buildSky(scene: THREE.Scene) {
   )
   scene.add(moon)
   g.moonMesh = moon
-
-  // ---- 地影锥：本影（深色实体）+ 半影（浅色外壳），不画轮廓线 ----
-  // 两端半径由圆锥模型的相似三角形给出（本影收敛、半影张开）。
-  // 用 DoubleSide：相机在地影锥内时也能看到锥壁（代价是锥内视角整体偏暗，属预期观感）。
-  const umbraTop = EARTH_R - SHADOW_LEN * Math.tan(SUN_ANG_RAD)
-  const penumbraTop = EARTH_R + SHADOW_LEN * Math.tan(SUN_ANG_RAD)
-  const shadow = new THREE.Group()
-  const umbra = new THREE.Mesh(
-    new THREE.CylinderGeometry(umbraTop, EARTH_R, SHADOW_LEN, 64, 1, true),
-    new THREE.MeshBasicMaterial({
-      color: 0x04060d, transparent: true, opacity: 0.42,
-      side: THREE.DoubleSide, depthWrite: false
-    })
-  )
-  umbra.position.y = SHADOW_LEN / 2
-  shadow.add(umbra)
-  const penumbra = new THREE.Mesh(
-    new THREE.CylinderGeometry(penumbraTop, EARTH_R, SHADOW_LEN, 64, 1, true),
-    new THREE.MeshBasicMaterial({
-      color: 0x2f5ea8, transparent: true, opacity: 0.07,
-      side: THREE.DoubleSide, depthWrite: false
-    })
-  )
-  penumbra.position.y = SHADOW_LEN / 2
-  shadow.add(penumbra)
-  scene.add(shadow)
-  g.shadowGroup = shadow
 
   // ---- 地固系叠加层：极光椭圆环与星下点轨迹都挂这里（统一随地球自转，见 syncEarthSpin）----
   const earthFixed = new THREE.Group()
@@ -1323,10 +1395,8 @@ function updateSolarWind(sunUnit: THREE.Vector3, dtSec: number) {
   attr.needsUpdate = true
 }
 
-/** 每帧更新：太阳光方向 / 太阳标记 / 月亮 / 地影锥 / 极光环定向 / 太阳风粒子，并统一应用图层显隐
+/** 每帧更新：太阳光方向 / 太阳标记 / 月亮 / 极光环定向 / 太阳风粒子，并统一应用图层显隐
  *  @param {number} dtSec 真实帧间隔（秒）；交互期与虚拟时间一并冻结，粒子不动 */
-const _skyAxis = new THREE.Vector3()
-const _UP_Y = new THREE.Vector3(0, 1, 0)
 function updateSky(dtSec: number) {
   const d = new Date(g.simTimeMs)
   const s = sunDirection(d)
@@ -1344,22 +1414,16 @@ function updateSky(dtSec: number) {
     const m = moonDirection(d)
     g.moonMesh.position.copy(eciToScene(m.dir.x, m.dir.y, m.dir.z).normalize()).multiplyScalar(MOON_MARKER_DIST)
   }
-  if (g.shadowGroup) {
-    // 锥轴沿「背离太阳」方向：+Y 轴转到 -sunUnit
-    _skyAxis.copy(sunUnit).multiplyScalar(-1)
-    g.shadowGroup.quaternion.setFromUnitVectors(_UP_Y, _skyAxis)
-  }
 
   // 图层显隐：开关状态每帧读一次（赋值开销可忽略，省掉一套 watch 同步）
   if (g.sunMarker) g.sunMarker.visible = skyLayers.sun
   if (g.moonMesh) g.moonMesh.visible = skyLayers.moon
-  // 地影锥额外受画质档约束：低档隐藏它（大面积半透明几何的 overdraw）。
-  // 但图例上会标注该状态并提供「强制显示」，由用户决定是否承担这点开销（shadowConeForce）。
-  if (g.shadowGroup) g.shadowGroup.visible = skyLayers.shadowCone && (qualityTier !== 'low' || shadowConeForce.value)
   // 二十八星宿：无画质档约束（仅 28 点 + 少量线段，开销可忽略）
   if (g.mansionGroup) g.mansionGroup.visible = skyLayers.mansion
   // 西方 88 星座：同为星空连线层，无画质档约束
   if (g.constellationGroup) g.constellationGroup.visible = skyLayers.constellation
+  // 背景星空：装饰层，无画质档约束（约 2500 个点，开销可忽略）
+  if (g.starfieldGroup) g.starfieldGroup.visible = skyLayers.stars
   if (g.auroraGroup) g.auroraGroup.visible = skyLayers.aurora && g.auroraGroup.children.length > 0
   if (g.dipoleGroup) g.dipoleGroup.visible = skyLayers.dipole && g.dipoleGroup.children.length > 0
   if (g.solarWind) g.solarWind.visible = skyLayers.solarWind && hasSolarWindData()
@@ -1427,6 +1491,7 @@ function buildEarth(scene: THREE.Scene, earthSeg: number, atmoSeg: number) {
   })
   g.earthMat = mat
   const earth = new THREE.Mesh(new THREE.SphereGeometry(EARTH_R, earthSeg, earthSeg), mat)
+  g.earthMesh = earth
   scene.add(earth)
   const atmo = new THREE.Mesh(
     new THREE.SphereGeometry(EARTH_R * 1.012, atmoSeg, atmoSeg),
@@ -4235,6 +4300,33 @@ function updateCameraFly(now: number): boolean {
 /** flyToSat 落位方向复用向量 */
 const _flyZen = new THREE.Vector3()
 const _flyOff = new THREE.Vector3()
+/** 飞回地心视角的落位焦点（恒为原点；beginCamFly 的 toTarget 入参） */
+const _flyHomeTarget = new THREE.Vector3()
+/** 起飞公共入口：写 fromPos/fromTarget/toPos/toTarget 并激活飞行（flyToPoint / flyToPassPoint /
+ *  flyToEarthFixedPoint 三个起飞点共用，保证起点口径只有这一份）。
+ *  Cesium 模式下 controls.target 不再随交互更新（ScreenSpaceCameraController 接管后它是旧焦点残值），
+ *  直接拿它做 lookAt 插值会在起飞瞬间把视线拽向旧焦点 —— 改取「当前视线上、与落点等距」的点，
+ *  起飞方向 = 当前视线、落位方向 = 目标，全程平滑；Three 模式下 controls.target 恒为当前环绕焦点
+ *  （OrbitControls 始终保持相机注视它），原样使用零跳变。 */
+function beginCamFly(toPos: THREE.Vector3, toTarget: THREE.Vector3, focusMode: 'none' | 'sel' | 'point') {
+  const cam = g.camera, controls = g.controls
+  if (!cam || !controls) return
+  camFly.fromPos.copy(cam.position)
+  if (cesiumActive) {
+    cam.getWorldDirection(_cesiumFlyDir)
+    camFly.fromTarget
+      .copy(cam.position)
+      .addScaledVector(_cesiumFlyDir, Math.max(cam.position.distanceTo(toTarget), 1e-3))
+  } else {
+    camFly.fromTarget.copy(controls.target)
+  }
+  camFly.toPos.copy(toPos)
+  camFly.toTarget.copy(toTarget)
+  camFly.t0 = performance.now()
+  camFly.active = true
+  camFly.focusMode = focusMode
+}
+
 /** 镜头飞到某个场景点位并聚焦它（拾取卫星 / 热力交会点共用同一套落位算法，口径只有这一份）。
  *  focusMode 决定落位后焦点怎么切（见 camFly.focusMode）。 */
 function flyToPoint(point: THREE.Vector3, focusMode: 'sel' | 'point') {
@@ -4252,15 +4344,9 @@ function flyToPoint(point: THREE.Vector3, focusMode: 'sel' | 'point') {
   // 故先夹进极角限位：|纬度| > 60° 时相机自动偏出 30°，其余情况严格共线。
   const off = clampPolarToLimit(_flyOff.copy(zen))
   const toPos = point.clone().addScaledVector(off, r)
-  camFly.fromPos.copy(cam.position)
-  camFly.fromTarget.copy(controls.target)
-  // up 不动：全程世界 +Y（见 ORBIT_POLE_LIMIT），飞行只改机位与焦点，画面不会滚转 / 南北翻转
-  camFly.toPos.copy(toPos)
-  camFly.toTarget.copy(point)
-  camFly.t0 = performance.now()
-  camFly.active = true
+  // up 不动：全程世界 +Y（见 ORBIT_POLE_LIMIT），飞行只改机位与焦点，画面不会滚转 / 南北翻转；
   // 焦点切换推迟到落位时执行（见 updateCameraFly）：不能在这里切，否则动画未开始就先按新焦点重算相机球坐标
-  camFly.focusMode = focusMode
+  beginCamFly(toPos, point, focusMode)
 }
 
 function flyToSat(anchorPos: THREE.Vector3) {
@@ -4279,6 +4365,8 @@ function onResize() {
   g.camera.aspect = el.clientWidth / el.clientHeight
   g.camera.updateProjectionMatrix()
   g.renderer.setSize(el.clientWidth, el.clientHeight)
+  // Cesium 底座画布同步尺寸（内部含相机 frustum.aspectRatio 更新，被动同步会带给 g.camera）
+  resizeCesium()
   // 偶极场线（Line2 管线）的像素线宽依赖画布分辨率，须同步，否则线宽随窗口比例失真（发光层与白芯线两层都要）
   const lm = dipoleLines?.material as unknown as { resolution?: THREE.Vector2 } | undefined
   if (lm?.resolution) lm.resolution.set(el.clientWidth, el.clientHeight)
@@ -4337,12 +4425,28 @@ const REGION_DBLCLICK_PX = 8
  *  该模式下点击不再拾取城市，城市信息只保留中文标注（三维城市点云已整体取消）。 */
 const regionMode = computed(() => passMode.value && dockActive.value === 'region')
 
-/** 经纬度（度）→ 场景坐标（单位球半径 r）。口径与 eciToScene 一致：scene = (ECEF.x, ECEF.z, -ECEF.y) */
+/** WGS84 椭球参数（km）：与 Cesium 底座同口径，地表叠加物才能贴合影像/地形表面
+ *  （正球 6371km 与 WGS84 椭球最大差约 21km，贴地表元素在高倍缩放下会明显悬空/入地） */
+const WGS84_A_KM = 6378.137
+const WGS84_B_KM = 6356.752314245
+/** WGS84 地心半径（km）随纬度变化：r(φ) = √(((a²cosφ)² + (b²sinφ)²) / ((a·cosφ)² + (b·sinφ)²)) */
+function wgs84RadiusKm(latRad: number): number {
+  const s = Math.sin(latRad)
+  const c = Math.cos(latRad)
+  const a2 = WGS84_A_KM * WGS84_A_KM
+  const b2 = WGS84_B_KM * WGS84_B_KM
+  return Math.sqrt((a2 * a2 * c * c + b2 * b2 * s * s) / (a2 * c * c + b2 * s * s))
+}
+
+/** 经纬度（度）→ 场景坐标（WGS84 口径：r=1 落在该纬度的椭球表面，r 按场景单位缩放）。
+ *  轴映射口径与 eciToScene 一致：scene = (ECEF.x, ECEF.z, -ECEF.y)；
+ *  模长按当地椭球地心半径 / 6371（场景单位基准）换算，使贴地半径常量（PASS_TARGET_R 等）语义不变。 */
 function lonLatToScene(lon: number, lat: number, r: number): THREE.Vector3 {
   const lonRad = (lon * Math.PI) / 180
   const latRad = (lat * Math.PI) / 180
   const cosLat = Math.cos(latRad)
-  return new THREE.Vector3(r * cosLat * Math.cos(lonRad), r * Math.sin(latRad), -r * cosLat * Math.sin(lonRad))
+  const k = (r * wgs84RadiusKm(latRad)) / EARTH_RADIUS_KM
+  return new THREE.Vector3(k * cosLat * Math.cos(lonRad), k * Math.sin(latRad), -k * cosLat * Math.sin(lonRad))
 }
 
 /* ---------------- 过境高亮：目标行政区划面 + 空间轨道标记 ----------------
@@ -4600,14 +4704,8 @@ function flyToPassPoint(local: THREE.Vector3, dist: number) {
   )
   if (dir.lengthSq() < 1e-9) return
   dir.normalize().multiplyScalar(dist)
-  camFly.fromPos.copy(cam.position)
-  camFly.fromTarget.copy(controls.target)
-  camFly.toPos.copy(dir)
-  camFly.toTarget.set(0, 0, 0)
-  camFly.t0 = performance.now()
-  camFly.active = true
   // 终点焦点在地心，落位时不切焦点（清掉上一次「飞行到卫星 / 交会点」的标记）
-  camFly.focusMode = 'none'
+  beginCamFly(dir, _flyHomeTarget, 'none')
   // 焦点即将回到地心，恢复「绕地心」最小距离（右键环绕卫星时被放宽过）
   restoreEarthOrbitLimits()
 }
@@ -5225,10 +5323,18 @@ const _pickNdc = new THREE.Vector2()
 /** 预览线（最后一个顶点 → 光标）在重建叠加层时创建，移动鼠标时只改坐标不重建几何 */
 let regionPreviewLine: THREE.Line | null = null
 
-/** 屏幕像素 → 地表经纬度（射线未命中地球返回 null） */
+/** 屏幕像素 → 地表经纬度（射线未命中地球返回 null）。
+ *  Cesium 模式走 Cesium 精确拾取：优先含地形的真实地表（pickPosition），退回 WGS84 椭球交点
+ *  （pickEllipsoid）——与 Cesium 影像/地形表面同口径（本局数学球口径会带 ~21km 椭球扁率视差）；
+ *  Three 兜底模式仍走解析球交点。调用点传的是画布局部像素，两画布同容器 inset:0，加 rect 偏移即 client 坐标。 */
 function pickEarthLonLat(px: number, py: number): { lon: number; lat: number } | null {
   const renderer = g.renderer, cam = g.camera
   if (!renderer || !cam) return null
+  if (cesiumActive) {
+    const crect = renderer.domElement.getBoundingClientRect()
+    const hit = cesiumPickEarthLonLat(px + crect.left, py + crect.top)
+    return hit ? { lon: hit.lon, lat: hit.lat } : null
+  }
   const rect = renderer.domElement.getBoundingClientRect()
   if (!rect.width || !rect.height) return null
   _pickNdc.x = (px / rect.width) * 2 - 1
@@ -5845,14 +5951,18 @@ const passSlots: Record<PassKind, PassSlot> = {
   }
 }
 
-/** 地球自转同步：贴图 offset 与 passGroup.rotation.y 同源（gstime），保证国界 / 城市 / 扫描区域
- *  始终贴在地理位置上。动画循环每帧调用；切换过境窗口（虚拟时间跳变）时也需立即同步一次。 */
+/** 地球自转同步：passGroup / earthFixedGroup.rotation.y = gstime，保证地表叠加物（过境目标面 /
+ *  区域 / 发射站 / 极光环）始终贴在地理位置上 —— Cesium 底座模式下亦然：Cesium 地球是地固系
+ *  （贴图/地形钉在经纬度），叠加物随 gst 旋转才能与影像表面对齐。动画循环每帧调用；
+ *  切换过境窗口（虚拟时间跳变）时也需立即同步一次。 */
 function syncEarthSpin() {
-  if (!g.earthMat?.map) return
   const gst = gstime(new Date(g.simTimeMs))
-  const off = -gst / (Math.PI * 2)
-  g.earthMat.map.offset.x = off
-  if (g.earthMat.emissiveMap) g.earthMat.emissiveMap.offset.x = off
+  // Three 地球贴图 offset 仅降级模式存在（g.earthMat 在 Cesium 模式下随 earthMesh 一并隐藏，贴图停更无妨）
+  if (g.earthMat?.map) {
+    const off = -gst / (Math.PI * 2)
+    g.earthMat.map.offset.x = off
+    if (g.earthMat.emissiveMap) g.earthMat.emissiveMap.offset.x = off
+  }
   if (g.passGroup) g.passGroup.rotation.y = gst
   // 地固系叠加层（极光椭圆环 / 星下点轨迹）同样随地球自转，否则会钉在惯性方向、随地球漂移
   if (g.earthFixedGroup) g.earthFixedGroup.rotation.y = gst
@@ -6080,13 +6190,7 @@ function flyToEarthFixedPoint(local: THREE.Vector3, dist: number) {
   )
   if (dir.lengthSq() < 1e-9) return
   dir.normalize().multiplyScalar(dist)
-  camFly.fromPos.copy(cam.position)
-  camFly.fromTarget.copy(controls.target)
-  camFly.toPos.copy(dir)
-  camFly.toTarget.set(0, 0, 0)
-  camFly.t0 = performance.now()
-  camFly.active = true
-  camFly.focusMode = 'none'
+  beginCamFly(dir, _flyHomeTarget, 'none')
   restoreEarthOrbitLimits()
 }
 
@@ -7017,8 +7121,8 @@ function applyEarthNightLights(on: boolean) {
 
 /** 切换过境模式：进入显示地表叠加图层与过境标记、隐藏卫星云/轨道线/选中；退出反向恢复。
  *  过境视图（城市与区域）会把虚拟时间锁到「那次过境的时刻」（点选过境记录对齐到过境中点、区域过境播放沿 AOS→LOS 推进），
- *  退出时必须还原到真实时钟 —— 否则太阳方向、地影锥、地球昼夜都会停在那次过境的时刻上：
- *  切回卫星列表 / 星座列表看着「地影锥回不到真实位置」，只有刷新页面才恢复。 */
+ *  退出时必须还原到真实时钟 —— 否则太阳方向、地球昼夜都会停在那次过境的时刻上：
+ *  切回卫星列表 / 星座列表看着「昼夜分界回不到真实位置」，只有刷新页面才恢复。 */
 function applyPassMode() {
   const on = passMode.value
   if (!on) {
@@ -7216,7 +7320,7 @@ function startAnimation() {
     updatePassModel('multi')
     // 单次过境选中的卫星模型：位置 / 姿态随虚拟时间逐帧重算（机身长轴恒垂直地球）
     updatePassSatModel()
-    // 太阳光方向 / 太阳标记 / 月亮 / 地影锥 / 极光环 / 太阳风粒子（内部含图层显隐判定）
+    // 太阳光方向 / 太阳标记 / 月亮 / 极光环 / 太阳风粒子（内部含图层显隐判定）
     updateSky(dt)
     // 发射站光晕呼吸脉冲（图层隐藏时内部直接跳过）
     updateSiteGlow(now)
@@ -7298,8 +7402,23 @@ function startAnimation() {
 
     if (g.camera && g.controls && g.scene && g.renderer) {
       const flying = updateCameraFly(now)
-      if (!flying) g.controls.update()
-      clampCameraOutsideEarth()
+      if (cesiumActive) {
+        // Cesium 底座模式（每帧时序见 cesiumEarth.ts 头注释）：
+        // 飞行期间把 updateCameraFly 的缓动结果（已写入 g.camera）转递给 Cesium 相机；
+        // 非飞行期间 Cesium 的 ScreenSpaceCameraController 自主驱动相机（滚轮/拖拽/惯性）。
+        if (flying) {
+          g.camera.getWorldDirection(_cesiumFlyDir)
+          setCameraFromScene(g.camera.position, _cesiumFlyDir, g.camera.up, g.simTimeMs)
+        }
+        // 先渲 Cesium（内部先处理本帧输入再更新相机），再把最新 Cesium 相机被动同步到 g.camera：
+        // Three 层所有卫星/标签/拾取继续用 g.camera，口径与原 OrbitControls 时代一致
+        renderCesium(g.simTimeMs)
+        if (!flying) syncCameraToThree(g.camera, g.simTimeMs)
+      } else {
+        // 降级模式（Cesium 初始化失败）：原 OrbitControls + 每帧地心外推兜底
+        if (!flying) g.controls.update()
+        clampCameraOutsideEarth()
+      }
       g.renderer.render(g.scene, g.camera)
       // 过境视图：渲染之后再投影地表中文标签 —— 必须在 controls.update() 与 render() 之后，
       // 标签用的是本帧刚渲染的相机矩阵（camera.matrixWorldInverse 只在 render 里刷新）。
@@ -7526,11 +7645,14 @@ onMounted(async () => {
     startAnimation()
     if (g.renderer && g.scene && g.camera) g.renderer.render(g.scene, g.camera)
     loading.value = false
-    // 交互事件紧跟骨架挂上：卫星云未就绪时也允许先转动地球观察
-    g.renderer!.domElement.addEventListener('pointerdown', onPointerDown)
-    g.renderer!.domElement.addEventListener('pointerup', onPointerUp)
-    g.renderer!.domElement.addEventListener('pointermove', onPointerMove)
-    g.renderer!.domElement.addEventListener('contextmenu', onContextMenu)
+    // 交互事件紧跟骨架挂上：卫星云未就绪时也允许先转动地球观察。
+    // 挂容器而非 Three canvas：Cesium 底座模式下 Three canvas 是 pointer-events:none 的叠加层，
+    // 事件由下层 Cesium canvas 接收后冒泡到容器，两种模式同一套监听（见 applyCesiumBase）
+    const eventEl: HTMLElement = container.value ?? g.renderer!.domElement
+    eventEl.addEventListener('pointerdown', onPointerDown)
+    eventEl.addEventListener('pointerup', onPointerUp)
+    eventEl.addEventListener('pointermove', onPointerMove)
+    eventEl.addEventListener('contextmenu', onContextMenu)
     // 点云后台装载（缓存命中即毫秒级；无缓存走网络，全程不阻塞地球渲染）
     cloudLoading.value = true
     try {
@@ -7569,6 +7691,11 @@ onActivated(() => {
   // 再立即强制渲染一帧，最后恢复动画循环；否则安卓 WebView 回到本页会白屏
   onResize()
   if (g.scene && g.camera) g.renderer.render(g.scene, g.camera)
+  // Cesium 底座切回：画布尺寸已由 onResize→resizeCesium 同步，这里补渲一帧避免地球短暂空白
+  if (cesiumActive) {
+    renderCesium(g.simTimeMs)
+    if (g.camera) syncCameraToThree(g.camera, g.simTimeMs)
+  }
   startAnimation()
   // 缓存期间空间环境可能已更新：切回立即刷一次并恢复定时
   void loadSpaceWeather()
@@ -7579,16 +7706,20 @@ onActivated(() => {
 
 onBeforeUnmount(() => {
   disposed = true
+  // Cesium 底座先于 Three 资源回收（其 canvas 挂在容器里，destroy 时移除）
+  cesiumActive = false
+  destroyCesium()
   stopFakeProgress()
   stopSpaceWeatherTimer()
   cancelAnimationFrame(g.rafId)
   window.removeEventListener('resize', onResize)
   ro?.disconnect()
   ro = null
-  g.renderer?.domElement.removeEventListener('pointerdown', onPointerDown)
-  g.renderer?.domElement.removeEventListener('pointerup', onPointerUp)
-  g.renderer?.domElement.removeEventListener('pointermove', onPointerMove)
-  g.renderer?.domElement.removeEventListener('contextmenu', onContextMenu)
+  const eventEl: HTMLElement | undefined = container.value ?? g.renderer?.domElement
+  eventEl?.removeEventListener('pointerdown', onPointerDown)
+  eventEl?.removeEventListener('pointerup', onPointerUp)
+  eventEl?.removeEventListener('pointermove', onPointerMove)
+  eventEl?.removeEventListener('contextmenu', onContextMenu)
   g.controls?.dispose()
   clearSelected()
   clearHeatMarkers()
@@ -7636,6 +7767,8 @@ defineExpose({
   resetSelected,
   /** 三维还原到初始状态（清过滤 + 取消选中 + 镜头复位） */
   resetToInitial,
+  /** 仅复位镜头：回到初始机位（东北亚 + 初始地球大小），不清选中与过滤 */
+  resetCameraToHome,
   /** 重算卫星列表过滤索引（面板数据就绪后调用一次；搜索/类型变化由 watch 自动触发） */
   rebuildSatIndex,
   /** 切换卫星列表数据源（国际库 / AOE 库）：按新数据源重拉点云并重建实例，失败保留原画面 */

@@ -13,7 +13,11 @@
 #   server/modules         → /repo/server/modules        （代码生成写入的模块描述文件）
 #   src                    → /repo/src                   （代码生成写入的前端页面）
 # ============================================================
-FROM node:22-bookworm-slim
+# ⚠️ 实测结论：server.jsc 是 Windows 版 Node 22.12.0 编译的 V8 字节码，
+# 其 cachedData 头部 roChecksum（只读堆校验和）绑定「构建平台」，与 flags 无关：
+# Linux 官方镜像（node:22.12.0 / 22.23.x 等任何小版本）均报 cachedDataRejected。
+# 本文件仅供将来拿到源码重编 Linux 字节码时参考，当前后端在宿主机直跑（见 start-dev.cmd）。
+FROM node:22.12.0-bookworm-slim
 
 ENV NODE_ENV=production
 WORKDIR /repo/server

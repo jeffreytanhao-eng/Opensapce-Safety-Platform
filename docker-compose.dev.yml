@@ -1,0 +1,60 @@
+# ============================================================
+# 本地开发编排：MySQL 8（容器）
+#   启动：docker compose -f docker-compose.dev.yml up -d
+#   说明：server.jsc 是 Windows 版 Node 22.12.0 编译的 V8 字节码，
+#         Linux 容器无法加载（cachedDataRejected），后端改在宿主机直跑
+#         （见 start-dev.cmd / server\Dockerfile 头注释），故仅保留 mysql 服务。
+# ============================================================
+name: openspace-dev
+
+services:
+  mysql:
+    image: mysql:8
+    container_name: openspace-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: openspace_root_2026
+      MYSQL_DATABASE: openspace
+      MYSQL_USER: openspace
+      MYSQL_PASSWORD: openspace_db_2026
+      TZ: Asia/Shanghai
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    ports:
+      - "13306:3306" # 宿主机用 13306 直连检查（本机 3306 留给潜在本地 MySQL）
+    volumes:
+      - openspace-mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-popenspace_root_2026"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  # ⚠️ 后端服务弃用：Linux 容器加载不了 Windows 编译的 server.jsc（roChecksum 绑定平台）。
+  # 保留定义仅作参考；如需容器化，须先用源码重编 Linux 版字节码。
+  # server:
+  #   build:
+  #     context: ./server
+  #     dockerfile: Dockerfile
+  #   image: openspace-server:latest
+  #   container_name: openspace-server
+  #   restart: unless-stopped
+  #   env_file:
+  #     - ./.env
+  #   environment:
+  #     DB_HOST: mysql
+  #     DB_PORT: "3306"
+  #     PORT: "1234"
+  #   depends_on:
+  #     mysql:
+  #       condition: service_healthy
+  #   ports:
+  #     - "1234:1234"
+  #   volumes:
+  #     - ./server/public/uploads:/repo/server/public/uploads
+  #     - ./server/modules:/repo/server/modules
+  #     - ./src:/repo/src
+
+volumes:
+  openspace-mysql-data:

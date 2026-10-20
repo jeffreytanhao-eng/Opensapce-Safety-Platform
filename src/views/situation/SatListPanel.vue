@@ -50,7 +50,7 @@ function close() {
         @touchend="onDragEnd"
         @touchcancel="onDragEnd">
         <div class="sp-head-main">
-          <b class="sp-title">卫星列表</b>
+          <b class="sp-title">太空安全目标列表</b>
           <span class="sp-count">{{ satPanel.idx.length.toLocaleString() }} 颗匹配</span>
           <span v-if="orbitSkipped" class="sp-meta">在轨 {{ orbitTotal.toLocaleString() }} · 可渲染 {{ visibleCount.toLocaleString() }} · 跳过 {{ orbitSkipped.toLocaleString() }}</span>
         </div>
