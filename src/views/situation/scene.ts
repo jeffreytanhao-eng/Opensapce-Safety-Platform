@@ -1017,8 +1017,8 @@ export function bucketColorHexOf(mode: ColorMode, p: ConstellationPoint): number
 export const dataSource = ref<SatSource>('tle')
 /** 数据源切换项（面板上的分段按钮，顺序即展示顺序） */
 export const SAT_SOURCE_OPTIONS: { value: SatSource; label: string }[] = [
-  { value: 'tle', label: '国际库' },
-  { value: 'aoe', label: 'AOE库' }
+  { value: 'tle', label: '美国TLE数据' },
+  { value: 'aoe', label: '中国AOE数据' }
 ]
 
 /** 卫星列表面板：搜索词 + 类型勾选 + 轨道区域勾选 + 过滤后的全局索引 + 滚动加载计数 */

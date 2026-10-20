@@ -105,7 +105,10 @@
      相比原 top:0 同时缩减了面板高度并整体下移。.sp-list 自身 flex 滚动不受影响 */
   position: absolute; top: 76px; left: 0; bottom: 62px; z-index: 7; width: 300px;
   display: flex; flex-direction: column; padding: 14px 12px 12px;
-  background: rgba(8,13,24,0.86); border-right: 1px solid rgba(120,160,220,0.22); backdrop-filter: blur(12px);
+  /* 卡片化：四角微弧圆角 + 全边框 + 投影，悬浮卡片质感 */
+  background: rgba(8,13,24,0.9); border-radius: 12px;
+  border: 1px solid rgba(120,160,220,0.25); backdrop-filter: blur(12px);
+  box-shadow: 0 6px 22px rgba(0,0,0,0.45), inset 0 1px 0 rgba(255,255,255,0.04);
   /* 面板空白/半透明区域点击穿透到画布拾取卫星；仅需交互的控件恢复事件 */
   pointer-events: none;
   user-select: none;

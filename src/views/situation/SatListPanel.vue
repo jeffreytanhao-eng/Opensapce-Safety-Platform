@@ -58,6 +58,8 @@ function close() {
           <svg viewBox="0 0 10 10" aria-hidden="true"><path d="M7 1.5 L3 5 L7 8.5 Z" /></svg>
         </button>
       </div>
+      <!-- 数据源标签：白字居中（用户要求），位于分段控件上方 -->
+      <div class="sp-src-label">选择数据源</div>
       <div class="sp-src">
         <button
           v-for="o in SAT_SOURCE_OPTIONS"
@@ -67,10 +69,6 @@ function close() {
           :title="'切换到' + o.label"
           @click="emit('source', o.value)"
         >{{ o.label }}</button>
-      </div>
-      <div class="sp-search">
-        <input v-model="satPanel.q" class="sp-input" type="text" placeholder="搜名称 / NORAD 编号" />
-        <span v-if="satPanel.q" class="sp-clear" @click="satPanel.q = ''">×</span>
       </div>
       <div class="sp-types">
         <label v-for="k in TYPE_KEYS" :key="k" class="sp-type" :class="{ on: satPanel.typeF[k] }">
@@ -113,9 +111,14 @@ function close() {
 /* 目标列表头部定制：标题居中、标题与统计行距拉开（仅作用于本面板，scoped 隔离）。
    基础规则是 .side-panel .sp-head .sp-head-main（特异性更高），此处须同级前缀 + 追加类才能覆盖 gap */
 .side-panel .sp-head .sp-head-main.sat-head-main {
+  flex: 1;
   align-items: center;
   gap: 12px;
-  .sp-title { text-align: center; }
+  .sp-title { text-align: center; font-size: 14px; }
   .sp-count { text-align: center; }
 }
+/* 收起按钮脱离文档流钉在头部右侧，让标题/统计在面板宽度内真正水平居中（桌面 + 移动抽屉通用） */
+.side-panel .sp-head .sp-close.sp-close-tri { position: absolute; right: 10px; top: 8px; }
+/* 「选择数据源」标签行：白字、与标题同字号、居中（下移 5px 与分段控件拉开） */
+.side-panel .sp-src-label { margin: 5px 0 0; font-size: 14px; color: #fff; text-align: center; }
 </style>
