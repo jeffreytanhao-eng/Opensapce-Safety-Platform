@@ -6,12 +6,20 @@
  * 纯动作（点击选中、关闭面板）通过 emit 交给父组件 index.vue 编排（父组件调用 BaseScene.expose）。
  */
 import {
-  TYPE_KEYS, TYPE_HEX, TYPE_LABEL, REGIME_KEYS, REGIME_LABEL,
+  TYPE_KEYS,
   satPanel, sel, g, dockMode,
   dataSource, SAT_SOURCE_OPTIONS,
   drawerHeightVh, isDrawerDragging, useDrawerDrag
 } from './scene'
 import type { SatSource } from '@/api/sat_public'
+
+/** 面板专用类型文案/配色（短文案单行排列；配色与三维场景 TYPE_COLOR 解耦，仅作用于本面板开关） */
+const TYPE_UI: Record<string, { label: string; color: string }> = {
+  PAYLOAD: { label: '卫星', color: '#4caf50' },
+  DEBRIS: { label: '碎片', color: '#ff4d4f' },
+  'ROCKET BODY': { label: '残骸', color: '#ff9800' },
+  UNKNOWN: { label: '未知', color: '#ffffff' }
+}
 
 const emit = defineEmits<{
   (e: 'pick', gi: number): void
@@ -51,7 +59,6 @@ function close() {
         @touchcancel="onDragEnd">
         <div class="sp-head-main sat-head-main">
           <b class="sp-title">太空安全目标列表</b>
-          <span class="sp-count">{{ satPanel.idx.length.toLocaleString() }}个太空目标</span>
         </div>
         <!-- 收起按钮：向左三角（CSS 矢量，替代原 » 文本符号） -->
         <button class="sp-close sp-close-tri" title="收起（点底部菜单可再次展开）" aria-label="收起列表" @click="close">
@@ -70,36 +77,13 @@ function close() {
           @click="emit('source', o.value)"
         >{{ o.label }}</button>
       </div>
+      <div class="sp-show-label">太空目标展示</div>
       <div class="sp-types">
         <label v-for="k in TYPE_KEYS" :key="k" class="sp-type" :class="{ on: satPanel.typeF[k] }">
           <input type="checkbox" v-model="satPanel.typeF[k]" />
-          <span class="sp-type-dot" :style="{ background: TYPE_HEX[k] }"></span>
-          <span class="sp-type-txt">{{ TYPE_LABEL[k] }}</span>
+          <span class="sp-type-dot" :style="{ background: TYPE_UI[k].color }"></span>
+          <span class="sp-type-txt">{{ TYPE_UI[k].label }}</span>
         </label>
-      </div>
-      <div class="sp-regimes">
-        <label v-for="k in REGIME_KEYS" :key="k" class="sp-regime" :class="{ on: satPanel.regimeF[k] }">
-          <input type="checkbox" v-model="satPanel.regimeF[k]" />
-          <span class="sp-regime-txt">{{ REGIME_LABEL[k] }}</span>
-        </label>
-      </div>
-      <div class="sp-list" @scroll="onSatScroll">
-        <div
-          v-for="gi in satPanel.idx.slice(0, satPanel.count)"
-          :key="gi"
-          class="sp-item"
-          :class="{ active: sel.id === g.cloudList[gi].norad_id }"
-          @click="pick(gi)"
-        >
-          <span class="sp-item-dot" :style="{ background: TYPE_HEX[g.cloudList[gi].object_type] || '#8fd0ff' }"></span>
-          <div class="sp-item-main">
-            <span class="sp-item-name">{{ g.cloudList[gi].object_name || ('NORAD ' + g.cloudList[gi].norad_id) }}</span>
-            <span class="sp-item-nor">NORAD {{ g.cloudList[gi].norad_id }}</span>
-          </div>
-          <span class="sp-item-type">{{ TYPE_LABEL[g.cloudList[gi].object_type] || g.cloudList[gi].object_type }}</span>
-        </div>
-        <div v-if="!satPanel.idx.length" class="sp-empty">无匹配卫星</div>
-        <div v-else-if="satPanel.count < satPanel.idx.length" class="sp-more">继续滚动加载更多…</div>
       </div>
     </aside>
   </transition>
@@ -114,11 +98,23 @@ function close() {
   flex: 1;
   align-items: center;
   gap: 12px;
-  .sp-title { text-align: center; font-size: 14px; }
-  .sp-count { text-align: center; }
+  .sp-title { text-align: center; font-size: 15px; margin-top: 5px; }
 }
 /* 收起按钮脱离文档流钉在头部右侧，让标题/统计在面板宽度内真正水平居中（桌面 + 移动抽屉通用） */
 .side-panel .sp-head .sp-close.sp-close-tri { position: absolute; right: 10px; top: 8px; }
-/* 「选择数据源」标签行：白字、与标题同字号、居中（下移 5px 与分段控件拉开） */
-.side-panel .sp-src-label { margin: 5px 0 0; font-size: 14px; color: #fff; text-align: center; }
+/* 「选择数据源」标签行：白字、与标题同字号、居中（下移 3px，相对位置随组整体保持） */
+.side-panel .sp-src-label { margin: 10px 0 0; font-size: 14px; color: #fff; text-align: center; }
+/* 数据源分段控件：margin 收回 3px 与标签同步下移（组内相对位置不变）；分割线不随之移动 */
+.side-panel .sp-src { margin-top: 11px; }
+/* 「太空目标展示」标签行：顶部横线做分割线（margin 再收回 3px 抵消上方组下移保持原位），文字位置不变 */
+.side-panel .sp-show-label {
+  margin: 19px 0 0; padding-top: 15px; font-size: 14px; color: #fff; text-align: center;
+  border-top: 1px solid rgba(120,160,220,0.16);
+}
+/* 物体类型过滤区段：紧随「太空目标展示」下方；四个开关等宽放大并横向均匀分布对齐 */
+.side-panel .sp-types {
+  margin-top: 14px; padding-top: 0;
+  flex-wrap: nowrap; gap: 4px;
+  .sp-type { flex: 1 1 0; justify-content: center; padding: 3px 0; gap: 4px; font-size: 11px; }
+}
 </style>

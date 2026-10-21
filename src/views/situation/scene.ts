@@ -1024,7 +1024,7 @@ export const SAT_SOURCE_OPTIONS: { value: SatSource; label: string }[] = [
 /** 卫星列表面板：搜索词 + 类型勾选 + 轨道区域勾选 + 过滤后的全局索引 + 滚动加载计数 */
 export const satPanel = reactive({
   q: '',
-  typeF: { PAYLOAD: true, DEBRIS: true, 'ROCKET BODY': true, UNKNOWN: true } as Record<string, boolean>,
+  typeF: { PAYLOAD: false, DEBRIS: false, 'ROCKET BODY': false, UNKNOWN: false } as Record<string, boolean>,
   regimeF: { LEO: true, MEO: true, GEO: true, HEO: true, OTHER: true } as Record<string, boolean>,
   idx: [] as number[],
   count: 0,
