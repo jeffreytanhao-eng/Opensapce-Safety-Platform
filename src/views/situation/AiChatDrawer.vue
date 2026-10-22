@@ -8,7 +8,7 @@
  * 形态（按用户口径）：毛玻璃覆盖整个 /situation，用三维地球当底图，三种态：
  *   ① idle   —— 默认全屏搜索界面：居中大输入框 + 能力快捷词；
  *   ② chat   —— 有对话后收成全屏居中的对话流；
- *   ③ docked —— 右侧收成小框，左侧露出三维态势实时定位（模型下发「态势类界面动作」时自动进入，也可用标题栏按钮手动切换）。
+ *   ③ docked —— 底部收成小窗，上方露出三维态势实时定位（模型下发「态势类界面动作」时自动进入，也可用标题栏按钮手动切换）。
  *   ④ collapsed（仅移动端）—— 底部大卡片收成一条小横条（仅由模型下发「态势类界面动作」时自动进入），毛玻璃底一并放行。
  *
  * 标题栏按钮：宽屏是「小窗 / 全屏」缩放；移动端是「收起」——直接关闭浮层，
@@ -159,7 +159,7 @@ const inputRef = ref<HTMLTextAreaElement | null>(null)
 const cardRef = ref<HTMLElement | null>(null)
 const wrapRef = ref<HTMLElement | null>(null)
 const dropRef = ref<HTMLElement | null>(null)
-/** 打开即右侧小窗（不进全屏毛玻璃态）：左侧三维态势保持可见可交互；标题栏 ⤢ 可随时放大全屏 */
+/** 打开即底部小窗（不进全屏毛玻璃态）：上方三维态势保持可见可交互；标题栏 ⤢ 可随时放大全屏 */
 const docked = ref(true)
 /** 移动端「收起小横条」态：底部大卡片收成一条小横条，给三维主屏让位。
  *  仅由模型下发「态势类界面动作」时自动进入（见 dockForSituation）；标题栏「收起」按钮走的是关闭浮层，不进入此态 */
@@ -211,7 +211,7 @@ function dockForSituation() {
 
 /**
  * docked 小窗：拖动标题栏可自由移动位置。
- * 偏移是「相对默认贴右侧位置」的像素位移，仅 docked 态生效（全屏态忽略，回到小窗时沿用上次位置）。
+ * 偏移是「相对默认贴底居中位置」的像素位移，仅 docked 态生效（全屏态忽略，回到小窗时沿用上次位置）。
  */
 const dragX = ref(0)
 const dragY = ref(0)
@@ -981,9 +981,10 @@ watch(() => props.target?.key || '', (k, old) => {
   padding: 56px 0 40px;
 }
 .ai-glass.docked {
-  align-items: stretch;
-  justify-content: flex-end;
-  padding: 62px 14px 96px 0;
+  align-items: flex-end;
+  justify-content: center;
+  /* 底部小窗：浮在底部「按钮栏 + 时间条」之上，避开左侧「复位」与右侧图例 */
+  padding: 0 14px calc(122px + env(safe-area-inset-bottom));
 }
 
 /* 毛玻璃底：三维背景当底图（docked 时完全透明，左侧态势直接可交互） */
@@ -1025,10 +1026,11 @@ watch(() => props.target?.key || '', (k, old) => {
   /* 空态内容可能较高（历史恢复等场景）：封顶到 88vh，超出部分交给 .ag-list 内部滚动 */
   max-height: 88vh;
 }
-/* docked（右侧小窗）：套上玻璃框，成为一张独立卡片 */
+/* docked（底部小窗）：套上玻璃框，成为一张贴在底部的独立卡片 */
 .ai-glass.docked .ag-card {
-  width: min(420px, 92vw);
+  width: min(560px, 94vw);
   height: auto;
+  max-height: min(62vh, 520px);
   border: 1px solid rgba(127, 216, 255, 0.18);
   border-radius: 16px;
   background: linear-gradient(180deg, rgba(22, 30, 44, 0.78), rgba(13, 19, 30, 0.86));

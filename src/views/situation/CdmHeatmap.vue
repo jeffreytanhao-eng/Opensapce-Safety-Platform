@@ -14,16 +14,25 @@ import {
   heatList, heatLegend, heatHiddenColors, heatMetricLabel,
   heatLoading, heatError, dockMode,
   heatBatchRunId, heatBatches, heatFocusNorad, fmtNum,
-  drawerHeightVh, isDrawerDragging, useDrawerDrag
+  heatDays, heatDay, heatDayGroups, heatFiltered,
+  heatAltBand, heatMetric, heatRiskFloor, heatPcFloor, heatMissCeil,
+  heatCell, HEAT_CELL_OPTIONS, HEAT_RISK_BANDS,
+  drawerHeightVh, isDrawerDragging, useDrawerDrag,
+  type HeatSource
 } from './scene'
+import { listThreatEventRows } from './ephem/store'
+import type { ThreatEvent } from './ephem/types'
+import { useDevice } from '@/composables/useDevice'
 import { listConjPublic, listCdmPublic, listCriPublic } from '@/api/sat_public'
-import type { ConjEvent, CdmListItem, CriListItem } from '@/api/sat_public'
+import type { ConjEvent, CdmListItem, CriListItem, HeatLegendItem } from '@/api/sat_public'
 import { useDelayed } from '@/composables/useDelayed'
 
 const emit = defineEmits<{
   (e: 'close'): void
   /** 点击「本批次交会数据」某一对：上报其 norad 对 + TCA，由父组件让 BaseScene 绘制 2 条轨道 + 目标模型 */
   (e: 'select', pair: { norad_a: number; norad_b: number; tca: string }): void
+  /** 点击「我的星历」页签里的事件：父组件激活对应星历并选中该威胁事件 */
+  (e: 'pick-ephem', payload: { setId: string; event: ThreatEvent }): void
 }>()
 
 /** 移动端底部抽屉拖拽手势（PC 无 touch 事件，不影响） */
@@ -32,11 +41,70 @@ const { onTouchStart: onDragStart, onTouchMove: onDragMove, onTouchEnd: onDragEn
 /** 智能体联动：open_panel(heat, selectFirst=true) 打开面板后，外部通过 autoSelectTick 递增触发「自动选中第一条」 */
 const props = withDefaults(defineProps<{ autoSelectTick?: number }>(), { autoSelectTick: 0 })
 
-/** 当前来源标签（面板标题下方展示，提示当前热力口径） */
-const srcLabel = computed(() => HEAT_SOURCES.find((s) => s.key === heatSource.value)?.label || '')
+/** 移动端判定（虚拟滚动仅桌面端启用，移动端沿用抽屉整体滚动） */
+const { isMobile } = useDevice()
+
+/* ============================================================
+ * P3 热力筛选：时间窗（heatDays）/ 高度层 / 指标阈值 / 按天柱状图
+ *  - 时间窗直接改 heatDays，BaseScene 已有 watch(heatDays) → loadHeat 重新拉取；
+ *  - 高度层与指标阈值只过滤 heatFiltered（前端运算，不请求后端）；
+ *  - 柱状图数据来自后端 day_groups（仅时间窗 > 0 时下发），点击可切到该天。
+ * ============================================================ */
+/** 时间窗快捷档（天）：0 = 全部（后端既有口径） */
+const DAY_OPTIONS = [
+  { v: 0, label: '全部' }, { v: 1, label: '24h' }, { v: 3, label: '3d' },
+  { v: 7, label: '7d' }, { v: 30, label: '30d' }
+]
+const ALT_OPTIONS = [
+  { v: 'all', label: '全部' }, { v: 'leo', label: 'LEO' },
+  { v: 'meo', label: 'MEO' }, { v: 'geo', label: 'GEO+' }
+] as const
+const METRIC_OPTIONS = [
+  { v: 'risk', label: '综合风险' }, { v: 'pc', label: '碰撞概率' }, { v: 'miss', label: '最近距离' }
+] as const
+
+/** 官方 CDM 无 altitude 字段：选了高度层会把这些事件全部过滤掉，用于提示 */
+const altUnavailable = computed(() => heatSource.value === 'spacetrack' && heatAltBand.value !== 'all')
+
+/** 阈值滑杆（单位随指标切换）：risk 0~100%、pc 对数刻度 1e-8~1e-2、miss 0~100km */
+const sliderVal = computed({
+  get: () => {
+    if (heatMetric.value === 'pc') {
+      return heatPcFloor.value > 0 ? Math.round((Math.log10(heatPcFloor.value) + 8) / 6 * 100) : 0
+    }
+    if (heatMetric.value === 'miss') return Math.round(heatMissCeil.value)
+    return Math.round(heatRiskFloor.value * 100)
+  },
+  set: (v: number) => {
+    if (heatMetric.value === 'pc') heatPcFloor.value = v <= 0 ? 0 : 10 ** (-8 + (v / 100) * 6)
+    else if (heatMetric.value === 'miss') heatMissCeil.value = v
+    else heatRiskFloor.value = v / 100
+  }
+})
+
+const thresholdText = computed(() => {
+  if (heatMetric.value === 'pc') return heatPcFloor.value > 0 ? `≥ ${heatPcFloor.value.toExponential(1)}` : '不限'
+  if (heatMetric.value === 'miss') return `≤ ${Math.round(heatMissCeil.value)} km`
+  return `≥ ${Math.round(heatRiskFloor.value * 100)}%`
+})
+
+/** 柱状图只画有事件的天（后端按窗口补齐的 0 事件天不画，避免整排空柱） */
+const dayBars = computed(() => heatDayGroups.value.filter((d) => d.count > 0))
+/** 柱状图最高柱（用于按比例算高度，最小 1 避免除零） */
+const maxDayCount = computed(() => Math.max(1, ...dayBars.value.map((d) => d.count)))
+function barHeight(count: number) {
+  return `${Math.max(8, Math.round((count / maxDayCount.value) * 100))}%`
+}
 
 /** 等级文案（与后台 /mui/sat_conj 一致） */
 const LEVEL_LABEL: Record<string, string> = { danger: '高危', warning: '警告', info: '关注' }
+
+/** 图例行：官方 CDM 用后端下发的 Pc 配色；交会热力 / 交会分析热力改用前端 5 档风险色带
+ *  （与 BaseScene 的 heatColorOf 同一口径，勾选隐藏的档位与三维配色一一对应）。 */
+const legendRows = computed<HeatLegendItem[]>(() => {
+  if (heatSource.value === 'spacetrack') return heatLegend.value
+  return HEAT_RISK_BANDS.map((b) => ({ color: b.color, label: b.label, thresh: b.thresh }))
+})
 
 /** 接近时刻 `YYYY-MM-DD HH:mm:ss` → `MM-DD HH:mm`（面板列窄，省略年份与秒） */
 function fmtTca(tca?: string) {
@@ -121,14 +189,46 @@ const listError = ref('')
 const query = reactive({ page: 1, pageSize: 20, keyword: '', level: '', dateFrom: '', dateTo: '' })
 const maxPage = computed(() => Math.max(1, Math.ceil(total.value / query.pageSize)))
 
+/* ---- 列表虚拟滚动（P3） ----
+ * 后端单页上限 200 行（pageSize=500 也只返回 200），大页全量渲染会拖慢面板滚动；
+ * 超过 120 行时只渲染视口附近的行，上下用占位块撑起滚动高度，DOM 节点数恒定在 ~20。 */
+const ROW_H = 62               // .hc-item 高度 58px + margin-bottom 4px
+const VIRT_TRIGGER = 120
+const listEl = ref<HTMLElement | null>(null)
+const listScrollTop = ref(0)
+const listViewH = ref(360)
+const virtOn = computed(() => !isMobile.value && rows.value.length > VIRT_TRIGGER)
+const virtStart = computed(() => (virtOn.value ? Math.max(0, Math.floor(listScrollTop.value / ROW_H) - 6) : 0))
+const virtEnd = computed(() => (virtOn.value
+  ? Math.min(rows.value.length, Math.ceil((listScrollTop.value + listViewH.value) / ROW_H) + 6)
+  : rows.value.length))
+const visibleRows = computed(() => rows.value.slice(virtStart.value, virtEnd.value))
+const padTop = computed(() => virtStart.value * ROW_H)
+const padBottom = computed(() => (rows.value.length - virtEnd.value) * ROW_H)
+function onListScroll() {
+  const el = listEl.value
+  if (!el) return
+  listScrollTop.value = el.scrollTop
+  listViewH.value = el.clientHeight
+}
+/** 翻页 / 改每页条数时回到列表顶部（避免沿用上一页的滚动位置导致空白） */
+function resetListScroll() {
+  listScrollTop.value = 0
+  if (listEl.value) listEl.value.scrollTop = 0
+}
+
 /** 列表标题：按来源区分口径（local / cri = 各自库当前批次明细；CDM = 官方 CDM 库表明细） */
-const listTitle = computed(() =>
-  heatSource.value === 'local' ? '本批次交会数据' : heatSource.value === 'cri' ? '交会分析数据' : 'CDM 交会数据'
-)
+const listTitle = computed(() => ephTab.value
+  ? '我的星历事件（本机）'
+  : heatSource.value === 'local' ? '本批次交会数据' : heatSource.value === 'cri' ? '交会分析数据' : 'CDM 交会数据')
 
 /** 拉取当前来源的交会明细：local = 当前批次（heatBatchRunId 指定 / 后端默认最近全量批次），
  *  cri = 交会分析库当前批次（同样支持批次回看），CDM = sat_cdm 库表全量明细；关键词与日期范围口径一致。 */
 async function loadList() {
+  if (ephTab.value) {
+    await loadEphList()
+    return
+  }
   listLoading.value = true
   listError.value = ''
   try {
@@ -172,7 +272,98 @@ async function loadList() {
   }
 }
 
-function search() { query.page = 1; loadList() }
+/* ============================================================
+ * 「我的星历」页签：读取本机 IndexedDB 里保存的筛选结果
+ *  - 不改变 heatSource（三维热力仍按后端来源绘制），只替换下方列表数据；
+ *  - 行点击上报 setId + 事件，由父组件激活星历并选中该威胁事件。
+ * ============================================================ */
+const ephTab = ref(false)
+/** 本机保存的事件总数（不随关键词/日期筛选变化，用于头部计数） */
+const ephCount = ref(0)
+/** 行 key → 事件来源（列表行抹平了字段，点击时需要原始事件） */
+const ephPicks = new Map<string, { setId: string; event: ThreatEvent }>()
+const EPH_LEVEL: Record<ThreatEvent['level'], { label: string; color: string }> = {
+  high: { label: '高危', color: '#ff6b6b' },
+  medium: { label: '警告', color: '#ffb454' },
+  low: { label: '关注', color: '#7fb0ff' }
+}
+
+/** unix ms → `YYYY-MM-DD HH:mm:ss`（与后端 TCA 字符串同格式，复用 fmtTca 渲染） */
+function utcText(ms: number) {
+  const d = new Date(ms)
+  if (Number.isNaN(d.getTime())) return ''
+  return d.toISOString().slice(0, 19).replace('T', ' ')
+}
+
+/** 读取并归一化本机星历事件（关键词 / 日期 / 等级筛选与后端列表同口径） */
+async function loadEphList() {
+  listLoading.value = true
+  listError.value = ''
+  ephPicks.clear()
+  try {
+    const sets = await listThreatEventRows()
+    const kw = query.keyword.trim().toLowerCase()
+    const from = query.dateFrom ? new Date(`${query.dateFrom}T00:00:00`).getTime() : -Infinity
+    const to = query.dateTo ? new Date(`${query.dateTo}T23:59:59`).getTime() : Infinity
+    const lvl = query.level === 'danger' ? 'high' : query.level === 'warning' ? 'medium' : query.level === 'info' ? 'low' : ''
+    const out: ListRow[] = []
+    let count = 0
+    for (const s of sets) {
+      const nameA = s.selfName || `NORAD ${s.selfNorad}`
+      for (const ev of s.events) {
+        count++
+        if (lvl && ev.level !== lvl) continue
+        if (ev.tca < from || ev.tca > to) continue
+        const nameB = ev.otherName || `NORAD ${ev.otherNorad}`
+        if (kw && !`${nameA} ${nameB} ${ev.otherNorad}`.toLowerCase().includes(kw)) continue
+        const lv = EPH_LEVEL[ev.level] || EPH_LEVEL.low
+        const key = `eph-${s.setId}-${ev.otherNorad}-${ev.tca}`
+        ephPicks.set(key, { setId: s.setId, event: ev })
+        out.push({
+          key,
+          norad_a: ev.selfNorad,
+          norad_b: ev.otherNorad,
+          tca: utcText(ev.tca),
+          name_a: nameA,
+          name_b: nameB,
+          dist: ev.missKm,
+          color: lv.color,
+          label: `${lv.label} · Pc ${ev.pc > 0 ? ev.pc.toExponential(1) : '0'}`
+        })
+      }
+    }
+    out.sort((a, b) => a.tca.localeCompare(b.tca))
+    rows.value = out
+    total.value = out.length
+    ephCount.value = count
+    loadedOnce.value = true
+  } catch (e) {
+    listError.value = (e as Error)?.message || '读取本机星历事件失败'
+    rows.value = []
+    total.value = 0
+    ephCount.value = 0
+  } finally {
+    listLoading.value = false
+  }
+}
+
+/** 切到后端来源：关掉「我的星历」页签，交给 heatSource 的 watch 重载列表 */
+function pickSource(k: HeatSource) {
+  ephTab.value = false
+  heatSource.value = k
+}
+
+/** 切到「我的星历」页签：只读本机数据，不触发后端请求 */
+function openEphTab() {
+  if (ephTab.value) return
+  ephTab.value = true
+  query.page = 1
+  query.level = ''
+  resetListScroll()
+  void loadEphList()
+}
+
+function search() { query.page = 1; resetListScroll(); loadList() }
 
 function resetSearch() {
   query.keyword = ''
@@ -185,6 +376,7 @@ function resetSearch() {
 function goPage(p: number) {
   if (p < 1 || p > maxPage.value) return
   query.page = p
+  resetListScroll()
   loadList()
 }
 
@@ -247,6 +439,11 @@ const pickedKey = ref('')
 /** 点击某一对交会事件：高亮该项，并上报给 index.vue 让 BaseScene 绘制这 2 颗卫星的轨道线与 TCA 目标模型 */
 function pickRow(r: ListRow) {
   pickedKey.value = r.key
+  if (ephTab.value) {
+    const hit = ephPicks.get(r.key)
+    if (hit) emit('pick-ephem', { setId: hit.setId, event: hit.event })
+    return
+  }
   emit('select', { norad_a: r.norad_a, norad_b: r.norad_b, tca: r.tca })
 }
 
@@ -302,16 +499,80 @@ function close() {
         @touchend="onDragEnd"
         @touchcancel="onDragEnd">
         <div class="sp-head-main">
-          <b class="sp-title">碰撞热力</b>
-          <span class="sp-count">{{ heatList.length.toLocaleString() }} 个事件</span>
-          <span class="sp-meta">{{ srcLabel }}</span>
+          <b class="sp-title">安全热力图</b>
+          <span class="sp-count">{{ (ephTab ? ephCount : heatList.length).toLocaleString() }} 个事件</span>
         </div>
-        <button class="sp-close" title="收起（点底部菜单可再次展开）" @click="close">»</button>
+        <!-- 收起按钮：向下三角（与太空安全目标列表的三角收起键同款矢量图标） -->
+        <button class="sp-close sp-close-tri" title="收起（点底部菜单可再次展开）" aria-label="收起热力图" @click="close">
+          <svg viewBox="0 0 10 10" aria-hidden="true"><path d="M1.6 3.1 L8.4 3.1 L5 7.1 Z" /></svg>
+        </button>
+      </div>
+
+      <!-- 来源页签：后端三种热力来源 + 本机星历事件（我的星历只切换下方列表，不改三维热力） -->
+      <div class="heat-src">
+        <button v-for="s in HEAT_SOURCES" :key="s.key" class="hs-btn"
+          :class="{ on: !ephTab && heatSource === s.key }" @click="pickSource(s.key)">{{ s.label }}</button>
+        <button class="hs-btn is-eph" :class="{ on: ephTab }" @click="openEphTab">我的星历</button>
+      </div>
+
+      <!-- P3 筛选条：时间窗（heatDays）/ 高度层 / 指标阈值 + 按天柱状图。
+           时间窗改动会触发 BaseScene.loadHeat 重新拉取；高度层与阈值只作用于 heatFiltered（前端过滤） -->
+      <div v-if="!ephTab" class="heat-filter">
+        <div class="hf-row">
+          <span class="hf-label">时间窗</span>
+          <div class="hf-seg">
+            <button v-for="o in DAY_OPTIONS" :key="o.v" class="hf-btn"
+              :class="{ on: heatDays === o.v }" @click="heatDays = o.v">{{ o.label }}</button>
+          </div>
+        </div>
+        <div class="hf-row">
+          <span class="hf-label">高度层</span>
+          <div class="hf-seg">
+            <button v-for="o in ALT_OPTIONS" :key="o.v" class="hf-btn"
+              :class="{ on: heatAltBand === o.v }" @click="heatAltBand = o.v">{{ o.label }}</button>
+          </div>
+        </div>
+        <div class="hf-row">
+          <span class="hf-label">指标</span>
+          <div class="hf-seg">
+            <button v-for="o in METRIC_OPTIONS" :key="o.v" class="hf-btn"
+              :class="{ on: heatMetric === o.v }" @click="heatMetric = o.v">{{ o.label }}</button>
+          </div>
+          <span class="hf-val">{{ thresholdText }}</span>
+        </div>
+        <div class="hf-row">
+          <span class="hf-label">阈值</span>
+          <input v-model.number="sliderVal" class="hf-range" type="range" min="0" max="100" step="1" />
+        </div>
+        <div class="hf-row">
+          <span class="hf-label">聚合格边</span>
+          <div class="hf-seg">
+            <button v-for="o in HEAT_CELL_OPTIONS" :key="o.v" class="hf-btn"
+              :class="{ on: heatCell === o.v }" @click="heatCell = o.v">{{ o.label }}</button>
+          </div>
+          <span class="hf-val">{{ heatCell.toFixed(2) }}</span>
+        </div>
+        <div class="hf-count">
+          三维显示 <b>{{ heatFiltered.length.toLocaleString() }}</b> /
+          {{ heatList.length.toLocaleString() }} 个事件
+          <span v-if="altUnavailable" class="hf-warn">· 官方 CDM 无高度数据</span>
+        </div>
+        <!-- 按天柱状图：后端 day_groups（仅时间窗 > 0 下发），点柱切到该天，点「全」回到总览 -->
+        <div v-if="dayBars.length" class="hf-days">
+          <button class="hf-day" :class="{ on: heatDay === -1 }" @click="heatDay = -1">全</button>
+          <div class="hf-bars">
+            <button v-for="d in dayBars" :key="d.day" class="hf-bar"
+              :class="{ on: heatDay === d.day }" :title="`${d.date} · ${d.count} 个事件`"
+              @click="heatDay = d.day">
+              <i :style="{ height: barHeight(d.count) }"></i>
+            </button>
+          </div>
+        </div>
       </div>
 
       <!-- 数据批次（总库）：交会热力 / 交会分析热力来源展示（各自独立批次表）；回看历史「全体 × 全体」全量扫描批次。
            主从计算 / 配对标注批次属后台分析工具，不进前台，故此处只列全量批次；CDM 热力无批次概念，不展示 -->
-      <div v-if="heatSource !== 'spacetrack'" class="heat-batch">
+      <div v-if="!ephTab && heatSource !== 'spacetrack'" class="heat-batch">
         <span class="heat-batch-label">数据批次</span>
         <select class="heat-batch-sel" :value="heatBatchRunId ?? ''" @change="onBatchChange">
           <option v-if="!batchOptions.length" value="" disabled>暂无全量批次</option>
@@ -321,10 +582,10 @@ function close() {
 
       <!-- 配色图例：档位 / 配色 / 阈值文案全部由后端按当前来源口径下发，前端直接渲染。
            每一行可勾选：取消勾选即隐藏该档位在三维热力视图中的事件（按配色匹配），只影响渲染不影响列表数据 -->
-      <div class="heat-scale">
+      <div v-if="!ephTab" class="heat-scale">
         <div class="heat-scale-title">{{ heatMetricLabel || '指标' }}</div>
         <label
-          v-for="s in heatLegend"
+          v-for="s in legendRows"
           :key="s.label"
           class="heat-scale-row"
           :class="{ off: heatHiddenColors.has(s.color) }"
@@ -342,8 +603,8 @@ function close() {
         </label>
       </div>
 
-      <div v-if="heatError" class="heat-err">{{ heatError }}</div>
-      <div v-else-if="!heatLoading && !heatList.length" class="heat-none">暂无碰撞事件</div>
+      <div v-if="!ephTab && heatError" class="heat-err">{{ heatError }}</div>
+      <div v-else-if="!ephTab && !heatLoading && !heatList.length" class="heat-none">暂无碰撞事件</div>
 
       <!-- 交会数据列表：三种来源共用（local 取「总交会库」当前批次明细，cri 取交会分析库当前批次明细，
            CDM 取 sat_cdm 库表明细）。检索：关键词（NORAD / 名称）+ 接近日期范围；等级下拉仅批次来源
@@ -363,7 +624,7 @@ function close() {
             placeholder="NORAD 编号或名称"
             @keyup.enter="search"
           />
-          <select v-if="heatSource !== 'spacetrack'" v-model="query.level" class="hc-sel">
+          <select v-if="!ephTab && heatSource !== 'spacetrack'" v-model="query.level" class="hc-sel">
             <option value="">全部等级</option>
             <option value="danger">高危</option>
             <option value="warning">警告</option>
@@ -380,14 +641,16 @@ function close() {
           </div>
         </div>
 
-        <div class="hc-list">
+        <div ref="listEl" class="hc-list" @scroll.passive="onListScroll">
           <div v-if="listLoadingHint" class="hc-empty">加载中…</div>
           <div v-else-if="listError" class="hc-empty is-err">{{ listError }}</div>
           <!-- 未超时的加载中：保留上一次结果、不闪「暂无」（正常毫秒级返回，这个分支几乎不可见） -->
-          <div v-else-if="!listLoading && !rows.length" class="hc-empty">暂无交会数据</div>
+          <div v-else-if="!listLoading && !rows.length" class="hc-empty">{{ ephTab ? '本机暂无星历筛选结果' : '暂无交会数据' }}</div>
           <template v-else>
+            <!-- 虚拟滚动：上方占位 -->
+            <div v-if="virtOn && padTop" :style="{ height: padTop + 'px' }"></div>
             <div
-              v-for="r in rows"
+              v-for="r in visibleRows"
               :key="r.key"
               class="hc-item"
               :class="{ on: pickedKey === r.key }"
@@ -406,10 +669,17 @@ function close() {
                 <span class="hc-level">{{ r.label }}</span>
               </div>
             </div>
+            <!-- 虚拟滚动：下方占位 -->
+            <div v-if="virtOn && padBottom" :style="{ height: padBottom + 'px' }"></div>
           </template>
         </div>
 
-        <div class="hc-pager">
+        <div v-if="!ephTab" class="hc-pager">
+          <select v-model.number="query.pageSize" class="hc-sel" title="每页条数" @change="search">
+            <option :value="20">20 条/页</option>
+            <option :value="100">100 条/页</option>
+            <option :value="200">200 条/页</option>
+          </select>
           <button class="hc-btn" :disabled="query.page <= 1 || listLoading" @click="goPage(query.page - 1)">上一页</button>
           <span class="hc-page">{{ query.page }} / {{ maxPage }}</span>
           <button class="hc-btn" :disabled="query.page >= maxPage || listLoading" @click="goPage(query.page + 1)">下一页</button>
@@ -425,6 +695,200 @@ function close() {
 /* 碰撞热力面板内容较短，高度自适应内容即可，不必像列表面板那样撑满整屏（覆盖 .side-panel 的 height:100%） */
 .heat-panel {
   height: auto;
+}
+
+/* 桌面端：热力面板改为底部居中卡片，位置与尺寸对齐「专家」弹窗（.ai-glass.docked .ag-card）：
+   width min(560px, 94vw)、max-height min(62vh, 520px)、底边浮在底部「按钮栏 + 时间条」之上。 */
+@media (min-width: 769px) {
+  .side-panel.heat-panel {
+    top: auto;
+    left: 50%;
+    right: auto;
+    bottom: calc(122px + env(safe-area-inset-bottom));
+    transform: translateX(-50%);
+    width: min(560px, 94vw);
+    height: auto;
+    max-height: min(62vh, 520px);
+    z-index: 8;
+    /* 卡片高度受限后内容整体滚动（筛选条 / 图例 / 列表都能滚到），避免溢出卡片外 */
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    border-radius: 16px;
+    border-color: rgba(127, 216, 255, 0.18);
+    background: linear-gradient(180deg, rgba(22, 30, 44, 0.88), rgba(13, 19, 30, 0.92));
+    backdrop-filter: blur(22px) saturate(1.3);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 24px 60px rgba(0, 0, 0, 0.55);
+  }
+  /* 过渡：底部卡片改为「自下浮起 + 淡入」，覆盖默认的从左滑入（translateX(-100%)） */
+  .heat-panel.panel-enter-active,
+  .heat-panel.panel-leave-active { transition: transform 0.24s ease, opacity 0.24s ease; }
+  .heat-panel.panel-enter-from,
+  .heat-panel.panel-leave-to {
+    transform: translateX(-50%) translateY(14px);
+    opacity: 0;
+  }
+}
+
+/* ---------------- 来源页签：三种后端热力来源 + 我的星历 ---------------- */
+.heat-src {
+  display: flex;
+  gap: 4px;
+  padding: 2px 0 8px;
+  pointer-events: auto;
+
+  .hs-btn {
+    flex: 1;
+    min-width: 0;
+    height: 26px;
+    padding: 0 4px;
+    border: 1px solid rgba(120, 165, 225, 0.28);
+    border-radius: 4px;
+    background: rgba(18, 34, 58, 0.55);
+    color: #a7b6cc;
+    font-size: 11.5px;
+    white-space: nowrap;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+
+    &:hover { color: #d7e6fb; border-color: rgba(120, 165, 225, 0.5); }
+    &.on {
+      color: #eaf4ff;
+      border-color: #4c9aff;
+      background: rgba(38, 92, 156, 0.75);
+    }
+    /* 我的星历：与后端来源用描边区分（本机数据，不请求后端） */
+    &.is-eph { border-style: dashed; }
+    &.is-eph.on { border-style: solid; }
+  }
+}
+
+/* ---------------- P3 筛选条：时间窗 / 高度层 / 指标 / 阈值 / 按天柱状图 ---------------- */
+.heat-filter {
+  padding: 2px 0 10px;
+  /* 面板整体 pointer-events:none（空白区域穿透拾取卫星），筛选控件必须恢复事件 */
+  pointer-events: auto;
+
+  .hf-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 6px;
+  }
+
+  .hf-label {
+    flex: 0 0 42px;
+    font-size: 12px;
+    color: #a7b6cc;
+    white-space: nowrap;
+  }
+
+  /* 分段按钮组：等分剩余宽度，选中项高亮为主题蓝 */
+  .hf-seg {
+    display: flex;
+    flex: 1;
+    min-width: 0;
+    gap: 2px;
+  }
+
+  .hf-btn {
+    flex: 1;
+    min-width: 0;
+    height: 24px;
+    padding: 0 2px;
+    font-size: 11px;
+    line-height: 22px;
+    text-align: center;
+    white-space: nowrap;
+    border-radius: 5px;
+    cursor: pointer;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(120, 160, 220, 0.22);
+    color: #a7b6cc;
+    transition: all 0.15s ease;
+    &:hover { background: rgba(255, 255, 255, 0.12); color: #e6edf7; }
+    &.on {
+      background: rgba(79, 195, 247, 0.2);
+      border-color: rgba(79, 195, 247, 0.6);
+      color: #8fe2ff;
+    }
+  }
+
+  .hf-val {
+    flex: 0 0 auto;
+    font-size: 11px;
+    color: #7fd8ff;
+    white-space: nowrap;
+  }
+
+  /* 阈值滑杆：原生 range，用 accent-color 贴合深色主题 */
+  .hf-range {
+    flex: 1;
+    min-width: 0;
+    height: 16px;
+    margin: 0;
+    accent-color: #4fc3f7;
+    cursor: pointer;
+  }
+
+  .hf-count {
+    font-size: 11px;
+    color: #8b9bb5;
+    b { color: #8fe2ff; font-weight: 700; }
+    .hf-warn { color: #ffb454; }
+  }
+
+  /* 按天柱状图（纯 SVG 不必要，这里用 flex 柱高百分比实现，点击切天） */
+  .hf-days {
+    display: flex;
+    align-items: flex-end;
+    gap: 6px;
+    margin-top: 8px;
+    height: 46px;
+  }
+
+  .hf-day {
+    flex: none;
+    height: 20px;
+    padding: 0 7px;
+    font-size: 11px;
+    line-height: 18px;
+    border-radius: 5px;
+    cursor: pointer;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(120, 160, 220, 0.22);
+    color: #a7b6cc;
+    &.on { background: rgba(79, 195, 247, 0.2); border-color: rgba(79, 195, 247, 0.6); color: #8fe2ff; }
+  }
+
+  .hf-bars {
+    display: flex;
+    flex: 1;
+    align-items: flex-end;
+    gap: 2px;
+    height: 100%;
+    min-width: 0;
+  }
+
+  .hf-bar {
+    flex: 1;
+    min-width: 0;
+    height: 100%;
+    padding: 0 1px;
+    display: flex;
+    align-items: flex-end;
+    background: none;
+    border: none;
+    cursor: pointer;
+    i {
+      display: block;
+      width: 100%;
+      border-radius: 2px 2px 0 0;
+      background: rgba(127, 176, 255, 0.45);
+      transition: height 0.2s ease, background 0.15s ease;
+    }
+    &:hover i { background: rgba(143, 226, 255, 0.8); }
+    &.on i { background: #4fc3f7; }
+  }
 }
 
 .heat-batch {
@@ -786,6 +1250,18 @@ html.is-mobile {
         .hc-item { margin-bottom: 0; }
       }
     }
+  }
+}
+
+/* 桌面端：固定行高，供虚拟滚动按固定步长计算占位高度（移动端保持压缩行高，不启用虚拟滚动） */
+@media (min-width: 769px) {
+  .heat-panel .hc-item { height: 58px; box-sizing: border-box; }
+  /* 底部居中面板本身是 flex 列且 max-height 受限：.hc-list 若沿用 flex:1 1 auto + min-height:0
+     会被压缩到 0 高（列表塌陷、分页条盖住首行），故改为固定高度、不参与收缩。 */
+  .heat-panel .hc-list {
+    flex: 0 0 auto;
+    height: min(40vh, 330px);
+    max-height: none;
   }
 }
 </style>

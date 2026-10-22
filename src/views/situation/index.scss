@@ -38,6 +38,14 @@
   pointer-events: none; user-select: none;
   filter: drop-shadow(0 0 6px rgba(0, 0, 0, 0.6));
 }
+/* 右上角水印：字号与弹出窗标题（.sp-title）一致，85% 不透明度；纯装饰不拦截交互 */
+.app-watermark {
+  position: absolute; top: 12px; right: 16px; z-index: 9;
+  font-size: 14px; font-weight: 700; line-height: 1.2;
+  color: #e8eef7; opacity: 0.03;
+  pointer-events: none; user-select: none; white-space: nowrap;
+  text-shadow: 0 0 8px rgba(0, 0, 0, 0.55);
+}
 /* 大屏标题栏：固定顶部正中（冻结纯装饰层，pointer-events:none 不拦截画布交互） */
 .constel-titlebar {
   position: absolute; top: 10px; left: 50%; transform: translateX(-50%);
@@ -205,10 +213,32 @@
 .panel-enter-active, .panel-leave-active { transition: transform 0.28s ease, opacity 0.28s ease; }
 .panel-enter-from, .panel-leave-to { transform: translateX(-100%); opacity: 0; }
 /* 底部 dock 导航栏 */
+/* 仿真时间条：常驻最底部居中（按钮栏在其上方），实体底色（不透出三维画面），不与右下角图例重叠 */
+.sim-bar { position: absolute; left: 50%; bottom: 14px; transform: translateX(-50%); z-index: 9;
+  display: flex; align-items: center; gap: 10px; width: min(620px, calc(100% - 32px));
+  padding: 7px 10px; border-radius: 10px;
+  background: #0b1a2b; border: 1px solid rgba(110, 160, 230, 0.38);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45); }
+.sim-play { flex: none; width: 30px; height: 30px; border-radius: 8px; cursor: pointer; font-size: 10px;
+  color: #dbe9fb; background: rgba(50, 100, 180, 0.45); border: 1px solid rgba(110, 160, 230, 0.4);
+  &:hover { color: #fff; border-color: #7fb0ff; background: rgba(60, 125, 215, 0.6); } }
+/* 重置按钮：回到当前时刻（与播放键同尺寸，图标字号略大以看清旋转箭头） */
+.sim-play.sim-reset { font-size: 15px; }
+.sim-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.sim-line { display: flex; align-items: baseline; gap: 8px; min-width: 0;
+  b { flex: none; font-size: 11px; color: #eaf2fc; font-variant-numeric: tabular-nums; }
+  .sim-range { flex: 1 1 auto; min-width: 0; font-size: 9.5px; color: #7d92b0;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; } }
+.sim-slider { width: 100%; height: 14px; accent-color: #7fb0ff; cursor: pointer; }
+.sim-rates { flex: none; display: flex; gap: 3px;
+  button { height: 24px; padding: 0 6px; font-size: 9.5px; border-radius: 5px; cursor: pointer;
+    color: #9dbbdd; background: rgba(30, 60, 110, 0.6); border: 1px solid rgba(110, 150, 210, 0.28);
+    &:hover { color: #eaf2fc; border-color: rgba(120, 175, 255, 0.55); }
+    &.on { color: #0b1a2b; background: #7fb0ff; border-color: #7fb0ff; font-weight: 700; } } }
 .constel-dock {
   /* z-index 高于左侧列表面板（.side-panel 为 7）：dock 向上弹出的「碰撞热力来源菜单」不能被面板盖住。
      移动端面板宽 300px、菜单居中，二者必然重叠，层级低于面板时菜单会「看不见也点不到」。 */
-  position: absolute; bottom: 14px; left: 50%; transform: translateX(-50%); z-index: 9;
+  position: absolute; bottom: 70px; left: 50%; transform: translateX(-50%); z-index: 9;
   display: flex; align-items: center; flex-wrap: wrap; justify-content: center; gap: 4px;
   max-width: calc(100% - 28px); padding: 5px 10px; border-radius: 22px;
   background: rgba(8,13,24,0.78); border: 1px solid rgba(120,160,220,0.24); backdrop-filter: blur(10px);
@@ -226,8 +256,6 @@
     &:disabled { opacity: 0.4; cursor: not-allowed; }
     .dock-ico { font-size: 13px; }
   }
-  /* 无可还原内容时的置灰（替代 :disabled，保证长按仍能收到指针事件） */
-  .dock-btn.dock-dim { opacity: 0.4; cursor: not-allowed; }
   /* 子菜单锚点容器：带子项菜单的按钮各包一层，让菜单定位到「自己那个按钮」上方而不是整条 dock 居中。
      它是 flex 容器中的一项，宽度即为按钮宽度，菜单以它的中线居中（与按钮中线重合）。 */
   .dock-item { position: relative; display: inline-flex; flex-shrink: 0; }
@@ -263,24 +291,6 @@
         i { color: #9fc3e0; } }
     }
   }
-  /* 还原初始状态：默认灰（dock-dim），存在拾取/轨道线时亮起 */
-  .dock-btn.dock-reset { color: #8a94a6;
-    position: relative; overflow: hidden;
-    /* 长按 5s 的承载元素：touch-action: none 让浏览器完全不接管这一处的触摸手势
-       （允许 pan/zoom 会导致长按 500ms 左右被判为「手势接管」并派发 pointercancel）；
-       click 不受 touch-action 影响，短按还原照常 */
-    touch-action: none;
-    &:hover { color: #e6edf6; background: rgba(255,255,255,0.06); }
-    &.on { color: #ffd591; background: rgba(255,213,145,0.12); border-color: rgba(255,213,145,0.32);
-      &:hover { background: rgba(255,213,145,0.18); color: #ffe3ae; } }
-    /* 长按进度：按钮底部 2px 进度条，走满即返回控制台（时长与脚本 HOLD_HOME_MS 一致） */
-    &.holding::after { content: ''; position: absolute; left: 0; bottom: 0; width: 100%; height: 2px;
-      background: #ffd591; transform-origin: left center; animation: dock-hold 5s linear forwards; } }
-}
-/* 长按「还原」的进度条动画（5s 与脚本 HOLD_HOME_MS 一致） */
-@keyframes dock-hold {
-  from { transform: scaleX(0); }
-  to { transform: scaleX(1); }
 }
 /* 子项菜单弹出过渡（保留 translateX(-50%) 居中，避免动画期间左右跳动） */
 .dock-menu-enter-active, .dock-menu-leave-active { transition: opacity 0.18s ease, transform 0.18s ease; }
@@ -288,12 +298,18 @@
 /* 右下角图例 */
 .constel-legend {
   /* z-index 高于详情面板/浮标（均为 4）：图例展开时不被右侧详情 icon / 浮标遮挡 */
-  position: absolute; right: 14px; bottom: 14px; z-index: 5; width: 200px; padding: 12px 14px;
+  position: absolute; right: 14px; bottom: 14px; z-index: 5; width: 188px; padding: 10px 12px;
   border-radius: 10px; background: rgba(10,16,28,0.72); border: 1px solid rgba(120,160,220,0.25); backdrop-filter: blur(8px);
-  .lg-title { min-height: 20px; font-size: 12px; font-weight: 600; color: #7fb0ff; letter-spacing: 0.5px; margin-bottom: 8px; }
+  .lg-title { min-height: 20px; font-size: 12px; font-weight: 600; color: #7fb0ff; letter-spacing: 0.5px; margin-bottom: 8px;
+    /* 去掉折叠箭头图标（用户要求）：图例标题条保持可点击折叠，仅移除 ▾ 图标 */
+    &.collapsible-title::after { content: none; }
+    /* 双时区时钟：UTC 上行 / 北京下行，左对齐；字号比 dock 按钮小一档（需求：时间栏文字缩一号，外框随之收缩） */
+    .lg-clock { display: flex; flex-direction: column; align-items: flex-start; gap: 1px; width: 100%;
+      .lg-clock-line { font-size: 11px; font-weight: 500; color: #cfe0f5; letter-spacing: 0.2px;
+        white-space: nowrap; font-variant-numeric: tabular-nums; line-height: 1.2; } } }
   &.is-collapsed {
     width: auto;                 // 收起时宽度收缩到仅折叠图标
-    padding: 6px 8px !important; // 覆盖全局 .collapsible-panel.is-collapsed 的底部 14px 内边距，压缩空位
+    padding: 5px 7px !important; // 覆盖全局 .collapsible-panel.is-collapsed 的底部内边距，压缩空位
     .lg-title { min-height: 0; margin-bottom: 0; }
   }
   /* 着色维度切换（图例顶部）：一排小按钮，选中态高亮；切换后 3D 卫星配色与图例同步变化 */
@@ -355,7 +371,7 @@
   }
 }
 .constel-detail {
-  position: absolute; top: 60px; right: 14px; z-index: 4; width: 320px; max-width: calc(100% - 28px);
+  position: absolute; top: 60px; right: 14px; z-index: 4; width: 288px; max-width: calc(100% - 28px);
   max-height: calc(100% - 80px); overflow-y: auto; padding: 14px 16px; border-radius: 14px;
   background: linear-gradient(160deg, rgba(16,26,46,0.92), rgba(9,14,26,0.86));
   border: 1px solid rgba(120,170,230,0.28); backdrop-filter: blur(14px);
@@ -364,13 +380,11 @@
     .cd-head-main { display: flex; flex-direction: column; gap: 4px; min-width: 0;
       .cd-name { font-size: 16px; font-weight: 800; color: #5fd0ff; letter-spacing: 0.3px; line-height: 1.3; word-break: break-word; }
     .cd-sub { font-size: 12px; color: #8ea4c4; line-height: 1.4; }
-    /* 编目国（旗帜 + 中文名）：内联在副标题尾部，随详情数据出现/消失 */
-    .cd-owner { display: inline-flex; align-items: center; gap: 4px; margin-left: 6px; padding: 1px 7px 1px 4px;
-      border-radius: 20px; background: rgba(120,170,230,0.14); border: 1px solid rgba(120,170,230,0.22);
+    /* 编目国（仅国旗图标）：内联在副标题尾部，随详情数据出现/消失 */
+    .cd-owner { display: inline-flex; align-items: center; margin-left: 6px;
       vertical-align: 1px; white-space: nowrap;
       .cd-owner-flag { width: 16px; height: 11px; object-fit: cover; border-radius: 2px; flex: none;
-        box-shadow: 0 0 0 1px rgba(255,255,255,0.12); }
-      .cd-owner-name { font-size: 11px; color: #cfe3ff; line-height: 1.2; } }
+        box-shadow: 0 0 0 1px rgba(255,255,255,0.12); } }
     /* 发射站详情副标题尾部的小胶囊（现役 / 退役、陆基 / 海基） */
     .cd-site-tag { display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: 20px;
       font-size: 10.5px; color: #7fd8ff; background: rgba(120,170,230,0.14); border: 1px solid rgba(120,170,230,0.24);
@@ -391,6 +405,10 @@
   .cd-block { margin-bottom: 12px; padding: 12px 12px 6px; border-radius: 10px;
     background: rgba(20,32,56,0.35); border: 1px solid rgba(120,170,230,0.12);
     &:last-child { margin-bottom: 0; } }
+  /* 我的星历详情：主操作按钮（打开星历分析面板） */
+  .cd-eph-btn { width: 100%; margin: 0 0 6px; height: 30px; border-radius: 7px; font-size: 11.5px; cursor: pointer;
+    color: #dbe9fb; background: rgba(62,120,200,0.42); border: 1px solid rgba(110,160,230,0.55);
+    &:hover { background: rgba(72,140,224,0.6); border-color: #4fc3f7; } }
   .cd-title { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700; color: #8fc2ff;
     letter-spacing: 0.6px; margin-bottom: 10px;
     &::before { content: ''; width: 3px; height: 12px; border-radius: 2px; background: linear-gradient(#4fc3f7, #7fb0ff); flex: none; } }
@@ -419,11 +437,6 @@
       b { white-space: normal; overflow-wrap: anywhere; }
     }
   }
-  /* 所属星座：命中的星座名做成小胶囊，多星座自动换行 */
-  .cd-cons { display: flex; flex-wrap: wrap; gap: 5px; }
-  .cd-cons-item { display: inline-flex; align-items: baseline; gap: 6px; padding: 2px 9px; border-radius: 20px;
-    font-size: 11.5px; color: #cfe3ff; background: rgba(120,170,230,0.14); border: 1px solid rgba(120,170,230,0.24);
-    i { font-style: normal; font-size: 10px; color: #7fb0ff; opacity: 0.9; } }
   .cd-none { font-size: 11.5px; color: #8398b5; line-height: 1.4;
     &.err { color: #ff8a80; } }
   /* 原始 TLE 两行 + 复制按钮 */
@@ -457,10 +470,6 @@
   .cd-elev-cap { font-size: 11px; color: #9db0cc; }
   .cd-elev-canvas { width: 100%; height: 150px; border-radius: 8px;
     background: rgba(20,30,48,0.35); border: 1px solid rgba(120,170,230,0.16); }
-  /* 面板内联：卫星资料库（归属国家/地区 = 旗帜 + 中文名） */
-  .cd-cat-country { display: inline-flex; align-items: center; justify-content: flex-end; gap: 5px; }
-  .cd-cat-flag { flex: none; width: 16px; height: 11px; object-fit: cover; border-radius: 2px;
-    box-shadow: 0 0 0 1px rgba(255,255,255,0.12); }
   /* 事件主指标高亮（事件详情 / 碰撞列表共用；颜色按来源分派：官方 CDM 用碰撞概率、本项目初筛用最近距离分级） */
   .heat-strong { font-size: 15px; font-weight: 800; }
   /* 卫星碰撞列表：检索该卫星未来窗口内全部碰撞事件 */
@@ -531,6 +540,14 @@
   }
 }
 .constel-detail {
+  /* 卫星详情卡内文字统一：标题 / 标签 / 数值同一字号，全部白色加粗
+     （字号用变量，移动端只需改 --cd-fs 一处即可整体收窄并保持一致） */
+  &.detail-sat { --cd-fs: 11px;
+    .cd-title { font-size: var(--cd-fs); color: #eaf2fc; }
+    /* 左侧标签与副标题同色、常规字重（仅数值保留白色加粗） */
+    .cd-item span { font-size: var(--cd-fs); color: #8ea4c4; font-weight: 400; }
+    .cd-item b { font-size: var(--cd-fs); }
+  }
   /* 上栏：卫星过境列表（按最大仰角降序，限高内部滚动，下栏参数始终可见） */
   .pass-list { list-style: none; margin: 0; padding: 0;
     max-height: min(30vh, 260px); overflow-y: auto; overscroll-behavior: contain;
@@ -859,34 +876,30 @@ html.is-mobile {
     }
     &.is-collapsed { padding: 4px 6px !important; }
   }
-  .constel-detail { top: 48px; right: 8px; left: 8px; width: auto; max-width: calc(100% - 16px); max-height: calc(100% - 104px); padding: 7px 8px; border-radius: 10px; }
+  .constel-detail { --cd-fs: 9.5px; top: 48px; right: 8px; left: 8px; width: auto; max-width: calc(100% - 16px); max-height: calc(100% - 104px); padding: 7px 8px; border-radius: 10px; }
   /* 移动端：弹窗空间压到极致——元素间距与字号全面收窄，保留最小可读字号（10px 上下），
      目标是「一屏塞下尽可能多的信息、尽量不遮地球」 */
   .constel-detail .cd-head { padding-bottom: 5px; margin-bottom: 6px; gap: 6px; }
   .constel-detail .cd-head .cd-head-main { gap: 1px; }
   .constel-detail .cd-head .cd-name { font-size: 13px; line-height: 1.25; }
   .constel-detail .cd-head .cd-sub { font-size: 10px; line-height: 1.3; }
-  .constel-detail .cd-head .cd-owner { gap: 3px; margin-left: 4px; padding: 0 5px 0 3px;
-    .cd-owner-flag { width: 13px; height: 9px; }
-    .cd-owner-name { font-size: 9.5px; } }
+  .constel-detail .cd-head .cd-owner { margin-left: 4px;
+    .cd-owner-flag { width: 13px; height: 9px; } }
   .constel-detail .cd-close { width: 20px; height: 20px; line-height: 18px; font-size: 11px; }
   .constel-detail .cd-head-actions { gap: 4px; }
   .constel-detail .cd-collapse-all { height: 20px; padding: 0 7px; border-radius: 10px; font-size: 9.5px; line-height: 18px; }
   .constel-detail .cd-block { margin-bottom: 6px; padding: 6px 6px 3px; border-radius: 7px; }
-  .constel-detail .cd-title { font-size: 10.5px; margin-bottom: 4px; letter-spacing: 0.3px; gap: 4px; }
+  .constel-detail .cd-title { margin-bottom: 4px; letter-spacing: 0.3px; gap: 4px; }
   .constel-detail .cd-title::before { height: 9px; width: 2px; }
   .constel-detail .cd-title .cd-caret { font-size: 9px; }
   .constel-detail .cd-grid { gap: 3px 5px; }
   .constel-detail .cd-item { gap: 0; padding: 3px 5px; border-radius: 5px; }
-  .constel-detail .cd-item span { font-size: 9.5px; line-height: 1.3; }
-  .constel-detail .cd-item b { font-size: 11px; line-height: 1.28; }
+  .constel-detail .cd-item span { font-size: var(--cd-fs); line-height: 1.3; }
+  .constel-detail .cd-item b { font-size: var(--cd-fs); line-height: 1.28; }
   .constel-detail .cd-item .cd-norad { font-size: 9px; margin-top: 0; }
   /* 紧凑单行变体：移动端进一步压低行距与内边距，仍保持「标签+值」单行完整 */
   .constel-detail .cd-grid.is-inline { gap: 1px; }
   .constel-detail .cd-grid.is-inline .cd-item { gap: 8px; padding: 1px 5px; }
-  .constel-detail .cd-cons { gap: 4px; }
-  .constel-detail .cd-cons-item { padding: 1px 7px; font-size: 9.5px;
-    i { font-size: 8.5px; } }
   .constel-detail .cd-none { font-size: 9.5px; }
   .constel-detail .cd-tle { padding: 4px 6px; font-size: 9px; }
   .constel-detail .cd-tle-copy { padding: 3px 7px; font-size: 9.5px; }
@@ -895,7 +908,6 @@ html.is-mobile {
   .constel-detail .cd-kg-legend { gap: 3px 8px; }
   .constel-detail .cd-kg-legend-item { font-size: 9.5px;
     em { font-size: 8.5px; } }
-  .constel-detail .cd-cat-flag { width: 14px; height: 10px; }
   .constel-detail .heat-strong { font-size: 13px; }
   .constel-detail .cdm-item { padding: 5px 6px; margin-bottom: 4px; border-radius: 7px; }
   .constel-detail .cdm-item .cdm-main { margin-bottom: 3px; }
@@ -934,7 +946,7 @@ html.is-mobile {
   .constel-detail-tab { top: 48px; right: 8px; width: 32px; height: 32px; font-size: 15px; }
   /* 列表收起浮标：面板已移到底部，浮标同步贴住底部 Tab 导航上沿（与抽屉同一入口位置） */
   .side-panel-tab { top: auto; bottom: calc(96px + env(safe-area-inset-bottom)); left: 8px; width: 32px; height: 32px; font-size: 15px; }
-  /* 外拉 tag：移动端收窄（右侧「太空安全专家」tag 在移动端同样可见可点） */
+  /* 外拉 tag：移动端收窄（右侧「星历与安全分析」tag 在移动端同样可见可点） */
   .edge-tag { font-size: 11px; letter-spacing: 3px; padding: 12px 5px; }
   /* 顶部通知条：移动端压缩内边距与字号，尽量少占屏幕（top 让出压缩版标题栏高度） */
   .constel-titlebar {
@@ -1081,6 +1093,10 @@ html.is-mobile {
     border-radius: 14px 14px 0 0;
     border-left: none; border-right: none; border-bottom: none;
   }
+  /* 星历仿真时间条：让开底部 Tab Bar（含安全区），窄屏隐藏有效期文字只留时刻 */
+  .sim-bar { bottom: calc(72px + env(safe-area-inset-bottom)); width: calc(100% - 20px);
+    gap: 7px; padding: 6px 8px; }
+  .sim-line .sim-range { display: none; }
   /* 子菜单锚点：移动端 dock 满屏宽、按钮仅约 1/5 屏，菜单贴着按钮居中会顶出屏幕，
      故退回 position: static（菜单相对 dock 居中于屏幕），与合并前的行为一致 */
   .constel-dock > .dock-item { position: static; display: flex;

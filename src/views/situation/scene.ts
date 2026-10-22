@@ -83,7 +83,7 @@ export function cdnUrl(localUrl: string): string {
 }
 
 export const TYPE_COLOR: Record<string, number> = {
-  PAYLOAD: 0xff4d4f, DEBRIS: 0x9fb0c0, 'ROCKET BODY': 0x3f9dff, UNKNOWN: 0xffd54f
+  PAYLOAD: 0x4caf50, DEBRIS: 0xff4d4f, 'ROCKET BODY': 0xff9800, UNKNOWN: 0xffffff
 }
 export const TYPE_LABEL: Record<string, string> = {
   PAYLOAD: '载荷卫星', DEBRIS: '空间碎片', 'ROCKET BODY': '火箭箭体', UNKNOWN: '未知物体'
@@ -96,10 +96,10 @@ export const TYPE_MODEL: Record<string, string> = {
 }
 /** 图例：类型 -> 颜色 + 标题 + 亮色（右下角） */
 export const LEGEND = [
-  { type: 'PAYLOAD', label: '载荷卫星', color: '#ff4d4f', desc: '在轨工作航天器' },
-  { type: 'DEBRIS', label: '空间碎片', color: '#9fb0c0', desc: '失控碎片/残骸' },
-  { type: 'ROCKET BODY', label: '火箭箭体', color: '#3f9dff', desc: '末级/运载结构' },
-  { type: 'UNKNOWN', label: '未知物体', color: '#ffd54f', desc: '未分类目标' }
+  { type: 'PAYLOAD', label: '载荷卫星', color: '#4caf50', desc: '在轨工作航天器' },
+  { type: 'DEBRIS', label: '空间碎片', color: '#ff4d4f', desc: '失控碎片/残骸' },
+  { type: 'ROCKET BODY', label: '火箭箭体', color: '#ff9800', desc: '末级/运载结构' },
+  { type: 'UNKNOWN', label: '未知物体', color: '#ffffff', desc: '未分类目标' }
 ]
 export const TYPE_KEYS = ['PAYLOAD', 'DEBRIS', 'ROCKET BODY', 'UNKNOWN']
 /** 轨道区域（与 mui/sat_constellation/list.vue 的 REGIME_OPTIONS 一致），供卫星列表面板勾选过滤 */
@@ -188,7 +188,7 @@ export const spaceWeatherLoading = ref(false)
 export const spaceWeatherAt = ref(0)
 /** 类型 -> 十六进制颜色（CSS，供左侧列表圆点 / 类型标签着色），与 TYPE_COLOR 保持一致 */
 export const TYPE_HEX: Record<string, string> = {
-  PAYLOAD: '#ff4d4f', DEBRIS: '#9fb0c0', 'ROCKET BODY': '#3f9dff', UNKNOWN: '#ffd54f'
+  PAYLOAD: '#4caf50', DEBRIS: '#ff4d4f', 'ROCKET BODY': '#ff9800', UNKNOWN: '#ffffff'
 }
 
 /* ============================================================
@@ -588,6 +588,13 @@ export interface GState {
   filterOrbitMeta: Record<string, { gi: number; segStart: number; steps: number }[]>
   /** 过滤轨道线滚动更新的模拟时间基准：模拟时间前进超过 LiveStepMs 才触发一轮顶点滚动，省掉无效更新 */
   filterOrbitLiveT0: number
+  /** 近重合轨道去重：每个点云索引对应的「画环代表」（桶内首星）全局下标；自己就是首星时等于自己。
+   *  同轨道面/相近高度的多颗卫星各自 TLE 传播出的环彼此只差几~几十公里，拉近看「一条轨道」会由
+   *  2~4 条近重合线组成 —— 每桶只画首星的环，其余成员复用（高亮/染色经 paintConsOrbit 归并到共用环）。 */
+  filterOrbitPrimary: Int32Array | null
+  /** 选中星的轨道环复用过滤轨道线（过滤态下把该星那段重染亮青，不叠加独立环）：
+   *  true = 选中轨道就是过滤环里重染的那一段；false = 独立选中环 g.orbitLine */
+  selOrbitShared: boolean
   /** 碰撞热力标记组：事件中点云状标记(Points) + 两端点连线(LineSegments)；热力模式显示，普通模式隐藏 */
   heatGroup: import('three').Group | null
   /** 热力事件中点标记（Points 粒子和云，颜色/大小按碰撞概率） */
@@ -654,6 +661,8 @@ export const g: GState = {
   filterOrbitItems: [],
   filterOrbitMeta: { PAYLOAD: [], DEBRIS: [], 'ROCKET BODY': [], UNKNOWN: [] },
   filterOrbitLiveT0: Date.now(),
+  filterOrbitPrimary: null,
+  selOrbitShared: false,
   heatGroup: null, heatPoints: null, heatLines: null, heatClouds: null, heatSelOrbitGroup: null,
   heatSatTargets: [],
   passGroup: null, passBorderGroup: null, passDistrictGroup: null,
@@ -688,6 +697,23 @@ export const detailOpen = ref(true)
 export const constellations = ref<ConstellationItem[]>([])
 export const filterKw = ref('')
 export const filterConst = ref('')            // 星座名，空 = 全部
+/** 星座卡片逐星座「星座展示」覆盖表（卫星主开关的逐星库细分）：
+ *  - 主开关（typeF.PAYLOAD）开 → 全部星座默认展示，卡片可单独点暗（写 false）；
+ *  - 主开关关 → 全部星座默认不展示，卡片可单独点亮（写 true）；
+ *  - 主开关切换时清空本表 → 所有卡片回到跟随态（等价于全部赋同值）。
+ *  只影响载荷点云/轨道，不影响碎片/残骸/未知三类目标的按钮与显示。 */
+export const consShowMap = reactive<Record<string, boolean>>({})
+/** 任一卡片存在独立覆盖（区别于「全部跟随主开关」的干净态） */
+export const consOverrideActive = computed(() => Object.keys(consShowMap).length > 0)
+/** 卡片逐星库展示口径：无覆盖时跟随主开关 */
+export function consShowOf(name: string): boolean {
+  const v = consShowMap[name]
+  return v !== undefined ? v : satPanel.typeF.PAYLOAD
+}
+/** 星座卡片轨道绑定标记：卡片通道写 filterConst 时置 true，用于与「星座列表」dock 视图的
+ *  filterConst 展示通道区分 —— 卡片通道下 filterConst 只负责「轨道展示画哪个星座」，
+ *  点云掩码走 consShowMap 口径（否则会把其它已展示星座从屏幕上抹掉）。 */
+export const consCardBound = ref(false)
 export const altMin = ref<number | undefined>(undefined) // 轨道高度下限(km)
 export const altMax = ref<number | undefined>(undefined) // 轨道高度上限(km)
 /** NORAD 集合过滤（智能体/接口下发的「一批目标」，如某国/某机构的卫星、某事件涉及的两星）：
@@ -766,16 +792,33 @@ export const satSetActive = computed(() => (filterNorads.value?.length ?? 0) > 0
  *  用户首次展开「太空安全目标列表」面板（dockMode='sat'）或通过 URL 预置选中某目标后才揭示，
  *  一旦揭示不再回收。数据仍在后台正常加载（列表统计/搜索不受影响），只控制三维点云的可见性。 */
 export const cloudRevealed = ref(false)
+/** 星座卡片「轨道展示」开关：仅在星座展示（filterConst 非空）状态下可点亮；
+ *  点亮后该星座被展示成员的轨道线以蓝色细线绘制，点暗或星座不再展示时自动复位 false。
+ *  轨道线的构建与显隐口径见 BaseScene 的 rebuildFilterOrbits / applyOrbitToggle。 */
+export const consOrbitOn = ref(false)
 
 /* ============================================================
  * dock 导航 / 面板数据（卫星列表 / 星座列表）
  * ============================================================ */
-/** 当前展开的面板：'sat' 卫星列表 | 'cons' 星座列表 | 'site' 发射站列表 | 'heat' 碰撞热力 | 'pass' 城市过境 | 'region' 区域过境 | 'multi' 多区域过境 | '' 全收起 */
-export type DockMode = '' | 'sat' | 'cons' | 'site' | 'heat' | 'pass' | 'region' | 'multi'
+/** 当前展开的面板：'sat' 卫星列表 | 'cons' 星座列表 | 'site' 发射站列表 | 'heat' 碰撞热力 | 'pass' 城市过境 | 'region' 区域过境 | 'multi' 多区域过境 | 'eph' 星历分析 | '' 全收起 */
+export type DockMode = '' | 'sat' | 'cons' | 'site' | 'heat' | 'pass' | 'region' | 'multi' | 'eph'
 /** 当前展开的面板 */
 export const dockMode = ref<DockMode>('')
+/** 星历面板是否展开：独立于 dockMode —— 星历面板停靠右侧，与左侧「太空安全目标列表」等面板互不干扰，
+ *  打开/收起星历不会改变 dockMode，因此左右两侧的 tag 与弹窗各自独立 */
+export const ephOpen = ref(false)
 /** 当前激活的面板（dock 高亮 + × 显示）：被动开启后一直保持，直到点 × 关闭还原 */
 export const dockActive = ref<DockMode>('')
+
+/* ============================================================
+ * 星历仿真时间控制（底部时间条 + 倍率）
+ * ============================================================ */
+/** 仿真倍率：0.1 / 1 / 10 / 60（BaseScene 用它缩放每帧虚拟时间步长） */
+export const simSpeed = ref(1)
+/** 仿真时钟是否推进：暂停时整场景虚拟时间冻结（地球自转 / 卫星 / 星历位置一起停） */
+export const simPlaying = ref(true)
+/** 当前虚拟时刻（Unix ms）：BaseScene 以约 5Hz 回写，供时间条显示与拖动 */
+export const simTimeMs = ref(Date.now())
 
 /**
  * 「综合态势」的三个子项：卫星列表（'sat'）/ 星座列表（'cons'）/ 发射站列表（'site'）。
@@ -832,10 +875,11 @@ export const SITE_HISTORY_PAGE_SIZE = 20
 /** 该站是否有选中（右侧面板 / 浮标的显示条件） */
 export const hasSiteSel = computed(() => !!siteSel.value)
 
-/** 图例类型勾选过滤：取消勾选则隐藏对应类型模型（初始全部显示）。
- *  注意图例 / 卫星列表按「粗类型」4 分类（TYPE_KEYS），而渲染按「型号」分 Mesh，故需用 modelVisible 换算。 */
+/** 图例类型勾选过滤：取消勾选则隐藏对应类型模型。
+ *  初始与面板类型开关（satPanel.typeF）一致为全不勾选 —— 点云显隐由面板开关（或图例/还原/深链）驱动。
+ *  注意图例 / 面板开关按「粗类型」4 分类（TYPE_KEYS），而渲染按「型号」分 Mesh，故需用 modelVisible 换算。 */
 export const visible = reactive<Record<string, boolean>>(
-  Object.fromEntries(TYPE_KEYS.map((k) => [k, true]))
+  Object.fromEntries(TYPE_KEYS.map((k) => [k, false]))
 )
 /** 型号是否被图例勾选显示：按型号所属粗类型查 visible（型号 -> 粗类型见 MODEL_COARSE） */
 export function modelVisible(model: string): boolean {
@@ -1056,6 +1100,38 @@ export function rebuildSatIndex() {
   satPanel.count = Math.min(satPanel.BATCH, idx.length)
 }
 
+/** 面板类型开关（卫星/碎片/残骸/未知）↔ 三维显隐（visible）双向同步：
+ *  - 面板勾选任一类型 → 同步 visible 并揭示点云（cloudRevealed），屏幕按类型着色显示对应目标；
+ *  - 取消勾选 → visible 同步为 false，BaseScene 的 visible watch 隐藏该类型 Mesh 与轨道线；
+ *  - 图例勾选 / 「还原」复位 / 模块切换 / URL 深链对 visible 的修改回写面板勾选态，两处口径始终一致。
+ *  同值赋值不会重复触发 watch，双向链路自然收敛，无死循环。 */
+TYPE_KEYS.forEach((k) => {
+  watch(() => satPanel.typeF[k], (v) => {
+    visible[k] = v
+    if (v) {
+      cloudRevealed.value = true
+      // 类型全量展示让位优先：清除「单星白名单」（URL 深链 / 星座列表点选单星），
+      // 否则 NORAD 集合会与类型过滤 AND 叠加，导致只显示旧的那一颗
+      if (filterNorads.value) filterNorads.value = null
+    } else if (k === 'PAYLOAD' && !filterConst.value && !consOverrideActive.value) {
+      // 卫星类型关闭且无星座展示 → 当前星座轨道线随之隐藏，「轨道展示」复位
+      consOrbitOn.value = false
+    }
+    if (k === 'PAYLOAD') {
+      // 主开关（卫星）切换 → 所有星座卡片回到跟随态（整体赋同值），卡片轨道绑定一并解除
+      for (const n of Object.keys(consShowMap)) delete consShowMap[n]
+      if (consCardBound.value) {
+        consCardBound.value = false
+        filterConst.value = ''
+        consOrbitOn.value = false
+      }
+    }
+  })
+  watch(() => visible[k], (v) => {
+    satPanel.typeF[k] = v !== false
+  })
+})
+
 /* ============================================================
  * 碰撞热力（三个数据源，同一坐标口径）
  *  - 'local'       本项目 SGP4 初筛：/cgi/sat_conj/heatmap（sat_conjunction + 现行 TLE 在 TCA 传播）
@@ -1133,13 +1209,85 @@ export const heatSelList = ref<CdmHeatEvent[]>([])
 /** 事件详情面板开关（热力模式点事件后打开，可收起保留选中） */
 export const heatOpen = ref(true)
 
+/* ---- P3 热力筛选（面板顶部筛选条，全部在前端对 heatList 生效，不额外请求后端） ---- */
+/** 高度层：all=全部 / leo=<2000km / meo=2000~30000km / geo=>30000km（含 HEO）。
+ *  高度取自事件 altitude（本地初筛 / 交会分析来源有；官方 CDM 无该字段 → 选择高度层时这些事件不参与） */
+export type HeatAltBand = 'all' | 'leo' | 'meo' | 'geo'
+export const heatAltBand = ref<HeatAltBand>('all')
+/** 阈值指标：risk=综合风险(0~1) / pc=碰撞概率 / miss=最近距离(km，取「不超过」) */
+export type HeatMetric = 'risk' | 'pc' | 'miss'
+export const heatMetric = ref<HeatMetric>('risk')
+/** 综合风险阈值（0~1，低于该值的事件不参与三维渲染） */
+export const heatRiskFloor = ref(0)
+/** 碰撞概率阈值（低于该值不参与；对数刻度滑杆 1e-8~1e-2） */
+export const heatPcFloor = ref(0)
+/** 最近距离上限（km，大于该值不参与；滑杆 0~100） */
+export const heatMissCeil = ref(100)
+/** 切换来源时复位高度层（各来源字段口径不同，避免残留 0 事件） */
+watch(heatSource, () => { heatAltBand.value = 'all' })
+
+/* ---- P3 热力渲染口径：聚合格边 / 5 档风险色带 ---- */
+/** 热力聚合格边（场景单位，地球半径=1）：0.05 细 / 0.15 中 / 0.30 粗。
+ *  写入 URL 的 ?cell=（由 index.vue 负责同步），刷新 / 分享链接后保持同一观察尺度。 */
+export const HEAT_CELL_OPTIONS: { v: number; label: string }[] = [
+  { v: 0.05, label: '细' },
+  { v: 0.15, label: '中' },
+  { v: 0.3, label: '粗' }
+]
+export const heatCell = ref(0.15)
+
+/** 5 档风险色带：交会热力 / 交会分析热力按事件 risk(0~1) 分档着色，
+ *  比后端原始「红黄」两档更细，便于区分事件烈度。官方 CDM 仍按后端 Pc 配色（heatLegend）。 */
+export interface HeatRiskBand { color: string; label: string; thresh: string }
+export const HEAT_RISK_BANDS: HeatRiskBand[] = [
+  { color: '#38b48b', label: '低风险', thresh: 'risk < 0.2' },
+  { color: '#9dc93b', label: '较低风险', thresh: '0.2 ≤ risk < 0.4' },
+  { color: '#f2c14e', label: '中风险', thresh: '0.4 ≤ risk < 0.6' },
+  { color: '#f08a3c', label: '高风险', thresh: '0.6 ≤ risk < 0.8' },
+  { color: '#e8453c', label: '严重风险', thresh: 'risk ≥ 0.8' }
+]
+
+/** 事件风险 → 色带配色 */
+export function heatBandColor(risk?: number): string {
+  const r = Number.isFinite(risk) ? (risk as number) : 0
+  if (r < 0.2) return HEAT_RISK_BANDS[0].color
+  if (r < 0.4) return HEAT_RISK_BANDS[1].color
+  if (r < 0.6) return HEAT_RISK_BANDS[2].color
+  if (r < 0.8) return HEAT_RISK_BANDS[3].color
+  return HEAT_RISK_BANDS[4].color
+}
+
+/** 事件最终渲染配色：官方 CDM 用后端下发的 Pc 配色，其余来源用前端 5 档风险色带。
+ *  图例勾选过滤与三维着色共用这一口径，保证「勾掉的那一档」与「屏幕上消失的颜色」一致。 */
+export function heatColorOf(e: CdmHeatEvent): string {
+  return heatSource.value === 'spacetrack' ? e.color : heatBandColor(e.risk)
+}
+
+/** 事件高度层归属 */
+function altBandOf(alt?: number): Exclude<HeatAltBand, 'all'> | null {
+  if (alt == null || !Number.isFinite(alt)) return null
+  if (alt < 2000) return 'leo'
+  if (alt <= 30000) return 'meo'
+  return 'geo'
+}
+
+/** 按当前指标阈值判断事件是否保留 */
+function passThreshold(e: CdmHeatEvent) {
+  if (heatMetric.value === 'pc') return e.collision_probability >= heatPcFloor.value
+  if (heatMetric.value === 'miss') return e.miss_distance_km <= heatMissCeil.value
+  return (e.risk ?? 0) >= heatRiskFloor.value
+}
+
 /** 当前按日切片过滤后的事件列表（heatDay === -1 时展示总览全部）。
  *  按日归属由后端在按日切片时写入事件字段 day（1..heatDays；不切日时为 0），前端只做等值筛选。
- *  再叠加「图例勾选」过滤：取消勾选的档位（按配色匹配）不参与热力渲染。 */
+ *  再叠加「图例勾选」过滤：取消勾选的档位（按配色匹配）不参与热力渲染。
+ *  P3：再叠加「高度层」与「指标阈值」筛选。 */
 export const heatFiltered = computed(() => {
-  const base = heatDay.value < 1 ? heatList.value : heatList.value.filter((e) => e.day === heatDay.value)
-  if (!heatHiddenColors.size) return base
-  return base.filter((e) => !heatHiddenColors.has(e.color))
+  const band = heatAltBand.value
+  let base = heatDay.value < 1 ? heatList.value : heatList.value.filter((e) => e.day === heatDay.value)
+  if (band !== 'all') base = base.filter((e) => altBandOf(e.altitude) === band)
+  if (heatHiddenColors.size) base = base.filter((e) => !heatHiddenColors.has(heatColorOf(e)))
+  return base.filter(passThreshold)
 })
 
 /* ============================================================
