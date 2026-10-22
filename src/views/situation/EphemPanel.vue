@@ -12,9 +12,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { ephOpen, fmtNum, drawerHeightVh, isDrawerDragging, useDrawerDrag } from './scene'
 import {
   MAX_FILE_MB,
-  activeEphem, activeQuality, ephemBusy, ephemError, ephemMetas,
-  qualityTle, qualityTleBusy, qualityTleError, qualityTleNorad, qualityTleNote,
-  qualityCompare, qualityCompareId, qualityCompareBusy, qualityCompareError, setQualityCompare,
+  activeEphem, ephemBusy, ephemError, ephemMetas,
   uploadProgress, uploadName, builtinSamples, loadBuiltinIndex, loadBuiltinSample,
   refreshEphemList, activateEphem, deactivateEphem, removeEphem, uploadEphemerides,
   threatEvents, threatSelected, screening, screenProgress, screenError, screenStats,
@@ -131,96 +129,6 @@ const LEVEL_COLOR: Record<ThreatEvent['level'], string> = {
   low: '#7fb0ff'
 }
 const LEVEL_TEXT: Record<ThreatEvent['level'], string> = { high: '高危', medium: '警告', low: '关注' }
-
-/** 质量分配色 */
-const gradeColor = computed(() => {
-  const s = activeQuality.value?.score ?? 0
-  return s >= 85 ? '#4ad991' : s >= 70 ? '#7fb0ff' : s >= 50 ? '#ffb454' : '#ff6b6b'
-})
-
-/** TLE 偏差分档（km，仅示意量级）：绝对偏差随 TLE 历元变旧而增大，
- *  同一目标差到几百 km 属常见，超过 500 km 更可能是目标不匹配或数据异常 */
-const tleGrade = computed(() => {
-  const r = qualityTle.value
-  if (!r) return null
-  const v = r.rmsKm
-  if (v < 10) return { label: '优秀', color: '#4ad991' }
-  if (v < 100) return { label: '良好', color: '#7fb0ff' }
-  if (v < 500) return { label: '可用', color: '#ffb454' }
-  return { label: '偏差大', color: '#ff8f8f' }
-})
-
-/** 偏差-时间折线（SVG 240×46，纵向留 3px 边距） */
-const tleCurve = computed(() => {
-  const r = qualityTle.value
-  if (!r || r.points.length < 2) return ''
-  const t0 = r.points[0].t
-  const span = Math.max(1, r.points[r.points.length - 1].t - t0)
-  const max = Math.max(1, r.maxKm)
-  return r.points
-    .map((p) => `${(((p.t - t0) / span) * 240).toFixed(1)},${(41 - (p.dist / max) * 38).toFixed(1)}`)
-    .join(' ')
-})
-
-/** 可对比的同目标星历（同名或同 NORAD，且不是当前激活项） */
-const compareCandidates = computed(() => {
-  const a = activeEphem.value
-  if (!a) return []
-  const nm = (s: string) => String(s || '').trim().toUpperCase().replace(/\s+/g, ' ')
-  const an = nm(a.name)
-  return ephemMetas.value.filter(
-    (m) => m.id !== a.id && ((an !== '' && nm(m.name) === an) || (a.norad > 0 && m.norad === a.norad))
-  )
-})
-
-function onCompareChange(e: Event) {
-  void setQualityCompare((e.target as HTMLSelectElement).value)
-}
-
-/** NEES 展示：任一侧无协方差时无法计算 */
-const neesText = computed(() => {
-  const n = qualityCompare.value?.nees
-  if (n == null || !Number.isFinite(n) || n <= 0) return '—（任一侧无协方差，无法计算）'
-  return `${n.toFixed(2)}（理想 1）`
-})
-
-/** 组织评估指标，交给智能体抽屉生成中文解读（不新增模型能力，只复用既有问答） */
-function aiExplain() {
-  const set = activeEphem.value
-  const q = activeQuality.value
-  if (!set || !q) return
-  const scRms = q.selfConsistencyRmsKm
-  const scText = typeof scRms === 'number' && Number.isFinite(scRms) ? `${scRms.toFixed(3)} km` : '未计算'
-  const lines: string[] = [
-    '请基于以下高精度星历质量评估结果，用中文给出简明解读（只依据已给出的数据，不要编造）：',
-    '',
-    `对象：${set.name}（NORAD ${set.norad || '—'}），格式 ${set.format.toUpperCase()} / ${set.frame}`,
-    `时段：${fmtUtc(set.states[0]?.t ?? set.start, true)} ~ ${fmtUtc(set.states[set.states.length - 1]?.t ?? set.stop, true)} UTC，共 ${set.states.length} 点，步长 ${set.stepSec}s`,
-    `综合评分：${q.score}/100（${q.grade}）`,
-    `- 自洽性 RMS：${scText}` + `${qualityCompare.value ? '（同目标两份文件重叠时段口径）' : '（单文件插值残差）'}`
-  ]
-  const c = qualityCompare.value
-  if (c) {
-    lines.push(`- 双文件对比：重叠 RMS ${c.rmsKm.toFixed(3)} km / 最大 ${c.maxKm.toFixed(3)} km，漂移 ${c.driftKmPerDay.toFixed(2)} km/天，重叠 ${(c.commonSec / 3600).toFixed(1)} h`)
-    lines.push(`- NEES：${Number.isFinite(c.nees) && c.nees > 0 ? `${c.nees.toFixed(2)}（理想值 1）` : '无法计算（任一侧缺协方差）'}`)
-  } else {
-    lines.push('- 双文件对比：未选择对比星历')
-    lines.push('- NEES：无法计算（需要同目标另一份带协方差的星历）')
-  }
-  const t = qualityTle.value
-  if (t) {
-    lines.push(`- 与 TLE 外推：RMS ${t.rmsKm.toFixed(1)} km / 最大 ${t.maxKm.toFixed(1)} km`
-      + `（径向 ${t.radialRmsKm.toFixed(1)} / 沿迹 ${t.alongRmsKm.toFixed(1)} / 横向 ${t.crossRmsKm.toFixed(1)} km），TLE 历元早于星历 ${t.epochLagDays.toFixed(1)} 天`)
-  } else if (qualityTleBusy.value) {
-    lines.push('- 与 TLE 外推：计算中')
-  } else {
-    lines.push(`- 与 TLE 外推：不可用（${qualityTleError.value || '未计算'}）`)
-  }
-  if (q.notes.length) lines.push(`- 评估备注：${q.notes.join('；')}`)
-  lines.push('')
-  lines.push('请按以下结构回答：1) 一句话结论（能否直接用于 72h 交会筛选）；2) 主要风险点；3) 2-3 条具体处置建议。')
-  emit('ai-explain', lines.join('\n'))
-}
 
 /** 导出某份星历为 JSON（含完整状态表，协方差转普通数组便于其它工具读取） */
 async function exportSet(id: string) {
@@ -420,77 +328,7 @@ function startScreen() {
             <div class="ep-kv-row"><span>格式 / 坐标系</span><b>{{ activeEphem.format.toUpperCase() }} · {{ activeEphem.frame }}</b></div>
             <div class="ep-kv-row"><span>有效期(UTC)</span><b>{{ fmtUtc(activeEphem.states[0]?.t ?? activeEphem.start, true) }} ~ {{ fmtUtc(activeEphem.states[activeEphem.states.length - 1]?.t ?? activeEphem.stop, true) }}</b></div>
             <div class="ep-kv-row"><span>步长 / 点数</span><b>{{ activeEphem.stepSec }} s · {{ activeEphem.states.length.toLocaleString() }}</b></div>
-            <div class="ep-kv-row"><span>协方差</span><b>{{ activeMeta?.hasCov ? '含 6×6 协方差（Pc 更可信）' : '不含，Pc 按经验误差估计' }}</b></div>
-          </div>
-
-          <div v-if="activeQuality" class="ep-quality">
-            <div class="ep-q-head">
-              <span class="ep-q-label">星历质量</span>
-              <b class="ep-q-score" :style="{ color: gradeColor }">{{ activeQuality.score }}<i>/100</i></b>
-              <span class="ep-q-grade" :style="{ color: gradeColor }">{{ activeQuality.grade }}</span>
-              <button class="ep-q-ai" title="把当前评估指标交给智能体生成中文解读" @click="aiExplain">AI 解读</button>
-            </div>
-            <div class="ep-kv-row is-sub"><span>{{ qualityCompare ? '自洽性 RMS（对比）' : '自洽性 RMS' }}</span>
-              <b>{{ Number.isFinite(activeQuality.selfConsistencyRmsKm) ? `${fmtNum(activeQuality.selfConsistencyRmsKm, 3)} km` : '—' }}</b>
-            </div>
-
-            <!-- 双文件对比：同目标新旧两份星历的重叠 RMS / 漂移 / NEES -->
-            <div class="ep-kv-row is-sub">
-              <span>对比星历</span>
-              <select class="ep-q-sel" :value="qualityCompareId" @change="onCompareChange">
-                <option value="">{{ compareCandidates.length ? '选择同目标另一份星历…' : '暂无可比星历' }}</option>
-                <option v-for="m in compareCandidates" :key="m.id" :value="m.id">
-                  {{ m.name }} · {{ fmtUtc(m.start) }}
-                </option>
-              </select>
-            </div>
-            <div v-if="qualityCompareBusy" class="ep-q-hint">正在对比两份星历…</div>
-            <div v-else-if="qualityCompareError" class="ep-q-hint is-err">{{ qualityCompareError }}</div>
-            <template v-else-if="qualityCompare">
-              <div class="ep-kv-row is-sub"><span>重叠 RMS / 最大</span>
-                <b>{{ fmtNum(qualityCompare.rmsKm, 3) }} / {{ fmtNum(qualityCompare.maxKm, 3) }} km</b></div>
-              <div class="ep-kv-row is-sub"><span>漂移 / 重叠</span>
-                <b>{{ fmtNum(qualityCompare.driftKmPerDay, 2) }} km/天 · {{ (qualityCompare.commonSec / 3600).toFixed(1) }} h</b></div>
-              <div class="ep-kv-row is-sub"><span>NEES</span><b>{{ neesText }}</b></div>
-            </template>
-
-            <ul v-if="activeQuality.notes.length" class="ep-notes">
-              <li v-for="(n, i) in activeQuality.notes" :key="i">{{ n }}</li>
-            </ul>
-          </div>
-
-          <!-- 与编目 TLE 外推的偏差（量级参考，不并入总分） -->
-          <div class="ep-tle">
-            <div class="ep-q-head">
-              <span class="ep-q-label">TLE 外推偏差</span>
-              <b v-if="tleGrade" class="ep-q-grade" :style="{ color: tleGrade.color }">{{ tleGrade.label }}</b>
-              <span v-if="qualityTleNorad" class="ep-tle-norad">NORAD {{ qualityTleNorad }}</span>
-            </div>
-            <div v-if="qualityTleBusy" class="ep-empty is-sm">正在与编目 TLE 外推比对…</div>
-            <div v-else-if="qualityTleError" class="ep-empty is-sm">{{ qualityTleError }}</div>
-            <template v-else-if="qualityTle">
-              <div class="ep-kv">
-                <div class="ep-kv-row is-sub"><span>RMS / 最大</span>
-                  <b>{{ fmtNum(qualityTle.rmsKm, 2) }} / {{ fmtNum(qualityTle.maxKm, 2) }} km</b></div>
-                <div class="ep-kv-row is-sub"><span>径向 / 沿迹 / 横向</span>
-                  <b>{{ fmtNum(qualityTle.radialRmsKm, 2) }} / {{ fmtNum(qualityTle.alongRmsKm, 2) }} / {{ fmtNum(qualityTle.crossRmsKm, 2) }} km</b></div>
-                <div class="ep-kv-row is-sub"><span>TLE 历元</span>
-                  <b>{{ fmtUtc(qualityTle.tleEpochMs, true) }} UTC · 早于星历 {{ qualityTle.epochLagDays.toFixed(1) }} 天</b></div>
-              </div>
-              <svg class="ep-tle-curve" viewBox="0 0 240 46" preserveAspectRatio="none" aria-label="TLE 偏差-时间曲线">
-                <line x1="0" y1="45" x2="240" y2="45" stroke="rgba(120,160,220,0.25)" stroke-width="1" />
-                <polyline :points="tleCurve" fill="none" stroke="#7fb0ff" stroke-width="1.2" />
-              </svg>
-              <div class="ep-tle-axis">
-                <span>{{ fmtUtc(qualityTle.points[0].t) }}</span>
-                <span>峰值 {{ fmtNum(qualityTle.maxKm, 1) }} km</span>
-                <span>{{ fmtUtc(qualityTle.points[qualityTle.points.length - 1].t) }}</span>
-              </div>
-            </template>
-            <div v-if="qualityTleNote" class="ep-tle-note">{{ qualityTleNote }}</div>
-            <div v-if="qualityTle" class="ep-tle-note">
-              参考 TLE 为编目外推，偏差含 TLE 自身误差与坐标系差异，仅作量级参考
-            </div>
+            <div class="ep-kv-row"><span>协方差</span><b>{{ activeMeta?.hasCov ? '有' : '无' }}</b></div>
           </div>
         </div>
 
