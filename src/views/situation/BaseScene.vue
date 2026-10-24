@@ -49,7 +49,8 @@ import {
   heatBatchRunId, heatBatches,
   heatFiltered, heatHiddenColors,
   heatAltBand, heatMetric, heatRiskFloor, heatPcFloor, heatMissCeil,
-  heatCell, heatColorOf,
+  heatCell, heatColorOf, heatBandColor, HEAT_RISK_BANDS,
+  heatEphSetId, heatEphStatus,
   passMode, passGeoLoading, passGeoError, passBorders, passDistricts, passProvinces, passCities, passTargets, findPassTargetById,
   passDistrictVisible, passBorderVisible, passCityVisible, passSelTarget, passDetail, passLoading, passError,
   passDetailOpen,
@@ -73,6 +74,7 @@ import { buildLunarMansions, SKY_LABELS } from './lunarMansions'
 import { buildWesternConstellations, WESTERN_LABELS } from './westernConstellations'
 import { interpolateAt } from './ephem/interp'
 import type { EphemSet, EphemState, ThreatEvent } from './ephem/types'
+import { activeEphem, runAoeHeat } from './ephem/useUserEphemeris'
 import { buildStarfield } from './starfield'
 import {
   getPassMap, getPassBatches, getPassCityIds, getPassCityDetail,
@@ -3651,10 +3653,11 @@ function buildHeatMarkers() {
   // 注意：时间为空 / 事件被筛选掉时不清理 heatSel —— 右侧事件列表的选中与热力窗口彼此独立，
   // 清掉会导致「切回有数据的时间窗后选中态与同簇高亮丢失、必须重新点一次」（列表行仍高亮）。
   if (!evs.length) return
-  // 官方 CDM 逐事件出点：超过上限时按格边抽稀（保留每格最高风险），其余来源本身已按格聚合
+  // 官方 CDM / 星历热力逐事件出点：事件量小（≤300），按格边抽稀只用于 CDM
+  const eventBased = heatSource.value === 'spacetrack' || heatSource.value === 'eph-aoe'
   const renderEvs = heatSource.value === 'spacetrack' ? downsampleHeat(evs) : evs
   const group = new THREE.Group()
-  if (heatSource.value === 'spacetrack') buildEventHeat(group, renderEvs)
+  if (eventBased) buildEventHeat(group, renderEvs)
   else buildAggregatedHeat(group, renderEvs)
 
   g.heatGroup = group
@@ -4122,7 +4125,7 @@ function applyHeatMode() {
   if (g.heatSelOrbitGroup) g.heatSelOrbitGroup.visible = on
   if (on) {
     // 进入热力：未加载则拉取，已加载则按需重建标记；local / cri 同时补拉各自的「数据批次」下拉列表
-    if (heatSource.value !== 'spacetrack' && !heatBatches.value.length) loadHeatBatches()
+    if (heatSource.value !== 'spacetrack' && heatSource.value !== 'eph-aoe' && !heatBatches.value.length) loadHeatBatches()
     if (!heatList.value.length && !heatLoading.value) loadHeat()
     else if (!g.heatGroup) buildHeatMarkers()
   } else {
@@ -4191,6 +4194,79 @@ function applyHeatPayload(res: HeatmapResult | undefined, batchBased: boolean, s
   }
 }
 
+/** 星历热力：ThreatEvent（本机联算）→ 热力面板事件结构（与后端 CdmHeatEvent 同构，
+ *  使列表 / 详情 / 拾取 / 过滤沿用同一套前端逻辑）。a_* 为本星、b_* 为对方、mid_* 取两点中点。 */
+function aoeHeatToCdm(e: ThreatEvent, i: number): CdmHeatEvent {
+  const a = e.midEci
+  const b = e.otherEci || e.midEci
+  const mx = (a[0] + b[0]) / 2
+  const my = (a[1] + b[1]) / 2
+  const mz = (a[2] + b[2]) / 2
+  return {
+    id: i + 1,
+    cdm_id: e.id,
+    tca: new Date(e.tca).toISOString(),
+    norad_a: e.selfNorad,
+    name_a: activeEphem.value?.name || '',
+    norad_b: e.otherNorad,
+    name_b: e.otherName,
+    miss_distance_km: e.missKm,
+    rel_speed_km_per_s: e.relSpeedKmS,
+    collision_probability: e.pc,
+    hard_body_radius_m: 10,
+    a_x: a[0], a_y: a[1], a_z: a[2],
+    b_x: b[0], b_y: b[1], b_z: b[2],
+    mid_x: mx, mid_y: my, mid_z: mz,
+    color: heatBandColor(e.risk),
+    risk: e.risk,
+    dens_boost: 1,
+    metric_text: `${e.missKm.toFixed(2)} km`,
+    day: 0,
+    level: e.level,
+    altitude: Math.hypot(mx, my, mz) - 6371
+  }
+}
+
+/** 星历热力加载：AOE 点云粗筛 + 候选 TLE/SGP4 精算，本机联算、不落后端表也不进热力缓存。
+ *  切来源与改时间窗可能在同一 tick 各触发一次 loadHeat，这里按窗口合并，避免并发跑两遍全量联算。 */
+let ephHeatRun: { key: string; seq: number; p: Promise<void> } | null = null
+/** 联算序号：结束后只有最新一轮能清除 ephHeatRun */
+let ephHeatSeq = 0
+function loadEphHeat(): Promise<void> {
+  const windowH = heatDays.value >= 3 ? 72 : 24
+  const setId = activeEphem.value?.id || ''
+  const key = `${setId}|${windowH}`
+  if (ephHeatRun && ephHeatRun.key === key) return ephHeatRun.p
+  const seq = ++ephHeatSeq
+  const p = (async () => {
+    heatLoading.value = true
+    heatError.value = ''
+    heatSel.value = null
+    heatSelList.value = []
+    try {
+      const events = await runAoeHeat(windowH)
+      // 联算期间换了星历：结果作废（由 activeEphem watcher 触发的新一轮负责）
+      if (heatSource.value !== 'eph-aoe' || (activeEphem.value?.id || '') !== setId) return
+      heatLoadedSrc = 'eph-aoe'
+      heatList.value = events.map((e, i) => aoeHeatToCdm(e, i))
+      heatLegend.value = HEAT_RISK_BANDS.map((b) => ({ color: b.color, label: b.label, thresh: b.thresh }))
+      heatMetricLabel.value = '最近距离'
+      heatDayGroups.value = []
+      heatDay.value = -1
+      loadedHeatBatchId = null
+      buildHeatMarkers()
+    } catch (e) {
+      if (heatSource.value !== 'eph-aoe') return
+      heatError.value = (e as Error)?.message || '星历热力计算失败'
+    } finally {
+      if (heatSource.value === 'eph-aoe') heatLoading.value = false
+      if (ephHeatRun && ephHeatRun.seq === seq) ephHeatRun = null
+    }
+  })()
+  ephHeatRun = { key, seq, p }
+  return p
+}
+
 /** 拉取未来 heatDays 窗口的碰撞事件并重建标记。
  *  按 heatSource 分派数据源：'local' 走本项目 SGP4 初筛（/cgi/sat_conj/heatmap），
  *  'spacetrack' 走官方 CDM（/cgi/sat_cdm/heatmap），'cri' 走交会分析（/cgi/sat_cri/heatmap）；
@@ -4198,6 +4274,11 @@ function applyHeatPayload(res: HeatmapResult | undefined, batchBased: boolean, s
  *  命中热力缓存时同步落状态（不置 heatLoading，不出现加载提示）。 */
 async function loadHeat() {
   const src = heatSource.value
+  // 星历热力是本机联算（AOE 点云粗筛 + 候选 TLE/SGP4 精算），既不落后端表也没有批次 / 持久缓存
+  if (src === 'eph-aoe') {
+    await loadEphHeat()
+    return
+  }
   // local / cri 走各自「总库」口径：默认最近一次全体 × 全体全量批次，
   // 若面板「数据批次」下拉选了历史批次则按 run_id 回看；CDM 热力无批次概念，不传。
   const batchBased = src !== 'spacetrack'
@@ -4268,7 +4349,7 @@ async function prefetchHeat(src: typeof heatSource.value) {
  *  失败静默（下拉为空即退化为只看当前批次）。 */
 async function loadHeatBatches() {
   const src = heatSource.value
-  if (src === 'spacetrack') return
+  if (src === 'spacetrack' || src === 'eph-aoe') return
   // 本地持久缓存直出（下拉立即可用），再静默拉最新替换
   const persisted = await cacheGet<{ list?: typeof heatBatches.value }>(heatBatchesKey(src))
   if (persisted?.list?.length && src === heatSource.value && !heatBatches.value.length) {
@@ -8708,8 +8789,18 @@ watch(heatSource, () => {
   // heatList 此刻仍是上一来源的旧数据（loadHeat 异步替换）：先把来源标记清空，
   // 使 URL 预置的「事件拾取」不会误把旧来源事件当成本来源的（见 heatDataReady）
   heatLoadedSrc = ''
-  if (heatSource.value !== 'spacetrack') loadHeatBatches()
+  if (heatSource.value !== 'spacetrack' && heatSource.value !== 'eph-aoe') loadHeatBatches()
   if (heatMode.value || heatList.value.length) loadHeat()
+})
+// 星历热力挂在「我的星历」当前激活项上：换星历 / 取消激活后需清空并按新星历重算
+watch(activeEphem, () => {
+  if (heatSource.value !== 'eph-aoe') return
+  heatList.value = []
+  heatSel.value = null
+  heatSelList.value = []
+  heatLoadedSrc = ''
+  clearHeatMarkers()
+  if (heatMode.value) loadHeat()
 })
 // 切换「数据批次」（交会热力面板下拉回看历史全量批次）→ 重载热力云
 // 忽略 loadHeat 回填批次 id 造成的变更（loadedHeatBatchId 已同步，非用户切换）

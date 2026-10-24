@@ -1148,16 +1148,24 @@ TYPE_KEYS.forEach((k) => {
 export type { CdmHeatEvent }
 
 /** 热力数据来源：'local' = 本项目 SGP4 初筛（sat_conjunction，默认）；'spacetrack' = Space-Track 官方 CDM；
- *  'cri' = 本项目交会分析（sat_cri_conjunction，CRI/CRP 风险指数模型，与初筛完全隔离的另一套表与口径） */
-export type HeatSource = 'local' | 'spacetrack' | 'cri'
+ *  'cri' = 本项目交会分析（sat_cri_conjunction，CRI/CRP 风险指数模型，与初筛完全隔离的另一套表与口径）；
+ *  'eph-aoe' = 星历热力（AOE 编目点云粗筛 + 候选 TLE/SGP4 精算，本机联算、不落后端表） */
+export type HeatSource = 'local' | 'spacetrack' | 'cri' | 'eph-aoe'
 /** 当前热力来源（默认「交会热力」，见底部 dock 弹出的来源菜单） */
 export const heatSource = ref<HeatSource>('local')
 /** 来源菜单项（dock「碰撞热力」按钮点击后向上弹出，顺序即展示顺序） */
 export const HEAT_SOURCES: { key: HeatSource; label: string; desc: string }[] = [
   { key: 'local', label: '交会热力', desc: 'SGP4 初筛 · 风险等级' },
   { key: 'spacetrack', label: 'CDM 热力', desc: 'Space-Track 官方 · 碰撞概率 Pc' },
-  { key: 'cri', label: '交会分析热力', desc: 'CRI/CRP 模型 · 交会风险概率' }
+  { key: 'cri', label: '交会分析热力', desc: 'CRI/CRP 模型 · 交会风险概率' },
+  { key: 'eph-aoe', label: '星历热力', desc: 'AOE 编目 × 精密星历 · SGP4 精算' }
 ]
+/** 星历热力当前使用的星历 id（与「我的星历」激活项联动；空 = 未激活） */
+export const heatEphSetId = ref<string | null>(null)
+/** 星历热力计算状态：idle/running/done/error + 进度 0..1 + 文案（面板与场景共享） */
+export const heatEphStatus = ref<{ state: 'idle' | 'running' | 'done' | 'error'; p: number; text: string }>({
+  state: 'idle', p: 0, text: ''
+})
 
 /** 热力视图开关：进入后隐藏卫星云与轨道线，只显示碰撞事件标记；
  *  与「碰撞热力」面板显隐解耦（由 index.vue 的 toggleDock 编排）：

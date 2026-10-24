@@ -20,8 +20,11 @@ import { elementsFromRV } from './screening'
 import type { CatalogSnapshotEntry, PairCompareRow, PairTarget, ScreenOptions } from './screening'
 import { deleteSet, getSet, listMetas, putSet, deleteThreatEvents, getThreatEvents, putThreatEvents, type EphemMeta } from './store'
 import type { EphemSet, EphemState, QualityReport, ThreatEvent, Vec3 } from './types'
-import { getSatDetailPublic, listConstellationPublic } from '@/api/sat_public'
+import { getSatDetailPublic, listConstellationPublic, listTleLinesPublic } from '@/api/sat_public'
 import { decodeConstellation } from '@/api/satTypes'
+import { DEFAULT_AOE_HEAT } from './aoeHeat'
+import type { AoeCandidate, AoeHeatOptions, AoeTle } from './aoeHeat'
+import { heatEphSetId, heatEphStatus } from '../scene'
 
 /** 单文件上限（MB）：Starlink 72h ITC 约 2 MB，留足余量 */
 export const MAX_FILE_MB = 12
@@ -784,6 +787,224 @@ function runScreenWorker(set: EphemSet, catalog: CatalogSnapshotEntry[], opt: Sc
       catalog,
       opt
     })
+  })
+}
+
+/* ============================================================
+ * 星历热力（AOE 编目点云粗筛 + 候选 TLE/SGP4 精算）
+ * ============================================================ */
+
+/** AOE 点云缓存（10 分钟）：与「我的星历」筛选用的国际库缓存分开，两库各自独立 */
+let aoeCatalogCache: { t: number; list: CatalogSnapshotEntry[] } | null = null
+/** AOE 全量 TLE 两行缓存（10 分钟）：一次拉全量、按候选 NORAD 过滤后再进 Worker */
+let aoeTleCache: { at: number; map: Map<number, AoeTle> } | null = null
+
+/** 星历热力的威胁事件（与「我的星历」的 threatEvents 分开，互不覆盖） */
+export const aoeHeatEvents = ref<ThreatEvent[]>([])
+export const aoeHeatCandidates = ref<AoeCandidate[]>([])
+export const aoeHeatStats = shallowRef<{ catalog: number; kept: number; candidates: number; events: number; ms: number } | null>(null)
+
+/** 拉取 AOE 编目点云（结构与国际库同构） */
+async function loadAoeCatalog(): Promise<{ t: number; list: CatalogSnapshotEntry[] }> {
+  if (aoeCatalogCache && Date.now() - aoeCatalogCache.t < 10 * 60 * 1000) return aoeCatalogCache
+  const res = await listConstellationPublic(undefined, 'aoe')
+  const t = Number(res?.t) || Date.now()
+  const pts = decodeConstellation(res)
+  const list: CatalogSnapshotEntry[] = pts.map((p) => {
+    const periodMin = Number(p.period)
+    const a = periodMin > 0 ? Math.cbrt(398600.4418 * Math.pow((periodMin * 60) / (2 * Math.PI), 2)) : NaN
+    return {
+      norad: p.norad_id,
+      name: p.object_name || `NORAD ${p.norad_id}`,
+      r: [p.x, p.y, p.z] as Vec3,
+      v: [p.vx ?? 0, p.vy ?? 0, p.vz ?? 0] as Vec3,
+      a,
+      e: NaN,
+      i: Number(p.incl ?? NaN)
+    }
+  })
+  aoeCatalogCache = { t, list }
+  return aoeCatalogCache
+}
+
+/** 拉取 AOE 全量 TLE 两行（NORAD → 两行），精算阶段只取候选目标 */
+async function loadAoeTles(): Promise<Map<number, AoeTle>> {
+  if (aoeTleCache && Date.now() - aoeTleCache.at < 10 * 60 * 1000) return aoeTleCache.map
+  const res = await listTleLinesPublic('aoe')
+  const map = new Map<number, AoeTle>()
+  for (const row of res?.list || []) {
+    const [norad, l1, l2] = row
+    if (Number.isFinite(norad) && l1 && l2) map.set(norad, [norad, l1, l2])
+  }
+  aoeTleCache = { at: Date.now(), map }
+  return map
+}
+
+/** 清空星历热力结果与状态（切换来源 / 星历失效时调用） */
+export function clearAoeHeat() {
+  aoeHeatEvents.value = []
+  aoeHeatCandidates.value = []
+  aoeHeatStats.value = null
+  heatEphStatus.value = { state: 'idle', p: 0, text: '' }
+}
+
+/**
+ * 计算星历热力：AOE 编目点云粗筛 → 候选 TLE + SGP4 精算。
+ * 点在「我的星历」当前激活的星历上；结果写入 aoeHeatEvents。
+ */
+export async function runAoeHeat(windowH = DEFAULT_AOE_HEAT.windowH): Promise<ThreatEvent[]> {
+  const set = activeEphem.value
+  const fail = (msg: string): ThreatEvent[] => {
+    heatEphStatus.value = { state: 'error', p: 0, text: msg }
+    aoeHeatEvents.value = []
+    aoeHeatCandidates.value = []
+    return []
+  }
+  if (!set || !set.states.length) {
+    heatEphSetId.value = null
+    return fail('请先在「我的星历」激活一份星历')
+  }
+  heatEphSetId.value = set.id
+  heatEphStatus.value = { state: 'running', p: 0, text: '加载 AOE 编目点云…' }
+  const tStart = performance.now()
+  try {
+    const cat = await loadAoeCatalog()
+    const t0 = Math.max(set.start, cat.t)
+    const t1 = Math.min(set.stop, t0 + Math.max(1, windowH) * 3600e3)
+    if (!(t1 > t0)) return fail('星历有效期与当前时刻没有重叠，无法计算（星历可能已过期）')
+
+    const selfEl = elementsFromRV(set.states[0].r, set.states[0].v)
+    const selfName = normName(set.name)
+    // 预过滤：半长轴 ±150 km、倾角 ±10°，并按「名称 + NORAD」排除本星
+    const catalog = cat.list.filter((c) => {
+      if (c.norad === set.norad || (selfName !== '' && normName(c.name) === selfName)) return false
+      const a = Number.isFinite(c.a) ? c.a : selfEl.a
+      const i = Number.isFinite(c.i) ? c.i : selfEl.i
+      return Math.abs(a - selfEl.a) < 150 && Math.abs(i - selfEl.i) < 10
+    })
+    if (!catalog.length) return fail('AOE 编目中未找到与本星同轨道带的目标')
+
+    const opt: AoeHeatOptions = { ...DEFAULT_AOE_HEAT, windowH }
+    opt.catalogT = cat.t
+
+    // TLE 下载与点云粗筛并行：粗筛在 Worker 内推进，主线程同时拉全量两行
+    const tlePromise = loadAoeTles()
+    const tles = await tlePromise
+    heatEphStatus.value = { state: 'running', p: 0, text: `粗筛 ${catalog.length} 个同带目标…` }
+
+    const { events, candidates } = await runAoeWorker(set, catalog, opt, tles)
+    aoeHeatCandidates.value = candidates
+    aoeHeatEvents.value = events
+    aoeHeatStats.value = {
+      catalog: cat.list.length,
+      kept: catalog.length,
+      candidates: candidates.length,
+      events: events.length,
+      ms: Math.round(performance.now() - tStart)
+    }
+    heatEphStatus.value = { state: 'done', p: 1, text: `${events.length} 条事件 · 候选 ${candidates.length} 个` }
+    return events
+  } catch (e) {
+    return fail((e as Error)?.message || '星历热力计算失败')
+  }
+}
+
+/** Worker 两阶段执行：coarse（点云）→ 过滤候选 TLE → refine（SGP4） */
+function runAoeWorker(
+  set: EphemSet,
+  catalog: CatalogSnapshotEntry[],
+  opt: AoeHeatOptions,
+  tles: Map<number, AoeTle>
+): Promise<{ events: ThreatEvent[]; candidates: AoeCandidate[] }> {
+  const base = {
+    type: 'aoe' as const,
+    id: set.id,
+    norad: set.norad,
+    name: set.name,
+    start: set.start,
+    stop: set.stop,
+    states: set.states,
+    opt
+  }
+  return new Promise((resolve, reject) => {
+    let worker: Worker | null = null
+    try {
+      worker = new Worker(new URL('./aoe.worker.ts', import.meta.url), { type: 'module' })
+    } catch {
+      worker = null
+    }
+    if (!worker) {
+      void import('./aoeHeat').then((m) => {
+        try {
+          const t0 = Math.max(set.start, set.states[0].t)
+          const t1 = Math.min(set.stop, set.states[set.states.length - 1].t)
+          const candidates = m.coarseAoe(set, catalog, t0, t1, opt, (p) => {
+            heatEphStatus.value = { state: 'running', p: p * 0.45, text: '点云粗筛…' }
+          })
+          const candTles: AoeTle[] = []
+          for (const c of candidates) {
+            const t = tles.get(c.norad)
+            if (t) candTles.push(t)
+          }
+          const events = m.refineAoe(set, candTles, candidates, opt, (p) => {
+            heatEphStatus.value = { state: 'running', p: 0.45 + p * 0.55, text: 'SGP4 精算…' }
+          })
+          resolve({ events, candidates })
+        } catch (e) {
+          reject(e)
+        }
+      }, reject)
+      return
+    }
+    const w = worker
+    let settled = false
+    let candidates: AoeCandidate[] = []
+    w.onmessage = (e: MessageEvent) => {
+      const d = e.data as {
+        type: string
+        p?: number
+        stage?: 'coarse' | 'refine'
+        candidates?: AoeCandidate[]
+        events?: ThreatEvent[]
+        message?: string
+      }
+      if (d.type === 'progress') {
+        const p = d.p ?? 0
+        heatEphStatus.value = {
+          state: 'running',
+          p: d.stage === 'refine' ? 0.45 + p * 0.55 : p * 0.45,
+          text: d.stage === 'refine' ? 'SGP4 精算候选目标…' : '点云粗筛同带目标…'
+        }
+      } else if (d.type === 'coarseDone') {
+        candidates = d.candidates || []
+        const candTles: AoeTle[] = []
+        for (const c of candidates) {
+          const t = tles.get(c.norad)
+          if (t) candTles.push(t)
+        }
+        heatEphStatus.value = {
+          state: 'running',
+          p: 0.45,
+          text: `候选 ${candidates.length} 个，SGP4 精算…`
+        }
+        w.postMessage({ ...base, mode: 'refine', cands: candidates, tles: candTles })
+      } else if (d.type === 'done') {
+        settled = true
+        resolve({ events: d.events || [], candidates })
+        w.terminate()
+      } else if (d.type === 'error') {
+        settled = true
+        reject(new Error(d.message || '星历热力计算失败'))
+        w.terminate()
+      }
+    }
+    w.onerror = () => {
+      if (settled) return
+      settled = true
+      w.terminate()
+      reject(new Error('星历热力 Worker 运行失败'))
+    }
+    w.postMessage({ ...base, mode: 'coarse', catalog })
   })
 }
 

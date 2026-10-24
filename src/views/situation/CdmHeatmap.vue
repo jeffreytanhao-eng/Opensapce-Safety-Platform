@@ -17,6 +17,7 @@ import {
   heatDays, heatDay, heatDayGroups, heatFiltered,
   heatAltBand, heatMetric, heatRiskFloor, heatPcFloor, heatMissCeil,
   heatCell, HEAT_CELL_OPTIONS, HEAT_RISK_BANDS,
+  heatEphStatus, heatBandColor,
   drawerHeightVh, isDrawerDragging, useDrawerDrag,
   type HeatSource
 } from './scene'
@@ -24,7 +25,7 @@ import { listThreatEventRows } from './ephem/store'
 import type { ThreatEvent } from './ephem/types'
 import { useDevice } from '@/composables/useDevice'
 import { listConjPublic, listCdmPublic, listCriPublic } from '@/api/sat_public'
-import type { ConjEvent, CdmListItem, CriListItem, HeatLegendItem } from '@/api/sat_public'
+import type { ConjEvent, CdmListItem, CriListItem, CdmHeatEvent, HeatLegendItem } from '@/api/sat_public'
 import { useDelayed } from '@/composables/useDelayed'
 
 const emit = defineEmits<{
@@ -55,6 +56,10 @@ const DAY_OPTIONS = [
   { v: 0, label: '全部' }, { v: 1, label: '24h' }, { v: 3, label: '3d' },
   { v: 7, label: '7d' }, { v: 30, label: '30d' }
 ]
+/** 星历热力是本机前向联算（无历史事件可回看），时间窗只保留 24h / 3d 两档 */
+const dayOptions = computed(() => heatSource.value === 'eph-aoe'
+  ? [{ v: 1, label: '24h' }, { v: 3, label: '3d' }]
+  : DAY_OPTIONS)
 const ALT_OPTIONS = [
   { v: 'all', label: '全部' }, { v: 'leo', label: 'LEO' },
   { v: 'meo', label: 'MEO' }, { v: 'geo', label: 'GEO+' }
@@ -180,6 +185,21 @@ function toCriRow(r: CriListItem): ListRow {
   }
 }
 
+/** 星历热力（本机联算）：列表直接取自 heatList（BaseScene 已把联算结果转成热力事件），
+ *  与三维热力云同一份数据，避免再向后端请求一次。 */
+function toAoeRow(r: CdmHeatEvent): ListRow {
+  return {
+    key: `${r.norad_a}-${r.norad_b}-${r.tca}`,
+    norad_a: r.norad_a, norad_b: r.norad_b,
+    tca: r.tca,
+    name_a: r.name_a || `NORAD ${r.norad_a}`,
+    name_b: r.name_b || `NORAD ${r.norad_b}`,
+    dist: r.miss_distance_km,
+    color: heatBandColor(r.risk),
+    label: `${r.level === 'high' ? '高危' : r.level === 'medium' ? '警告' : '关注'} · Pc ${r.collision_probability > 0 ? r.collision_probability.toExponential(1) : '0'}`
+  }
+}
+
 const rows = ref<ListRow[]>([])
 const total = ref(0)
 const listLoading = ref(false)
@@ -220,13 +240,36 @@ function resetListScroll() {
 /** 列表标题：按来源区分口径（local / cri = 各自库当前批次明细；CDM = 官方 CDM 库表明细） */
 const listTitle = computed(() => ephTab.value
   ? '我的星历事件（本机）'
-  : heatSource.value === 'local' ? '本批次交会数据' : heatSource.value === 'cri' ? '交会分析数据' : 'CDM 交会数据')
+  : heatSource.value === 'local' ? '本批次交会数据'
+    : heatSource.value === 'cri' ? '交会分析数据'
+      : heatSource.value === 'eph-aoe' ? '星历热力事件（本机联算）'
+        : 'CDM 交会数据')
 
 /** 拉取当前来源的交会明细：local = 当前批次（heatBatchRunId 指定 / 后端默认最近全量批次），
  *  cri = 交会分析库当前批次（同样支持批次回看），CDM = sat_cdm 库表全量明细；关键词与日期范围口径一致。 */
 async function loadList() {
   if (ephTab.value) {
     await loadEphList()
+    return
+  }
+  // 星历热力：列表就是当前 heatList（联算结果），在前端按关键词 / 等级 / 日期筛选
+  if (heatSource.value === 'eph-aoe') {
+    const kw = query.keyword.trim().toLowerCase()
+    const from = query.dateFrom ? new Date(`${query.dateFrom}T00:00:00`).getTime() : -Infinity
+    const to = query.dateTo ? new Date(`${query.dateTo}T23:59:59`).getTime() : Infinity
+    const lvl = query.level === 'danger' ? 'high' : query.level === 'warning' ? 'medium' : query.level === 'info' ? 'low' : ''
+    const out: ListRow[] = []
+    for (const ev of heatList.value) {
+      if (lvl && ev.level !== lvl) continue
+      const tcaMs = new Date(ev.tca).getTime()
+      if (tcaMs < from || tcaMs > to) continue
+      if (kw && !`${ev.name_a} ${ev.name_b} ${ev.norad_a} ${ev.norad_b}`.toLowerCase().includes(kw)) continue
+      out.push(toAoeRow(ev))
+    }
+    rows.value = out
+    total.value = out.length
+    loadedOnce.value = true
+    tryAutoSelectFirst()
     return
   }
   listLoading.value = true
@@ -347,6 +390,11 @@ async function loadEphList() {
   }
 }
 
+/** 星历热力的有效时间窗：heatDays 落在 0/7/30 等档位时按 24h 处理（前向联算只认 24h / 3d） */
+const activeDay = computed(() => heatSource.value === 'eph-aoe'
+  ? (heatDays.value >= 3 ? 3 : 1)
+  : heatDays.value)
+
 /** 切到后端来源：关掉「我的星历」页签，交给 heatSource 的 watch 重载列表 */
 function pickSource(k: HeatSource) {
   ephTab.value = false
@@ -392,6 +440,14 @@ function toggleLegend(color: string) {
  *  再重载 —— 保证列表/自动选中都落在目标卫星的交会上。 */
 watch([dockMode, heatBatchRunId, heatSource], () => {
   if (dockMode.value !== 'heat') return
+  applyFocusNorad()
+  query.page = 1
+  loadList()
+})
+
+/** 星历热力：联算完成后 heatList 整体替换，列表数据源就是 heatList，需再刷一次列表 */
+watch(heatList, () => {
+  if (dockMode.value !== 'heat' || ephTab.value || heatSource.value !== 'eph-aoe') return
   applyFocusNorad()
   query.page = 1
   loadList()
@@ -521,8 +577,8 @@ function close() {
         <div class="hf-row">
           <span class="hf-label">时间窗</span>
           <div class="hf-seg">
-            <button v-for="o in DAY_OPTIONS" :key="o.v" class="hf-btn"
-              :class="{ on: heatDays === o.v }" @click="heatDays = o.v">{{ o.label }}</button>
+            <button v-for="o in dayOptions" :key="o.v" class="hf-btn"
+              :class="{ on: activeDay === o.v }" @click="heatDays = o.v">{{ o.label }}</button>
           </div>
         </div>
         <div class="hf-row">
@@ -544,7 +600,7 @@ function close() {
           <span class="hf-label">阈值</span>
           <input v-model.number="sliderVal" class="hf-range" type="range" min="0" max="100" step="1" />
         </div>
-        <div class="hf-row">
+        <div v-if="heatSource !== 'eph-aoe'" class="hf-row">
           <span class="hf-label">聚合格边</span>
           <div class="hf-seg">
             <button v-for="o in HEAT_CELL_OPTIONS" :key="o.v" class="hf-btn"
@@ -556,6 +612,14 @@ function close() {
           三维显示 <b>{{ heatFiltered.length.toLocaleString() }}</b> /
           {{ heatList.length.toLocaleString() }} 个事件
           <span v-if="altUnavailable" class="hf-warn">· 官方 CDM 无高度数据</span>
+        </div>
+        <!-- 星历热力：本机联算进度 / 无星历提示（不落后端，进度来自 Worker 两阶段回传） -->
+        <div v-if="heatSource === 'eph-aoe' && heatEphStatus.state !== 'idle'" class="hf-count">
+          <template v-if="heatEphStatus.state === 'running'">
+            AOE 点云 × 精密星历联算中 {{ Math.round(heatEphStatus.p * 100) }}%
+            <span class="hf-warn">· {{ heatEphStatus.text }}</span>
+          </template>
+          <span v-else class="hf-warn">{{ heatEphStatus.text }}</span>
         </div>
         <!-- 按天柱状图：后端 day_groups（仅时间窗 > 0 下发），点柱切到该天，点「全」回到总览 -->
         <div v-if="dayBars.length" class="hf-days">
@@ -572,7 +636,7 @@ function close() {
 
       <!-- 数据批次（总库）：交会热力 / 交会分析热力来源展示（各自独立批次表）；回看历史「全体 × 全体」全量扫描批次。
            主从计算 / 配对标注批次属后台分析工具，不进前台，故此处只列全量批次；CDM 热力无批次概念，不展示 -->
-      <div v-if="!ephTab && heatSource !== 'spacetrack'" class="heat-batch">
+      <div v-if="!ephTab && heatSource !== 'spacetrack' && heatSource !== 'eph-aoe'" class="heat-batch">
         <span class="heat-batch-label">数据批次</span>
         <select class="heat-batch-sel" :value="heatBatchRunId ?? ''" @change="onBatchChange">
           <option v-if="!batchOptions.length" value="" disabled>暂无全量批次</option>
@@ -645,7 +709,9 @@ function close() {
           <div v-if="listLoadingHint" class="hc-empty">加载中…</div>
           <div v-else-if="listError" class="hc-empty is-err">{{ listError }}</div>
           <!-- 未超时的加载中：保留上一次结果、不闪「暂无」（正常毫秒级返回，这个分支几乎不可见） -->
-          <div v-else-if="!listLoading && !rows.length" class="hc-empty">{{ ephTab ? '本机暂无星历筛选结果' : '暂无交会数据' }}</div>
+          <div v-else-if="!listLoading && !rows.length" class="hc-empty">{{ ephTab
+            ? '本机暂无星历筛选结果'
+            : heatSource === 'eph-aoe' ? (heatEphStatus.state === 'running' ? '联算中…' : '暂无接近事件') : '暂无交会数据' }}</div>
           <template v-else>
             <!-- 虚拟滚动：上方占位 -->
             <div v-if="virtOn && padTop" :style="{ height: padTop + 'px' }"></div>
@@ -674,7 +740,7 @@ function close() {
           </template>
         </div>
 
-        <div v-if="!ephTab" class="hc-pager">
+        <div v-if="!ephTab && heatSource !== 'eph-aoe'" class="hc-pager">
           <select v-model.number="query.pageSize" class="hc-sel" title="每页条数" @change="search">
             <option :value="20">20 条/页</option>
             <option :value="100">100 条/页</option>
