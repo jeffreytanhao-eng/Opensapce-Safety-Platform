@@ -4640,8 +4640,9 @@ function beginCamFly(toPos: THREE.Vector3, toTarget: THREE.Vector3, focusMode: '
 }
 
 /** 镜头飞到某个场景点位并聚焦它（拾取卫星 / 热力交会点共用同一套落位算法，口径只有这一份）。
- *  focusMode 决定落位后焦点怎么切（见 camFly.focusMode）。 */
-function flyToPoint(point: THREE.Vector3, focusMode: 'sel' | 'point') {
+ *  focusMode 决定落位后焦点怎么切（见 camFly.focusMode）；
+ *  dist 可选：指定「相机到目标」的距离（缺省 = 目标到地心距离，即全球视角的落位口径）。 */
+function flyToPoint(point: THREE.Vector3, focusMode: 'sel' | 'point', dist?: number) {
   const cam = g.camera, controls = g.controls
   if (!cam || !controls) return
   // 坐标缺失（后端未下发 mid 坐标等）时直接不飞：NaN 会污染相机矩阵，画面会整屏坏掉
@@ -4655,7 +4656,7 @@ function flyToPoint(point: THREE.Vector3, focusMode: 'sel' | 'point') {
   // 目标靠近南北极时 zen 近乎平行世界 +Y，lookAt 会退化到「正对天顶」奇异点（画面翻转），
   // 故先夹进极角限位：|纬度| > 60° 时相机自动偏出 30°，其余情况严格共线。
   const off = clampPolarToLimit(_flyOff.copy(zen))
-  const toPos = point.clone().addScaledVector(off, r)
+  const toPos = point.clone().addScaledVector(off, dist ?? r)
   // up 不动：全程世界 +Y（见 ORBIT_POLE_LIMIT），飞行只改机位与焦点，画面不会滚转 / 南北翻转；
   // 焦点切换推迟到落位时执行（见 updateCameraFly）：不能在这里切，否则动画未开始就先按新焦点重算相机球坐标
   beginCamFly(toPos, point, focusMode)
@@ -7596,9 +7597,11 @@ let userEphemArcMs = -Infinity
 /** 高亮弧的采样点数与时间跨度（当前时刻前后各 30 分钟） */
 const EPHEM_ARC_N = 240
 const EPHEM_ARC_HALF_MS = 30 * 60 * 1000
-/** 事件图层（对方轨道 + 两点标记 + 连线） */
+/** 事件图层（对方轨道 + 对方 3D 模型标记 + 连线） */
 let userEphemEventGroup: THREE.Group | null = null
-let userEphemOtherMarker: THREE.Mesh | null = null
+let userEphemOtherMarker: THREE.Object3D | null = null
+/** 事件重建序号：对方模型异步加载完成时校验，避免旧结果挂到新选中的事件上 */
+let userEphemEventSeq = 0
 let userEphemLink: THREE.Mesh | null = null
 let userEphemEvent: { tca: number; r: V3; v: V3 } | null = null
 /** 机动仿真：机动后轨迹（橙色实线）+ 机动时刻标记；原方案在对比模式下改画虚线 */
@@ -7685,8 +7688,12 @@ function clearUserEphem() {
   userEphemOtherMarker = null
   userEphemLink = null
   userEphemEvent = null
-  userEphemThreatPoints = null
-  userEphemThreatClouds = null
+  userEphemGapLabel = null
+  userEphemThreatSeq++
+  userEphemThreatGroup = null
+  userEphemThreatMeshes.clear()
+  userEphemSelectedEventId = null
+  releaseThreatLabelTextures()
   lastUserThreats = []
 }
 
@@ -7710,6 +7717,13 @@ function setUserEphem(set: EphemSet | null) {
   userEphemOtherMarker = null
   userEphemLink = null
   userEphemEvent = null
+  userEphemGapLabel = null
+  // 威胁标记随 userEphemGroup 一起释放，这里只清引用并让异步加载结果失效
+  userEphemThreatSeq++
+  userEphemThreatGroup = null
+  userEphemThreatMeshes.clear()
+  userEphemSelectedEventId = null
+  releaseThreatLabelTextures()
   userEphemManeuverLine = null
   userEphemManeuverMarker = null
   userEphemManeuverStates = null
@@ -7790,129 +7804,168 @@ function setUserEphem(set: EphemSet | null) {
   updateUserEphem()
 }
 
-/** 威胁点贴图：中心实心 + 外圈渐隐的光晕，保证在密集卫星点云中能辨认（只建一次） */
-let userEphemThreatTex: THREE.Texture | null = null
-function threatDotTexture(): THREE.Texture | null {
-  if (userEphemThreatTex) return userEphemThreatTex
-  const size = 64
+/** 威胁事件标记组：每个事件一颗对方卫星的 3D 模型 + 「目标ID · 时间」小标签 */
+let userEphemThreatGroup: THREE.Group | null = null
+/** 标签 canvas 贴图（SpriteMaterial.map）：disposeGroup 不回收材质贴图，单独记录并释放 */
+let userEphemThreatTexes: THREE.Texture[] = []
+/** 标记重建序号：模型异步加载完成时校验，避免旧结果挂到新的列表上 */
+let userEphemThreatSeq = 0
+let lastUserThreats: ThreatEvent[] = []
+/** 事件标签 Sprite（逐帧按相机距离缩放，近距离观察时保持屏幕尺寸不变） */
+const userEphemThreatLabels: THREE.Sprite[] = []
+/** 选中事件的「间距 xx km」标签（同上，逐帧缩放） */
+let userEphemGapLabel: THREE.Sprite | null = null
+/** 威胁事件静态模型（事件 id → 模型）：选中某条事件时隐藏它的静态模型，
+ *  改由事件图层的「对方模型」按仿真时刻沿轨道推进，避免两个模型完全重合闪烁 */
+const userEphemThreatMeshes = new Map<string, THREE.Object3D>()
+let userEphemSelectedEventId: string | null = null
+
+/** 威胁等级配色（与事件列表 / 详情卡同一口径） */
+const THREAT_LEVEL_HEX: Record<ThreatEvent['level'], number> = { high: 0xff6b6b, medium: 0xffb454, low: 0x5aa9ff }
+
+/** 威胁事件目标模型相对「卫星云模型」的放大倍数（1 = 与星历本星模型同一尺寸，靠镜头拉近观察） */
+const THREAT_MODEL_SCALE = 1
+
+/** 威胁事件定位时的镜头距离（场景单位，地球半径 = 1）：0.06 约等于「贴着事件点看」的近距离，
+ *  1 倍模型下仍能看清太阳翼结构 */
+const THREAT_CAM_DIST = 0.06
+
+/** TCA 时刻 → `MM-DD HH:mm`（UTC，与面板里的事件时刻同口径） */
+function threatTimeText(ms: number): string {
+  const d = new Date(ms)
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())} ${p(d.getUTCHours())}:${p(d.getUTCMinutes())}`
+}
+
+/** 「目标名称 · 时间」小标签（canvas 贴图 Sprite；颜色按风险等级）。
+ *  名称与事件列表 / 详情卡同一口径（STARLINK-xxxxx），不用 NORAD 数字，避免和双方目标对不上。 */
+function threatLabelSprite(ev: ThreatEvent): THREE.Sprite | null {
+  const H = 56
+  const text = `${ev.otherName} · ${threatTimeText(ev.tca)}`
+  const font = 'bold 24px "Microsoft YaHei", sans-serif'
   const cv = document.createElement('canvas')
-  cv.width = size
-  cv.height = size
+  const measure = cv.getContext('2d')
+  if (!measure) return null
+  measure.font = font
+  // 宽度按文字实际占位自适应（名称长度不一，固定宽度会被裁切）
+  const W = Math.max(360, Math.ceil(measure.measureText(text).width) + 40)
+  cv.width = W
+  cv.height = H
   const ctx = cv.getContext('2d')
   if (!ctx) return null
-  const grd = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2)
-  grd.addColorStop(0, 'rgba(255,255,255,1)')
-  grd.addColorStop(0.45, 'rgba(255,255,255,1)')
-  grd.addColorStop(0.66, 'rgba(255,255,255,0.42)')
-  grd.addColorStop(1, 'rgba(255,255,255,0)')
-  ctx.fillStyle = grd
-  ctx.fillRect(0, 0, size, size)
+  const color = `#${THREAT_LEVEL_HEX[ev.level].toString(16).padStart(6, '0')}`
+  ctx.fillStyle = 'rgba(8,14,24,0.78)'
+  ctx.fillRect(0, 6, W, H - 12)
+  ctx.strokeStyle = color
+  ctx.lineWidth = 2
+  ctx.strokeRect(1, 7, W - 2, H - 14)
+  ctx.font = font
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'middle'
+  ctx.fillStyle = color
+  ctx.fillText(text, W / 2, H / 2)
   const tex = new THREE.CanvasTexture(cv)
   tex.needsUpdate = true
-  userEphemThreatTex = tex
-  return tex
+  userEphemThreatTexes.push(tex)
+  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false }))
+  // 场景单位 / 像素沿用原 384×56 → 0.13×0.019 的字高口径
+  const k = 0.13 / 384
+  sprite.userData.baseW = W * k
+  sprite.userData.baseH = H * k
+  sprite.scale.set(W * k, H * k, 1)
+  // 锚点逐帧按相机距离调整（见 scaleEphemLabel）：镜头拉近后标签仍浮在模型上方且尺寸不变
+  sprite.center.set(0.5, -1.2)
+  userEphemThreatLabels.push(sprite)
+  return sprite
 }
 
-/** 威胁事件点云：所有筛选结果的 TCA 位置（按风险等级配色），与「热力云」同一种宏观可视化 */
-let userEphemThreatPoints: THREE.Points | null = null
-/** 威胁事件热力云：每事件一簇柔边光斑（加法混合），按等级配色、按风险放大，与后端热力云同款 shader */
-let userEphemThreatClouds: THREE.Points | null = null
-let lastUserThreats: ThreatEvent[] = []
+/** 重建 / 清除威胁标记前释放标签贴图（disposeGroup 不处理 material.map） */
+function releaseThreatLabelTextures() {
+  for (const t of userEphemThreatTexes) t.dispose()
+  userEphemThreatTexes = []
+  userEphemThreatLabels.length = 0
+}
 
-/** 设置威胁事件点云 + 热力云（空数组 = 清除）。星历重建后会自动重挂最后一次的结果 */
+/** 标签按相机距离等比缩放（保持屏幕尺寸恒定，镜头拉近时不会铺满整屏），
+ *  并按模型尺寸把标签贴到锚点上方（side = -1）或下方（side = 1）。 */
+function scaleEphemLabel(sp: THREE.Sprite | null, side: -1 | 1) {
+  const cam = g.camera
+  if (!cam || !sp) return
+  const baseW = Number(sp.userData.baseW) || 0.13
+  const baseH = Number(sp.userData.baseH) || 0.019
+  const dist = cam.position.distanceTo(sp.position)
+  // 远处保持原有尺寸；近处按比例收缩，屏幕尺寸不变
+  const f = Math.min(1, Math.max(dist, 0.004))
+  sp.scale.set(baseW * f, baseH * f, 1)
+  // 模型半宽（场景单位）+ 一点余量，换算成「标签高度」倍数
+  const half = (MODEL_MAX_DIM * THREAT_MODEL_SCALE) / 2 + 0.002
+  const c = Math.min(60, Math.max(0.8, half / (baseH * f)))
+  sp.center.set(0.5, side < 0 ? -c : 1 + c)
+}
+
+/** 设置威胁事件标记（空数组 = 清除）：每个事件在交会位置放一颗对方卫星 3D 模型，
+ *  并在模型上方标出「目标名称 · 时间」。星历重建后会自动重挂最后一次的结果 */
 function setUserEphemThreats(list: ThreatEvent[]) {
   lastUserThreats = list.slice()
-  if (userEphemThreatPoints && userEphemGroup) {
-    userEphemGroup.remove(userEphemThreatPoints)
-    userEphemThreatPoints.geometry.dispose()
-    ;(userEphemThreatPoints.material as THREE.Material).dispose()
+  const seq = ++userEphemThreatSeq
+  if (userEphemThreatGroup && userEphemGroup) {
+    userEphemGroup.remove(userEphemThreatGroup)
+    disposeGroup(userEphemThreatGroup)
   }
-  userEphemThreatPoints = null
-  if (userEphemThreatClouds && userEphemGroup) {
-    userEphemGroup.remove(userEphemThreatClouds)
-    userEphemThreatClouds.geometry.dispose()
-    ;(userEphemThreatClouds.material as THREE.Material).dispose()
-  }
-  userEphemThreatClouds = null
+  userEphemThreatGroup = null
+  userEphemThreatMeshes.clear()
+  releaseThreatLabelTextures()
   if (!list.length || !userEphemGroup) return
-  const pos = new Float32Array(list.length * 3)
-  const col = new Float32Array(list.length * 3)
-  const hex: Record<ThreatEvent['level'], number> = { high: 0xff6b6b, medium: 0xffb454, low: 0x5aa9ff }
-  for (let i = 0; i < list.length; i++) {
-    const ev = list[i]
+  const group = new THREE.Group()
+  for (const ev of list) {
     const p = eciToScene(ev.midEci[0], ev.midEci[1], ev.midEci[2])
-    pos[i * 3] = p.x
-    pos[i * 3 + 1] = p.y
-    pos[i * 3 + 2] = p.z
-    const c = new THREE.Color(hex[ev.level])
-    col[i * 3] = c.r
-    col[i * 3 + 1] = c.g
-    col[i * 3 + 2] = c.b
-  }
-  const geo = new THREE.BufferGeometry()
-  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3))
-  geo.setAttribute('color', new THREE.BufferAttribute(col, 3))
-  const mat = new THREE.PointsMaterial({
-    size: 0.05,
-    map: threatDotTexture(),
-    vertexColors: true,
-    transparent: true,
-    opacity: 1,
-    depthWrite: false,
-    sizeAttenuation: true
-  })
-  const points = new THREE.Points(geo, mat)
-  points.frustumCulled = false
-  userEphemThreatPoints = points
-  userEphemGroup.add(points)
-
-  // 热力云：每事件一簇柔边光斑（加法混合，与后端热力云同一套 shader），
-  // 颜色按等级、半径与不透明度按风险——近距离事件叠加后自然形成红色/黄色热区。
-  const CLOUD_PER_EVENT = 8
-  const total = list.length * CLOUD_PER_EVENT
-  const cpos = new Float32Array(total * 3)
-  const ccol = new Float32Array(total * 3)
-  const csize = new Float32Array(total)
-  const calpha = new Float32Array(total)
-  const BASE_R = 0.018
-  for (let i = 0; i < list.length; i++) {
-    const ev = list[i]
-    const p = eciToScene(ev.midEci[0], ev.midEci[1], ev.midEci[2])
-    const c = new THREE.Color(hex[ev.level])
-    const scale = 0.7 + Math.min(1, Math.max(0, ev.risk)) * 1.1
-    for (let j = 0; j < CLOUD_PER_EVENT; j++) {
-      const k = i * CLOUD_PER_EVENT + j
-      // 固定伪随机（按事件序号 + 粒子序号散列）：重建时云团形状稳定，不会闪烁跳动
-      const h = Math.sin((i + 1) * 127.1 + (j + 1) * 311.7) * 43758.5453
-      const f1 = h - Math.floor(h)
-      const f2 = (h * 3.7) % 1
-      const f3 = (h * 7.3) % 1
-      const ang = f1 * Math.PI * 2
-      const lat = f2 * Math.PI
-      const rr = BASE_R * scale * (0.35 + f3 * 0.8)
-      cpos[k * 3] = p.x + Math.cos(ang) * Math.sin(lat) * rr
-      cpos[k * 3 + 1] = p.y + Math.cos(lat) * rr
-      cpos[k * 3 + 2] = p.z + Math.sin(ang) * Math.sin(lat) * rr
-      ccol[k * 3] = c.r
-      ccol[k * 3 + 1] = c.g
-      ccol[k * 3 + 2] = c.b
-      csize[k] = 0.032 * scale
-      calpha[k] = 0.35 + 0.3 * (0.5 - f3)
+    const color = THREAT_LEVEL_HEX[ev.level]
+    // 只给当前选中事件挂「名称 · 时间」标签：其余事件只留三维模型，
+    // 否则画面上会出现一串与「双方目标」无关的其他卫星名称，容易被误读
+    if (ev.id === userEphemSelectedEventId) {
+      const label = threatLabelSprite(ev)
+      if (label) {
+        label.position.copy(p)
+        group.add(label)
+      }
     }
+    // 对方卫星模型：放在对方 TCA 的真实位置（与本星 TCA 位置相距即最小距离，远看几乎重合）
+    const mp = ev.otherEci ? eciToScene(ev.otherEci[0], ev.otherEci[1], ev.otherEci[2]) : p
+    // 型号按对方名称解析（同一型号复用 geomCache，不会重复下载）
+    const modelKey = resolveModelKey({ object_type: 'PAYLOAD', object_name: ev.otherName })
+    void loadGeom(modelUrlOf(modelKey, 'high'), MODEL_COARSE[modelKey] || 'UNKNOWN', modelKey).then((gm) => {
+      // 加载期间列表已重建 / 星历已切换：丢弃结果
+      if (!gm || seq !== userEphemThreatSeq) return
+      const mesh = new THREE.Mesh(gm.geom.clone(), new THREE.MeshStandardMaterial({
+        color: 0xdfe9f5,
+        metalness: 0.4,
+        roughness: 0.35,
+        emissive: color,
+        emissiveIntensity: 0.55
+      }))
+      mesh.position.copy(mp)
+      mesh.scale.setScalar(THREAT_MODEL_SCALE)
+      const vel = ev.otherVel ? eciToScene(ev.otherVel[0], ev.otherVel[1], ev.otherVel[2]) : _zeroVel
+      orbitAttitude(mp, vel, mesh.quaternion)
+      userEphemThreatMeshes.set(ev.id, mesh)
+      // 该事件已被选中：静态模型让位给事件图层的「对方模型」
+      if (ev.id === userEphemSelectedEventId) mesh.visible = false
+      group.add(mesh)
+    })
   }
-  const cgeo = new THREE.BufferGeometry()
-  cgeo.setAttribute('position', new THREE.BufferAttribute(cpos, 3))
-  cgeo.setAttribute('aColor', new THREE.BufferAttribute(ccol, 3))
-  cgeo.setAttribute('aSize', new THREE.BufferAttribute(csize, 1))
-  cgeo.setAttribute('aAlpha', new THREE.BufferAttribute(calpha, 1))
-  const clouds = new THREE.Points(cgeo, makeHeatGlowMaterial())
-  clouds.frustumCulled = false
-  userEphemThreatClouds = clouds
-  userEphemGroup.add(clouds)
+  userEphemThreatGroup = group
+  userEphemGroup.add(group)
 }
 
-/** 选中威胁事件：画对方轨道环 + TCA 两点标记 + 最短距离连线 */
+/** 选中威胁事件：画对方轨道环 + 对方 3D 模型标记 + 最短距离连线 */
 function setUserEphemEvent(ev: ThreatEvent | null) {
+  // 恢复上一条被隐藏的静态模型（本次选中事件的静态模型稍后隐藏，由事件图层的推进模型代替）
+  if (userEphemSelectedEventId) {
+    const prev = userEphemThreatMeshes.get(userEphemSelectedEventId)
+    if (prev) prev.visible = true
+  }
+  userEphemSelectedEventId = null
+  userEphemEventSeq++
   if (userEphemEventGroup) {
     userEphemGroup?.remove(userEphemEventGroup)
     disposeGroup(userEphemEventGroup)
@@ -7921,7 +7974,14 @@ function setUserEphemEvent(ev: ThreatEvent | null) {
   userEphemOtherMarker = null
   userEphemLink = null
   userEphemEvent = null
+  userEphemGapLabel = null
   if (!ev || !userEphemGroup || !ev.otherEci || !ev.otherVel) return
+  // 选中事件的静态模型让位给下面按仿真时刻推进的「对方模型」，避免两个模型完全重合闪烁
+  userEphemSelectedEventId = ev.id
+  const selectedMesh = userEphemThreatMeshes.get(ev.id)
+  if (selectedMesh) selectedMesh.visible = false
+  // 标签只挂选中事件：选中项变了就重建一次标记组
+  setUserEphemThreats(lastUserThreats)
 
   const group = new THREE.Group()
   // 对方轨道环：以 TCA 状态做开普勒解析推进，采样一整圈
@@ -7940,20 +8000,25 @@ function setUserEphemEvent(ev: ThreatEvent | null) {
     const geo = new THREE.BufferGeometry().setFromPoints(ring)
     group.add(new THREE.Line(geo, new THREE.LineBasicMaterial({ color: 0xff6b6b, transparent: true, opacity: 0.95 })))
   }
-  // 对方 TCA 位置标记（随后逐帧按 g.simTimeMs 推进）
-  const other = new THREE.Mesh(
-    new THREE.SphereGeometry(0.009, 12, 12),
-    new THREE.MeshBasicMaterial({ color: 0xff9a6b })
-  )
+  // 对方标记：一颗对方卫星的 3D 模型（随后逐帧按 g.simTimeMs 沿轨道推进，位置即 TCA 位置）
+  const other = new THREE.Group()
+  other.position.copy(eciToScene(ev.otherEci[0], ev.otherEci[1], ev.otherEci[2]))
   userEphemOtherMarker = other
   group.add(other)
-  // 本星 TCA 位置标记（黄绿），与对方标记区分
-  const selfAtTca = new THREE.Mesh(
-    new THREE.SphereGeometry(0.009, 12, 12),
-    new THREE.MeshBasicMaterial({ color: 0xffd166 })
-  )
-  selfAtTca.position.copy(eciToScene(ev.midEci[0], ev.midEci[1], ev.midEci[2]))
-  group.add(selfAtTca)
+  const evSeq = ++userEphemEventSeq
+  const otherKey = resolveModelKey({ object_type: 'PAYLOAD', object_name: ev.otherName })
+  void loadGeom(modelUrlOf(otherKey, 'high'), MODEL_COARSE[otherKey] || 'UNKNOWN', otherKey).then((gm) => {
+    if (!gm || evSeq !== userEphemEventSeq) return
+    const mesh = new THREE.Mesh(gm.geom.clone(), new THREE.MeshStandardMaterial({
+      color: 0xdfe9f5,
+      metalness: 0.4,
+      roughness: 0.35,
+      emissive: 0xff9a6b,
+      emissiveIntensity: 0.5
+    }))
+    mesh.scale.setScalar(THREAT_MODEL_SCALE)
+    other.add(mesh)
+  })
   // 最短距离连线（TCA 时刻两目标位置之间）：WebGL 线宽固定 1px，改用细圆柱保证全球视角可见
   const pA = eciToScene(ev.midEci[0], ev.midEci[1], ev.midEci[2])
   const pB = eciToScene(ev.otherEci[0], ev.otherEci[1], ev.otherEci[2])
@@ -7985,8 +8050,10 @@ function setUserEphemEvent(ev: ThreatEvent | null) {
     tex.needsUpdate = true
     const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false }))
     sprite.position.copy(pA).addScaledVector(gapVec, 0.5)
-    sprite.position.y += 0.03
+    sprite.userData.baseW = 0.1
+    sprite.userData.baseH = 0.025
     sprite.scale.set(0.1, 0.025, 1)
+    userEphemGapLabel = sprite
     group.add(sprite)
   }
 
@@ -8007,6 +8074,21 @@ function updateUserEphem() {
   if (!group) return
   group.visible = dockActive.value === 'eph'
   if (!group.visible || !userEphemSet) return
+  // 标签按当前相机距离缩放并贴到模型外侧：拉近观察事件点时文字不会被放大成整屏
+  for (const sp of userEphemThreatLabels) scaleEphemLabel(sp, -1)
+  scaleEphemLabel(userEphemGapLabel, 1)
+  // 选中某条事件时，其余事件的模型会让画面混入无关卫星：只保留事件图层里的「本星 + 对方」
+  // （注意不能整组隐藏：选中事件的标签就挂在这个组里）
+  if (userEphemSelectedEventId) {
+    for (const m of userEphemThreatMeshes.values()) m.visible = false
+  } else {
+    for (const m of userEphemThreatMeshes.values()) m.visible = true
+  }
+  // 间距连线：圆柱半径同样按距离收缩（否则拉近后会变成一个比两颗星还大的六边形块）
+  if (userEphemLink && g.camera) {
+    const dl = Math.min(1, Math.max(g.camera.position.distanceTo(userEphemLink.position), 0.004))
+    userEphemLink.scale.set(dl, 1, dl)
+  }
   // 机动生效后（simTime ≥ 机动时刻）当前位置 / 弧段改用机动后的状态序列，双轨迹才真实
   const states = userEphemManeuverStates && userEphemBurnMs != null && g.simTimeMs >= userEphemBurnMs
     ? userEphemManeuverStates
@@ -8048,10 +8130,18 @@ function updateUserEphem() {
     userEphemArc.geometry.setDrawRange(0, cnt)
   }
   if (userEphemEvent && userEphemOtherMarker) {
-    const p = keplerPropagate(userEphemEvent.r, userEphemEvent.v, (g.simTimeMs - userEphemEvent.tca) / 1000)
+    const dtSec = (g.simTimeMs - userEphemEvent.tca) / 1000
+    const p = keplerPropagate(userEphemEvent.r, userEphemEvent.v, dtSec)
     if (p) {
       userEphemOtherMarker.visible = true
-      userEphemOtherMarker.position.copy(eciToScene(p[0], p[1], p[2]))
+      const pos = eciToScene(p[0], p[1], p[2])
+      userEphemOtherMarker.position.copy(pos)
+      // 模型定姿：用 1 秒后位置差分出速度方向（与卫星云 / 本星模型同一口径）
+      const pNext = keplerPropagate(userEphemEvent.r, userEphemEvent.v, dtSec + 1)
+      if (pNext) {
+        _ephVel.subVectors(eciToScene(pNext[0], pNext[1], pNext[2]), pos)
+        orbitAttitude(pos, _ephVel, userEphemOtherMarker.quaternion)
+      }
     } else {
       userEphemOtherMarker.visible = false
     }
@@ -8133,13 +8223,31 @@ function focusUserEphemEvent(ev: ThreatEvent | null) {
   stopEphemTracking()
   setUserEphemEvent(ev)
   if (!ev) return
+  // 近距离机位下 1 倍速的位移几秒内就会飞出视野：定位事件时暂停仿真，保持 TCA 定格观察
+  simPlaying.value = false
   g.simTimeMs = ev.tca
   updateUserEphem()
   const mid = new THREE.Vector3()
     .add(eciToScene(ev.midEci[0], ev.midEci[1], ev.midEci[2]))
     .add(eciToScene(ev.otherEci![0], ev.otherEci![1], ev.otherEci![2]))
     .multiplyScalar(0.5)
-  flyToPoint(mid, 'point')
+  // 交会事件用近距离机位：1 倍模型在地球尺度下只有几个像素，必须拉近才能看清两颗卫星
+  flyToPoint(mid, 'point', THREAT_CAM_DIST)
+}
+
+/** 把 ECI 坐标投影为视口像素（右侧事件详情卡跟随交会点定位用）；
+ *  相机后方 / 投影异常时返回 null，调用方据此保持原位或隐藏 */
+function projectEciToViewport(r: V3): { x: number; y: number } | null {
+  const cam = g.camera
+  const renderer = g.renderer
+  if (!cam || !renderer) return null
+  _proj.copy(eciToScene(r[0], r[1], r[2])).project(cam)
+  if (!(_proj.z > -1 && _proj.z < 1)) return null
+  const rect = renderer.domElement.getBoundingClientRect()
+  return {
+    x: rect.left + (_proj.x * 0.5 + 0.5) * rect.width,
+    y: rect.top + (-_proj.y * 0.5 + 0.5) * rect.height
+  }
 }
 
 /** 机动仿真：设置机动后的星历（null = 清除），三维画「原方案虚线 + 机动后橙色实线」双轨迹；
@@ -8844,8 +8952,10 @@ defineExpose({
   pickLaunchSiteById: selectLaunchSiteById,
   /** 星历分析：设置当前高精度星历（null = 清除图层） */
   setUserEphem,
-  /** 星历分析：设置威胁事件点云（按风险等级配色，空数组清除） */
+  /** 星历分析：设置威胁事件标记（TCA 位置 3D 卫星模型 + 「目标ID · 时间」标签，空数组清除） */
   setUserEphemThreats,
+  /** 星历分析：把 ECI 点投影到视口像素（事件详情卡跟随交会点定位；不可见时返回 null） */
+  projectEciToViewport,
   /** 星历分析：定位到当前星历目标（时间对齐 + 镜头飞到当前位置） */
   focusUserEphem,
   /** 星历分析：拉近并逐帧跟踪星历本星（与双击卫星同一套机位 / 准星 / 跟随效果） */

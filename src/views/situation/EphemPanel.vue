@@ -8,7 +8,7 @@
  * - 一键与在轨目录做 24h / 48h / 72h 交会筛选（Worker 内粗筛 + 精筛 + Pc 计算）；
  * - 事件列表点击即在三维中定位并高亮该次接近。
  */
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { ephOpen, fmtNum, drawerHeightVh, isDrawerDragging, useDrawerDrag } from './scene'
 import {
   MAX_FILE_MB,
@@ -17,12 +17,8 @@ import {
   refreshEphemList, activateEphem, deactivateEphem, removeEphem, uploadEphemerides,
   threatEvents, threatSelected, screening, screenProgress, screenError, screenStats,
   runScreening, selectThreat, DEFAULT_SCREEN,
-  maneuverConfig, maneuverStates, maneuverBurnMs, maneuverDvMps, maneuverError,
-  applyManeuver, clearManeuver,
-  maneuverCompare, maneuverCompareBusy, maneuverCompareError,
-  type ScreenParams, type BuiltinSample, type ManeuverDir
+  type ScreenParams, type BuiltinSample
 } from './ephem/useUserEphemeris'
-import type { PairCompareRow } from './ephem/screening'
 import type { ThreatEvent } from './ephem/types'
 import { getSet } from './ephem/store'
 
@@ -43,81 +39,6 @@ const dragOver = ref(false)
 
 /** 筛选参数（面板可调；默认 24h / 50 km / Pc 1e-6） */
 const params = ref<ScreenParams>({ ...DEFAULT_SCREEN })
-
-/* ---- 机动仿真（脉冲机动） ----
- * 只做「参数 + 双轨迹」：时刻（TCA 前 N 分钟 / 星历起点、中点）+ 方向（RTN）+ 幅值，
- * 应用后由 store 的 maneuverStates 驱动三维叠加「原方案虚线 + 机动后实线」。 */
-const MAN_DIRS: { v: ManeuverDir; label: string }[] = [
-  { v: 'T', label: '沿迹' }, { v: 'R', label: '径向' }, { v: 'N', label: '法向' }
-]
-interface ManPreset { key: string; label: string; needTca: boolean }
-const MAN_PRESETS: ManPreset[] = [
-  { key: 'tca60', label: 'TCA-60min', needTca: true },
-  { key: 'tca30', label: 'TCA-30min', needTca: true },
-  { key: 'tca10', label: 'TCA-10min', needTca: true },
-  { key: 'start1h', label: '起点+1h', needTca: false },
-  { key: 'mid', label: '星历中点', needTca: false }
-]
-const manDirLabel = computed(() => MAN_DIRS.find((d) => d.v === maneuverConfig.value.dir)?.label || '')
-const manAtText = computed(() => {
-  const at = maneuverConfig.value.atMs
-  return at == null ? '未选择' : `${fmtUtc(at, true)} UTC`
-})
-
-/** 星历实际数据范围（内置样本的元数据跨度可能长于状态序列，机动时刻以真实数据为准） */
-const manRange = computed(() => {
-  const set = activeEphem.value
-  if (!set) return null
-  if (!set.states.length) return { t0: set.start, t1: set.stop }
-  return { t0: set.states[0].t, t1: set.states[set.states.length - 1].t }
-})
-
-/** 预设 → 绝对时刻（TCA 类需先选中一条威胁事件） */
-function presetMs(key: string): number | null {
-  const r = manRange.value
-  if (!r) return null
-  if (key === 'mid') return (r.t0 + r.t1) / 2
-  if (key.startsWith('tca')) {
-    const tca = threatSelected.value?.tca
-    if (tca == null) return null
-    return tca + (key === 'tca60' ? -60 : key === 'tca30' ? -30 : -10) * 60000
-  }
-  return r.t0 + 3600e3
-}
-function pickPreset(key: string) {
-  const r = manRange.value
-  const ms = presetMs(key)
-  if (!r || ms == null) return
-  maneuverConfig.value.atMs = Math.min(Math.max(ms, r.t0), r.t1)
-}
-function onApplyManeuver() { applyManeuver() }
-function onClearManeuver() { clearManeuver() }
-
-/** Pc 文本：0 表示低于模型分辨率 */
-function pcText(pc?: number) {
-  if (pc == null) return '—'
-  return pc > 0 ? pc.toExponential(1) : '0'
-}
-/** TCA 相对改动（分钟）；TCA 早于机动时刻的接近不受本次机动影响 */
-function tcaShiftText(r: PairCompareRow) {
-  if (!r.after) return '—'
-  if (maneuverBurnMs.value != null && r.before.tca <= maneuverBurnMs.value) return 'TCA 早于机动'
-  const m = (r.after.tca - r.before.tca) / 60000
-  return Math.abs(m) < 0.1 ? 'TCA 不变' : `TCA ${m > 0 ? '+' : ''}${m.toFixed(1)} min`
-}
-/** 机动后是改善（绿）还是恶化（红）：距离变大 / Pc 变小视为改善 */
-function cmpClass(r: PairCompareRow, kind: 'miss' | 'pc') {
-  if (!r.after) return ''
-  if (kind === 'miss') return r.after.missKm >= r.before.missKm ? 'is-up' : 'is-down'
-  return r.after.pc <= r.before.pc ? 'is-up' : 'is-down'
-}
-
-/** 选中威胁事件后默认把机动时刻定在 TCA 前 60 分钟（用户可再改） */
-watch(threatSelected, (ev) => {
-  const r = manRange.value
-  if (!ev || !r) return
-  maneuverConfig.value.atMs = Math.min(Math.max(ev.tca - 60 * 60000, r.t0), r.t1)
-})
 
 const activeName = computed(() => activeEphem.value?.name || '')
 const activeMeta = computed(() => ephemMetas.value.find((m) => m.id === activeEphem.value?.id) || null)
@@ -332,67 +253,6 @@ function startScreen() {
           </div>
         </div>
 
-        <!-- 机动仿真（脉冲机动：参数 + 双轨迹） -->
-        <div v-if="activeEphem" class="ep-sec">
-          <div class="ep-sec-title">机动仿真<span class="ep-sec-sub">脉冲机动 · 原方案 / 机动后双轨迹</span></div>
-          <div class="ep-man-time"><span>机动时刻</span><b>{{ manAtText }}</b></div>
-          <div class="ep-man-presets">
-            <button v-for="p in MAN_PRESETS" :key="p.key" class="ep-man-p"
-              :disabled="p.needTca && !threatSelected"
-              :title="p.needTca && !threatSelected ? '需先在威胁事件中选中一条' : ''"
-              @click="pickPreset(p.key)">{{ p.label }}</button>
-          </div>
-          <div class="ep-man-row">
-            <span class="ep-man-label">方向 (RTN)</span>
-            <div class="ep-man-dirs">
-              <button v-for="d in MAN_DIRS" :key="d.v" :class="{ on: maneuverConfig.dir === d.v }"
-                @click="maneuverConfig.dir = d.v">{{ d.label }}</button>
-            </div>
-          </div>
-          <div class="ep-man-row is-amp">
-            <span class="ep-man-label">Δv</span>
-            <input type="range" min="0.05" max="2" step="0.05" v-model.number="maneuverConfig.dvMps" class="ep-man-range" />
-            <b class="ep-man-val">{{ maneuverConfig.dvMps.toFixed(2) }} m/s</b>
-          </div>
-          <button class="ep-run" :disabled="!maneuverConfig.atMs" @click="onApplyManeuver">
-            {{ maneuverStates ? '重新施加机动' : '应用机动' }}
-          </button>
-          <div v-if="maneuverError" class="ep-err">{{ maneuverError }}</div>
-          <div v-if="maneuverStates" class="ep-man-done">
-            <div class="ep-man-done-row">
-              <span>已施加 Δv {{ maneuverDvMps.toFixed(2) }} m/s · {{ manDirLabel }}</span>
-              <button class="ep-ev-clear" @click="onClearManeuver">清除机动</button>
-            </div>
-            <span class="ep-man-legend"><i class="is-orig"></i>原方案（虚线） <i class="is-new"></i>机动后（实线）</span>
-          </div>
-
-          <!-- 机动前后对比：对威胁列表 Top-20 做同口径单对重筛 -->
-          <div class="ep-cmp">
-            <div class="ep-cmp-head">
-              <b>机动前后对比</b>
-              <span v-if="maneuverCompareBusy">重筛中 {{ Math.round(screenProgress * 100) }}%</span>
-              <span v-else-if="maneuverCompare.length">Top {{ maneuverCompare.length }} · 前 → 后</span>
-            </div>
-            <div v-if="maneuverCompareError" class="ep-err">{{ maneuverCompareError }}</div>
-            <div v-else-if="!maneuverCompare.length && !maneuverCompareBusy" class="ep-empty is-sm">
-              施加机动后，在此对比 Top 20 交会的 TCA / 最小距离 / Pc（需先完成威胁筛选）
-            </div>
-            <div v-else class="ep-cmp-list">
-              <div v-for="r in maneuverCompare" :key="r.norad" class="ep-cmp-item"
-                :title="`TCA ${fmtUtc(r.before.tca, true)} → ${r.after ? fmtUtc(r.after.tca, true) : '—'} UTC`">
-                <div class="ep-cmp-top">
-                  <span class="ep-cmp-name">{{ r.name }}</span>
-                  <span class="ep-cmp-dt">{{ tcaShiftText(r) }}</span>
-                </div>
-                <div class="ep-cmp-mid">
-                  <span>距离 {{ fmtNum(r.before.missKm, 2) }} → <b :class="cmpClass(r, 'miss')">{{ r.after ? fmtNum(r.after.missKm, 2) : '—' }}</b> km</span>
-                  <span>Pc {{ pcText(r.before.pc) }} → <b :class="cmpClass(r, 'pc')">{{ r.after ? pcText(r.after.pc) : '—' }}</b></span>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-
         <!-- 威胁筛选 -->
         <div v-if="activeEphem" class="ep-sec">
           <div class="ep-sec-title">威胁筛选<span class="ep-sec-sub">与在轨目录做快速交会分析</span></div>
@@ -457,7 +317,7 @@ function startScreen() {
                 <span class="ep-dot" :style="{ background: LEVEL_COLOR[ev.level] }"></span>
                 <span>{{ LEVEL_TEXT[ev.level] }}</span>
                 <span>{{ fmtUtc(ev.tca, true) }} UTC</span>
-                <span>Δv {{ fmtNum(ev.relSpeedKmS, 2) }} km/s</span>
+                <span>相对速度 {{ fmtNum(ev.relSpeedKmS, 2) }} km/s</span>
                 <span>Pc {{ ev.pc > 0 ? ev.pc.toExponential(1) : '—' }}</span>
               </div>
             </div>
@@ -617,55 +477,6 @@ function startScreen() {
 .ep-ev-sub { display: flex; flex-wrap: wrap; align-items: center; gap: 3px 8px; margin-top: 3px;
   span { font-size: 9.5px; color: #8ea4c4; } }
 .ep-dot { width: 5px; height: 5px; border-radius: 50%; flex: none; }
-
-/* 机动仿真 */
-.ep-man-time { display: flex; justify-content: space-between; gap: 8px; font-size: 10.5px; color: #8ea4c4;
-  b { color: #eaf2fc; font-weight: 600; } }
-.ep-man-presets { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
-.ep-man-p { flex: 1 1 auto; height: 22px; padding: 0 6px; font-size: 9.5px; border-radius: 4px; cursor: pointer;
-  color: #9dbbdd; background: rgba(30,60,110,0.5); border: 1px solid rgba(110,150,210,0.28);
-  &:hover:not(:disabled) { color: #eaf2fc; border-color: rgba(120,175,255,0.55); }
-  &:disabled { opacity: 0.35; cursor: not-allowed; } }
-.ep-man-row { display: flex; align-items: center; gap: 6px; margin-top: 7px; }
-.ep-man-label { flex: none; width: 62px; font-size: 9.5px; color: #8ea4c4; }
-.ep-man-dirs { display: flex; gap: 4px; flex: 1 1 auto;
-  button { flex: 1 1 0; height: 22px; font-size: 10px; border-radius: 4px; cursor: pointer;
-    color: #9dbbdd; background: rgba(30,60,110,0.5); border: 1px solid rgba(110,150,210,0.28);
-    &:hover { color: #eaf2fc; border-color: rgba(120,175,255,0.55); }
-    &.on { color: #0b1a2b; background: #7fb0ff; border-color: #7fb0ff; font-weight: 700; } } }
-.ep-man-range { flex: 1 1 auto; min-width: 0; accent-color: #7fb0ff; }
-.ep-man-val { flex: none; font-size: 10.5px; color: #ffd166; font-weight: 700; }
-.ep-man-row.is-amp + .ep-run { margin-top: 9px; }
-.ep-man-done { margin-top: 8px; padding: 6px 8px; border-radius: 6px;
-  background: rgba(255,180,84,0.1); border: 1px solid rgba(255,180,84,0.3); }
-.ep-man-done-row { display: flex; align-items: center; justify-content: space-between; gap: 8px;
-  span { font-size: 10px; color: #ffd8a0; }
-  .ep-ev-clear { flex: none; font-size: 9.5px; color: #8ea4c4; background: transparent;
-    border: 1px solid rgba(110,150,210,0.3); border-radius: 4px; padding: 1px 5px; cursor: pointer;
-    &:hover { color: #dbe9fb; border-color: rgba(120,175,255,0.5); } } }
-.ep-man-legend { display: flex; align-items: center; gap: 5px; margin-top: 5px; font-size: 9.5px; color: #8ea4c4;
-  i { width: 14px; height: 2px; border-radius: 1px; display: inline-block; }
-  i.is-orig { background: repeating-linear-gradient(90deg, #5c83b8 0 4px, transparent 4px 7px); margin-left: 6px; }
-  i.is-new { background: #ffb454; } }
-
-/* 机动前后对比表（前 → 后，绿=改善 / 红=恶化） */
-.ep-cmp { margin-top: 9px; }
-.ep-cmp-head { display: flex; align-items: baseline; gap: 6px; margin-bottom: 5px;
-  b { font-size: 10.5px; color: #cfe0f5; }
-  span { font-size: 9.5px; color: #7fb0ff; } }
-.ep-cmp-list { display: flex; flex-direction: column; gap: 4px; max-height: 190px; overflow-y: auto;
-  scrollbar-width: thin; scrollbar-color: rgba(120,160,220,0.35) transparent; }
-.ep-cmp-item { padding: 5px 7px; border-radius: 5px; background: rgba(26,52,96,0.3);
-  border: 1px solid rgba(110,150,210,0.18); }
-.ep-cmp-top { display: flex; align-items: baseline; gap: 6px;
-  .ep-cmp-name { flex: 1 1 auto; min-width: 0; font-size: 10px; color: #eaf2fc;
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .ep-cmp-dt { flex: none; font-size: 9px; color: #ffd166; } }
-.ep-cmp-mid { display: flex; flex-wrap: wrap; gap: 2px 10px; margin-top: 2px;
-  span { font-size: 9px; color: #8ea4c4; }
-  b { font-weight: 700; color: #dbe9fb;
-    &.is-up { color: #4ad991; }
-    &.is-down { color: #ff8f8f; } } }
 
 /* 小屏：面板为底部抽屉，参数区换行 */
 @media (max-width: 720px) {

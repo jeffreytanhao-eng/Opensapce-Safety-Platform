@@ -684,8 +684,10 @@ export async function runScreening(params: ScreenParams = DEFAULT_SCREEN) {
     const cat = await loadCatalog()
     const selfEl = elementsFromRV(set.states[0].r, set.states[0].v)
     // 预过滤：半长轴 ±150 km、倾角 ±10°（与 screening 内部同一口径，这里提前做可把
-    // 3.5 万目标降到数千，减小 Worker 消息体与克隆开销）
+    // 3.5 万目标降到数千，减小 Worker 消息体与克隆开销）；同时按「名称 + NORAD」排除本星自身
+    const selfName = normName(set.name)
     const catalog = cat.list.filter((c) => {
+      if (c.norad === set.norad || (selfName !== '' && normName(c.name) === selfName)) return false
       const a = Number.isFinite(c.a) ? c.a : selfEl.a
       const i = Number.isFinite(c.i) ? c.i : selfEl.i
       return Math.abs(a - selfEl.a) < 150 && Math.abs(i - selfEl.i) < 10
@@ -777,6 +779,7 @@ function runScreenWorker(set: EphemSet, catalog: CatalogSnapshotEntry[], opt: Sc
     w.postMessage({
       id: set.id,
       norad: set.norad,
+      name: set.name,
       states: set.states,
       catalog,
       opt

@@ -14,6 +14,8 @@ export interface ScreenRequest {
   type?: 'full'
   id: string
   norad: number
+  /** 本星名称：筛选内核按「名称 + NORAD」排除自身，缺了名称会漏掉自身 */
+  name?: string
   states: EphemState[]
   catalog: CatalogSnapshotEntry[]
   opt: ScreenOptions
@@ -62,9 +64,9 @@ ctx.onmessage = (e) => {
       return
     }
 
-    const { id, norad, states, catalog, opt } = d
-    // screenEphemeris 只用到 states / id / norad 三个字段，这里按结构构造最小对象
-    const set = { id, norad, states } as unknown as EphemSet
+    const { id, norad, name, states, catalog, opt } = d
+    // screenEphemeris 只用到 name / states / id / norad，这里按结构构造最小对象
+    const set = { id, norad, name, states } as unknown as EphemSet
     let lastTick = 0
     const events = screenEphemeris(set, catalog, opt, (p) => {
       // 进度节流：每 5% 才回一次消息，避免主线程被消息淹没

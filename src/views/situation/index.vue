@@ -1154,6 +1154,56 @@ const rightMode = computed<'' | 'pass' | 'heat' | 'ephEv' | 'sat' | 'site' | 'co
 /** 收起过境明细：只隐藏弹窗并保留选中城市与三维高亮（不清高亮圈/过境标记，可再次点选或浮标展开） */
 function closePassDetail() { passDetailOpen.value = false }
 
+/* ---- 威胁事件详情卡：跟随三维交会点，定位在该点右下方 ---- */
+const detailAsideEl = ref<HTMLElement | null>(null)
+/** 卡片左上角（视口像素）；null 时由 CSS 默认位置兜底 */
+const ephEvPos = ref<{ left: number; top: number } | null>(null)
+const ephEvStyle = computed(() =>
+  ephEvPos.value ? { left: `${ephEvPos.value.left}px`, top: `${ephEvPos.value.top}px` } : undefined
+)
+let ephEvRaf = 0
+
+/** 按交会点在屏幕上的位置重算卡片左上角：优先右下方，越界时翻到左侧 / 上方 */
+function updateEphEvPos() {
+  const ev = threatSelected.value
+  const pt = ev ? sceneRef.value?.projectEciToViewport(ev.midEci) : null
+  if (!pt) return
+  const w = detailAsideEl.value?.offsetWidth || 244
+  const h = detailAsideEl.value?.offsetHeight || 240
+  // 镜头拉近后两颗卫星在屏幕上有一定尺寸，偏移量要够大才不会挡住目标本身
+  const gapX = 96
+  const gapY = 56
+  let left = pt.x + gapX
+  let top = pt.y + gapY
+  if (left + w > window.innerWidth - 8) left = Math.max(8, pt.x - w - gapX)
+  if (top + h > window.innerHeight - 8) top = Math.max(8, pt.y - h - gapY)
+  const next = { left: Math.round(left), top: Math.round(top) }
+  if (!ephEvPos.value || ephEvPos.value.left !== next.left || ephEvPos.value.top !== next.top) ephEvPos.value = next
+}
+
+/** 逐帧跟随（镜头拖动 / 缩放时卡片贴着交会点走） */
+function startEphEvFollow() {
+  if (ephEvRaf) return
+  const loop = () => {
+    if (rightMode.value !== 'ephEv') { ephEvRaf = 0; return }
+    updateEphEvPos()
+    ephEvRaf = requestAnimationFrame(loop)
+  }
+  ephEvRaf = requestAnimationFrame(loop)
+}
+
+function stopEphEvFollow() {
+  if (ephEvRaf) cancelAnimationFrame(ephEvRaf)
+  ephEvRaf = 0
+  ephEvPos.value = null
+}
+
+watch(rightMode, (m) => {
+  if (m === 'ephEv') void nextTick(() => { updateEphEvPos(); startEphEvFollow() })
+  else stopEphEvFollow()
+})
+onBeforeUnmount(stopEphEvFollow)
+
 /** 过境列表过滤：只看「可成像」窗口（目标被太阳照亮 且 观测站处于天文夜 且 月光背景低）。
  *  仅对光照条件已落库的批次有效；光照上线前的老批次这些字段为空，勾选后列表会变空。 */
 const passOnlyOptical = ref(false)
@@ -1801,7 +1851,7 @@ const aiTarget = computed(() =>
          左上角 logo 为独立定位元素（原图透明底，不叠加任何背景） -->
     <img class="app-logo" :src="logoUrl" alt="Openspace logo" />
     <!-- 右上角水印：纯装饰层，不拦截画布交互 -->
-    <div class="app-watermark">谭谈</div>
+    <div class="app-watermark">谭谈.佳男</div>
     <header class="constel-titlebar">
       <div class="tb-frame">
         <span class="tb-wing"></span>
@@ -2021,7 +2071,13 @@ const aiTarget = computed(() =>
     </div>
 
     <!-- 右侧面板：过境明细 / 事件详情 / 发射站详情 / 卫星详情（四态，同一位置切换，可收起） -->
-    <aside v-if="rightMode" class="constel-detail" :class="{ 'detail-pass': rightMode === 'pass', 'detail-site': rightMode === 'site', 'detail-sat': rightMode === 'sat' }">
+    <aside
+      v-if="rightMode"
+      ref="detailAsideEl"
+      class="constel-detail"
+      :class="{ 'detail-pass': rightMode === 'pass', 'detail-site': rightMode === 'site', 'detail-sat': rightMode === 'sat', 'detail-eph-ev': rightMode === 'ephEv' }"
+      :style="rightMode === 'ephEv' ? ephEvStyle : undefined"
+    >
       <!-- ① 城市过境明细（点击地球行政区划面 / 左侧目标列表项）：
            上栏＝该目标未来 24h 过境列表（按最大仰角降序），下栏＝选中那次过境的时刻与参数 -->
       <template v-if="rightMode === 'pass' && passSelTarget">
@@ -2302,8 +2358,7 @@ const aiTarget = computed(() =>
       <template v-else-if="rightMode === 'ephEv' && threatSelected">
         <div class="cd-head">
           <div class="cd-head-main">
-            <b class="cd-name">{{ threatSelected.otherName }}</b>
-            <span class="cd-sub">交会事件 · 本星 {{ activeEphem?.name || '—' }}</span>
+            <b class="cd-name">威胁事件 · {{ activeEphem?.name || `NORAD ${threatSelected.selfNorad}` }} × {{ threatSelected.otherName }}</b>
           </div>
           <div class="cd-head-actions">
             <button class="cd-close" title="收起详情（保留三维高亮）" @click="ephEvOpen = false">✕</button>
@@ -2331,9 +2386,7 @@ const aiTarget = computed(() =>
             <div class="cd-item"><span>对方</span><b>{{ threatSelected.otherName }}<i class="cd-norad">NORAD {{ threatSelected.otherNorad }}</i></b></div>
           </div>
         </div>
-        <div class="cd-block">
-          <button class="cd-eph-btn" @click="openEphForEvent">打开星历面板 / 机动仿真</button>
-        </div>
+        <button class="cd-eph-btn" @click="openEphForEvent">打开星历分析窗口</button>
       </template>
 
       <!-- ⑤ 我的星历详情（左侧「我的星历」分组点选后展示；与星历分析面板互斥，卡片内按钮再打开面板） -->

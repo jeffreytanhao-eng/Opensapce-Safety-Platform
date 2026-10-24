@@ -38,13 +38,13 @@
   pointer-events: none; user-select: none;
   filter: drop-shadow(0 0 6px rgba(0, 0, 0, 0.6));
 }
-/* 右上角水印：字号与弹出窗标题（.sp-title）一致，85% 不透明度；纯装饰不拦截交互 */
+
 .app-watermark {
   position: absolute; top: 12px; right: 16px; z-index: 9;
   font-size: 14px; font-weight: 700; line-height: 1.2;
   color: #e8eef7; opacity: 0.03;
   pointer-events: none; user-select: none; white-space: nowrap;
-  text-shadow: 0 0 8px rgba(0, 0, 0, 0.55);
+  text-shadow: 0 0 8px rgwaterba(0, 0, 0, 0.55);
 }
 /* 大屏标题栏：固定顶部正中（冻结纯装饰层，pointer-events:none 不拦截画布交互） */
 .constel-titlebar {
@@ -547,6 +547,21 @@
     /* 左侧标签与副标题同色、常规字重（仅数值保留白色加粗） */
     .cd-item span { font-size: var(--cd-fs); color: #8ea4c4; font-weight: 400; }
     .cd-item b { font-size: var(--cd-fs); }
+  }
+  /* 威胁事件详情：尺寸收窄并浮动在三维交会点右下方（left/top 由 index.vue 逐帧投影直写） */
+  &.detail-eph-ev {
+    position: fixed; top: auto; right: auto; width: 244px; max-width: calc(100% - 16px);
+    max-height: 58vh; padding: 10px 12px; border-radius: 12px;
+    .cd-head { padding-bottom: 8px; margin-bottom: 8px;
+      .cd-name { font-size: 12px; font-weight: 800; line-height: 1.4; }
+    }
+    .cd-block { margin-bottom: 6px; padding: 6px 8px 0; }
+    .cd-title { font-size: 11px; margin-bottom: 4px; }
+    .cd-grid.is-inline { gap: 1px; .cd-item { padding: 1px 6px; } }
+    /* 信息值与标签同字号（11px），数值保留白色加粗 */
+    .cd-item span, .cd-item b { font-size: 11px; }
+    .cd-norad { font-size: 9.5px; }
+    .cd-eph-btn { height: 28px; margin: 2px 0 0; font-size: 11px; }
   }
   /* 上栏：卫星过境列表（按最大仰角降序，限高内部滚动，下栏参数始终可见） */
   .pass-list { list-style: none; margin: 0; padding: 0;

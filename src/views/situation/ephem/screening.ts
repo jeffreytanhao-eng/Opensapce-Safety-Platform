@@ -77,6 +77,11 @@ export function elementsFromRV(r: Vec3, v: Vec3): { a: number; e: number; i: num
   return { a, e, i: (Math.acos(cosi) * 180) / Math.PI }
 }
 
+/** 名称归一化：忽略大小写与多余空白，用于「同名即本星」判断 */
+function normName(s: string): string {
+  return String(s || '').trim().toUpperCase().replace(/\s+/g, ' ')
+}
+
 /**
  * 二体开普勒轨道（近焦点系基 + 历元平近点角）。
  * 一次构建、反复按任意时间差求位置速度，避免逐步数值积分累积误差。
@@ -245,12 +250,14 @@ export function screenEphemeris(
   const regime = regimeOf(selfEl.a)
   const catalogT = opt.catalogT ?? opt.t0
 
-  // 1) 预过滤 + 轨道预构建
+  // 目录里的同一目标即本星自身，不算交会。
+  // 星历里的编号可能是生产编号（如 STARLINK-38128 的样例 NORAD 不是编目号），
+  // 只比 NORAD 会漏掉自身，因此 NORAD 相同或名称相同都排除。
+  const selfName = normName(self.name)
   const orbs: Orbit[] = []
   const kept: CatalogSnapshotEntry[] = []
   for (const c of catalog) {
-    // 目录里的同一目标即本星自身，不算交会
-    if (c.norad === self.norad) continue
+    if (c.norad === self.norad || (selfName !== '' && normName(c.name) === selfName)) continue
     const el = Number.isFinite(c.a) && Number.isFinite(c.i) ? c : elementsFromRV(c.r, c.v)
     if (!(Math.abs(el.a - selfEl.a) < FILTER_A_KM)) continue
     if (!(Math.abs(el.i - selfEl.i) < FILTER_I_DEG)) continue
