@@ -48,9 +48,9 @@ export type AiAction =
   /** 定位并选中某个发射场（按 launch_site.id）；前端打开发射站面板、高亮该站并把镜头带过去。
    *  name 为发射站展示名（可选，仅用于对话轨迹文案）。 */
   | { kind: 'select_site'; siteId: number; name?: string }
-  /** 定位到某条接近 / 交会事件（按事件 id + 来源），前端打开碰撞热力面板、切换到对应来源并选中该事件
-   *  （镜头与轨道线定位到这对卫星的交会点）。
-   *  source：'local' 本项目 SGP4 初筛（sat_conjunction）/ 'cri' 交会分析（sat_cri_conjunction）；
+  /** 定位到某条接近 / 交会事件（按事件 id + 来源），前端打开安全热力面板并选中该事件
+   *  （镜头与轨道线定位到这对卫星的交会点）；不切换热力标签（热力已收敛为三源）。
+   *  source：'conj' 本项目 SGP4 初筛（sat_conjunction）/ 'cri' 交会分析（sat_cri_conjunction）；
    *  key 为事件主键 id（字符串形式，取自工具结果，禁模型改写）；data 可携带 norad_a/norad_b/tca 直接定位
    *  （缺省时前端再按 id 查 /cgi/event/one 补全）。 */
   | { kind: 'select_conj_event'; source: string; key: string; data?: { norad_a?: number; norad_b?: number; tca?: string } }
@@ -499,12 +499,12 @@ export const TOOL_LABEL: Record<string, string> = {
   get_region_passes: '区域过境批次',
   get_joint_runs: '联合分析批次',
   get_multi_region_scans: '多区域过境批次',
-  get_satellite_profile: '卫星全量档案',
+  get_satellite_profile: '卫星档案',
   get_kg_neighbors: '知识图谱关联',
   get_kg_overview: '知识图谱总览',
   get_kg_search: '知识图谱搜索',
   get_kg_sample: '知识图谱类型抽样',
-  get_constellation_members: '星座成员',
+  get_constellation_members: '星座档案',
   list_owner_satellites: '国家/机构卫星清单',
   get_upcoming_launches: '即将发射计划',
   web_search: '联网检索（外部信息）',

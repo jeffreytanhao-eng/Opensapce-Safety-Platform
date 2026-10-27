@@ -8,12 +8,13 @@
  * - 同时给出 TLE 历元与星历起点的时差，供面板提示参考性
  *   （TLE 越旧，偏差里 TLE 自身误差占比越高）。
  *
- * 注意：satellite.js 输出为 TEME，本项目星历按其自身 ECI 直接使用；
- * 两者存在岁差级的坐标系差异（横向几十 km 量级），故本指标只作量级参考，
- * 不参与总分（见 EphemPanel 的说明文案）。
+ * 注意：satellite.js 输出为 TEME，星历为 J2000（EME2000/ICRF）系；
+ * 两者相差岁差 + 章动（2020s 位置差 8~45 km 量级），故这里先把 SGP4 结果
+ * 转 J2000 再求差，避免把坐标系偏差误判成轨道偏差。
  */
 import { twoline2satrec, propagate } from 'satellite.js'
 import type { EphemSet } from './types'
+import { temeToJ2000 } from './frames'
 
 export interface TleDeviationPoint {
   /** Unix ms */
@@ -92,10 +93,15 @@ export function compareWithTle(set: EphemSet, line1: string, line2: string): Tle
     const v = pv?.velocity
     if (!p || !v) continue
     if (typeof p === 'boolean' || typeof v === 'boolean') continue
-    const px = p.x
-    const py = p.y
-    const pz = p.z
-    if (![px, py, pz, v.x, v.y, v.z].every((n) => Number.isFinite(n))) continue
+    if (![p.x, p.y, p.z, v.x, v.y, v.z].every((n) => Number.isFinite(n))) continue
+    // TEME → J2000：与星历同系后再比较（只旋转，不改变 RTN 分解的物理含义）
+    const j = temeToJ2000([p.x, p.y, p.z], [v.x, v.y, v.z], s.t)
+    const px = j.r[0]
+    const py = j.r[1]
+    const pz = j.r[2]
+    const vx = j.v[0]
+    const vy = j.v[1]
+    const vz = j.v[2]
 
     const dx = s.r[0] - px
     const dy = s.r[1] - py
@@ -109,9 +115,9 @@ export function compareWithTle(set: EphemSet, line1: string, line2: string): Tle
     const ux = px / rn
     const uy = py / rn
     const uz = pz / rn
-    const hx = py * v.z - pz * v.y
-    const hy = pz * v.x - px * v.z
-    const hz = px * v.y - py * v.x
+    const hx = py * vz - pz * vy
+    const hy = pz * vx - px * vz
+    const hz = px * vy - py * vx
     const hn = Math.hypot(hx, hy, hz)
     if (!(hn > 1e-9)) continue
     const wx = hx / hn

@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vue-tsc -b && vite build",
+    "test": "vitest run",
     "preview": "vite preview",
     "dev:web": "vite",
     "dev:server": "npm --prefix server run dev",
@@ -36,6 +37,7 @@
     "unplugin-vue-components": "^32.1.0",
     "vite": "^6.0.5",
     "vite-plugin-compression": "^0.5.1",
+    "vitest": "^5.0.5",
     "vue-tsc": "^2.2.0"
   },
   "description": "面向空间安全场景的一体化演示与研究平台：三维全球态势底座 + 碰撞预警 / 过境分析 / 区域评估 / 报告生成 / AI 智能体问答等能力。",

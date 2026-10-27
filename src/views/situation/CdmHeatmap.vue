@@ -1,39 +1,46 @@
 <script setup lang="ts">
 /**
- * 星座总览 /situation 碰撞热力面板（左侧滑出）
- * 负责热力模式的 UI：当前来源 + 数据批次 + 配色图例。
- * 热力标记本体由 BaseScene.vue 在 heatMode 下渲染（交会热力 / 交会分析热力做网格宏观聚合、CDM 热力逐事件柔光云；
- * 点选事件展示两星轨道），
- * 本组件只读写共享 store（heatSource / heatLegend / heatHiddenColors / heatList / heatBatchRunId / heatBatches）
- * 驱动标记重建与右侧事件详情：图例、指标名均由后端下发，前端只渲染不换算；图例可勾选显隐对应档位的事件。
- * 纯动作（关闭面板）通过 emit 交给父组件 index.vue 编排。
+ * 星座总览 /situation 安全热力面板（03 §11 布局）
+ *
+ * 面板只保留：两个标签、数据时效、时间窗（24h/3d/7d）、按天柱、等级芯片、事件列表 + 搜索。
+ * 已删除：高度层、指标、阈值滑杆、聚合格边、数据批次、日期区间、底部红字。
+ *
+ * 两个标签共用同一套 Pc 分级（heat/riskLevels.ts，档位可由 /cgi2/meta 覆盖）：
+ *  - 卫星轨道威胁事件：TLE×TLE 初筛，heat-sidecar 的 /cgi2/heat/*（核心未就绪时显示灰色空状态卡）；
+ *  - 卫星轨道威胁事件（星历增强）：精密星历×TLE，同一算法，协方差更紧。
+ * 计数、柱状图、芯片计数全部取自当前来源；未就绪时统一显示 "—"，避免串用上一个标签的旧数字。
  */
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import {
   HEAT_SOURCES, heatSource,
-  heatList, heatLegend, heatHiddenColors, heatMetricLabel,
-  heatLoading, heatError, dockMode,
-  heatBatchRunId, heatBatches, heatFocusNorad, fmtNum,
-  heatDays, heatDay, heatDayGroups, heatFiltered,
-  heatAltBand, heatMetric, heatRiskFloor, heatPcFloor, heatMissCeil,
-  heatCell, HEAT_CELL_OPTIONS, HEAT_RISK_BANDS,
-  heatEphStatus, heatBandColor,
+  heatList, heatHiddenColors, heatLoading,
+  heatStatus, heatUnavailableReason, heatPrimaryFilter,
+  dockMode, heatFocusNorad, fmtNum,
+  heatDays, heatDay, heatDayGroups,
   drawerHeightVh, isDrawerDragging, useDrawerDrag,
   type HeatSource
 } from './scene'
-import { listThreatEventRows } from './ephem/store'
-import type { ThreatEvent } from './ephem/types'
+import { levelOfPc, type HeatLevel } from './heat/riskLevels'
+import { colorForLevel, labelForLevel, loadHeatLevels } from './heat/levels'
+import HeatLevelChips from './heat/HeatLevelChips.vue'
 import { useDevice } from '@/composables/useDevice'
-import { listConjPublic, listCdmPublic, listCriPublic } from '@/api/sat_public'
-import type { ConjEvent, CdmListItem, CriListItem, CdmHeatEvent, HeatLegendItem } from '@/api/sat_public'
+import {
+  getHeat2SyncStatus, listHeat2,
+  type Heat2ListItem, type Heat2SyncStatus
+} from '@/api/heat2'
+import { ephemLabel } from './ephem/useUserEphemeris'
+import { focusThreat, threatFocus } from './threatLink'
 import { useDelayed } from '@/composables/useDelayed'
+import HeatEmptyState from './HeatEmptyState.vue'
 
 const emit = defineEmits<{
   (e: 'close'): void
-  /** 点击「本批次交会数据」某一对：上报其 norad 对 + TCA，由父组件让 BaseScene 绘制 2 条轨道 + 目标模型 */
+  /** 点击列表某一对：上报其 norad 对 + TCA，由父组件让 BaseScene 绘制 2 条轨道 + 目标模型 */
   (e: 'select', pair: { norad_a: number; norad_b: number; tca: string }): void
-  /** 点击「我的星历」页签里的事件：父组件激活对应星历并选中该威胁事件 */
-  (e: 'pick-ephem', payload: { setId: string; event: ThreatEvent }): void
+  /** 请求父组件打开星历分析窗并聚焦该主星（03 §15.5） */
+  (e: 'open-ephem', payload: { norad: number; name: string }): void
+  /** 服务不可用时点「重试」：父组件清掉 sidecar 健康缓存并重新拉取（03 §11.5） */
+  (e: 'retry'): void
 }>()
 
 /** 移动端底部抽屉拖拽手势（PC 无 touch 事件，不影响） */
@@ -42,177 +49,219 @@ const { onTouchStart: onDragStart, onTouchMove: onDragMove, onTouchEnd: onDragEn
 /** 智能体联动：open_panel(heat, selectFirst=true) 打开面板后，外部通过 autoSelectTick 递增触发「自动选中第一条」 */
 const props = withDefaults(defineProps<{ autoSelectTick?: number }>(), { autoSelectTick: 0 })
 
-/** 移动端判定（虚拟滚动仅桌面端启用，移动端沿用抽屉整体滚动） */
+/** 移动端判定（虚拟滚动仅桌面端启用） */
 const { isMobile } = useDevice()
 
 /* ============================================================
- * P3 热力筛选：时间窗（heatDays）/ 高度层 / 指标阈值 / 按天柱状图
- *  - 时间窗直接改 heatDays，BaseScene 已有 watch(heatDays) → loadHeat 重新拉取；
- *  - 高度层与指标阈值只过滤 heatFiltered（前端运算，不请求后端）；
- *  - 柱状图数据来自后端 day_groups（仅时间窗 > 0 时下发），点击可切到该天。
+ * 等级档位：与星历分析窗共用 heat/levels.ts（/cgi2/meta 覆盖文案与颜色）
  * ============================================================ */
-/** 时间窗快捷档（天）：0 = 全部（后端既有口径） */
-const DAY_OPTIONS = [
-  { v: 0, label: '全部' }, { v: 1, label: '24h' }, { v: 3, label: '3d' },
-  { v: 7, label: '7d' }, { v: 30, label: '30d' }
-]
-/** 星历热力是本机前向联算（无历史事件可回看），时间窗只保留 24h / 3d 两档 */
-const dayOptions = computed(() => heatSource.value === 'eph-aoe'
-  ? [{ v: 1, label: '24h' }, { v: 3, label: '3d' }]
-  : DAY_OPTIONS)
-const ALT_OPTIONS = [
-  { v: 'all', label: '全部' }, { v: 'leo', label: 'LEO' },
-  { v: 'meo', label: 'MEO' }, { v: 'geo', label: 'GEO+' }
-] as const
-const METRIC_OPTIONS = [
-  { v: 'risk', label: '综合风险' }, { v: 'pc', label: '碰撞概率' }, { v: 'miss', label: '最近距离' }
-] as const
 
-/** 官方 CDM 无 altitude 字段：选了高度层会把这些事件全部过滤掉，用于提示 */
-const altUnavailable = computed(() => heatSource.value === 'spacetrack' && heatAltBand.value !== 'all')
-
-/** 阈值滑杆（单位随指标切换）：risk 0~100%、pc 对数刻度 1e-8~1e-2、miss 0~100km */
-const sliderVal = computed({
-  get: () => {
-    if (heatMetric.value === 'pc') {
-      return heatPcFloor.value > 0 ? Math.round((Math.log10(heatPcFloor.value) + 8) / 6 * 100) : 0
-    }
-    if (heatMetric.value === 'miss') return Math.round(heatMissCeil.value)
-    return Math.round(heatRiskFloor.value * 100)
-  },
-  set: (v: number) => {
-    if (heatMetric.value === 'pc') heatPcFloor.value = v <= 0 ? 0 : 10 ** (-8 + (v / 100) * 6)
-    else if (heatMetric.value === 'miss') heatMissCeil.value = v
-    else heatRiskFloor.value = v / 100
-  }
-})
-
-const thresholdText = computed(() => {
-  if (heatMetric.value === 'pc') return heatPcFloor.value > 0 ? `≥ ${heatPcFloor.value.toExponential(1)}` : '不限'
-  if (heatMetric.value === 'miss') return `≤ ${Math.round(heatMissCeil.value)} km`
-  return `≥ ${Math.round(heatRiskFloor.value * 100)}%`
-})
-
-/** 柱状图只画有事件的天（后端按窗口补齐的 0 事件天不画，避免整排空柱） */
-const dayBars = computed(() => heatDayGroups.value.filter((d) => d.count > 0))
-/** 柱状图最高柱（用于按比例算高度，最小 1 避免除零） */
-const maxDayCount = computed(() => Math.max(1, ...dayBars.value.map((d) => d.count)))
-function barHeight(count: number) {
-  return `${Math.max(8, Math.round((count / maxDayCount.value) * 100))}%`
+/** 等级 → 颜色（按 meta 覆盖后的档位） */
+function colorFor(lv: HeatLevel | null): string {
+  return colorForLevel(lv)
 }
 
-/** 等级文案（与后台 /mui/sat_conj 一致） */
-const LEVEL_LABEL: Record<string, string> = { danger: '高危', warning: '警告', info: '关注' }
+/** 时间窗只保留 24h / 3d / 7d，默认 7d */
+const DAY_OPTIONS = [
+  { v: 1, label: '24h' }, { v: 3, label: '3d' }, { v: 7, label: '7d' }
+]
+const dayOptions = DAY_OPTIONS
 
-/** 图例行：官方 CDM 用后端下发的 Pc 配色；交会热力 / 交会分析热力改用前端 5 档风险色带
- *  （与 BaseScene 的 heatColorOf 同一口径，勾选隐藏的档位与三维配色一一对应）。 */
-const legendRows = computed<HeatLegendItem[]>(() => {
-  if (heatSource.value === 'spacetrack') return heatLegend.value
-  return HEAT_RISK_BANDS.map((b) => ({ color: b.color, label: b.label, thresh: b.thresh }))
+/* ============================================================
+ * 来源状态与计数（03 §11.5）
+ * ============================================================ */
+const status = computed(() => heatStatus[heatSource.value])
+const isUnavailable = computed(() => status.value === 'unavailable')
+const isReady = computed(() => status.value === 'ready' || status.value === 'empty')
+const countText = computed(() => (isReady.value ? `${heatList.value.length} 个事件` : '—'))
+const headSub = computed(() => {
+  const label = heatSource.value === 'tle-threat' ? 'TLE 初筛' : '星历增强'
+  return `${label} · 未来 ${heatDays.value} 天 · ${countText.value}`
 })
 
-/** 接近时刻 `YYYY-MM-DD HH:mm:ss` → `MM-DD HH:mm`（面板列窄，省略年份与秒） */
-function fmtTca(tca?: string) {
-  if (!tca) return '—'
-  const m = String(tca).match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/)
-  return m ? `${m[2]}-${m[3]} ${m[4]}:${m[5]}` : String(tca)
+/** 每个来源一个就绪圆点（绿 = 就绪，灰 = 加载中 / 不可用） */
+function srcDot(k: HeatSource): string {
+  const s = heatStatus[k]
+  if (s === 'ready' || s === 'empty') return '#4fd18b'
+  if (s === 'loading') return '#f2c14e'
+  return '#5d6b80'
+}
+function srcTitle(k: HeatSource): string {
+  const s = heatStatus[k]
+  if (s === 'ready' || s === 'empty') return '该来源已就绪'
+  if (s === 'loading') return '正在加载'
+  if (s === 'unavailable') return '服务未就绪'
+  return '尚未加载'
 }
 
 /* ============================================================
- * 交会数据列表（三种来源共用同一套渲染与交互）
- *  - 交会热力（local）：走前台免登录 /cgi/sat_conj/list，取「总交会库」当前批次的接近事件明细
- *    （含「关注 info」，不限于热力图的 danger/warning），检索条件与后台 /mui/sat_conj 一致；
- *  - 交会分析热力（cri）：走前台免登录 /cgi/sat_cri/list，取交会分析库（CRI/CRP 模型）当前批次的
- *    交会事件明细，同为批次口径（支持批次回看），color / 风险文案由后端按 CRP 五级下发；
- *  - CDM 热力（spacetrack）：走前台免登录 /cgi/sat_cdm/list，取 sat_cdm 库表明细（Pc>0，已在后端按
- *    「NORAD 对 + TCA」去重，同一交会的多条官方报文只留概率最高的一条），按碰撞概率降序；
- *    检索条件为关键词 + TCA 日期范围（CDM 无等级档，故等级下拉仅 local / cri 展示）。
- * 三种来源先归一化为 ListRow 再渲染：点击某一行上报其 NORAD 对 + TCA，
- * 由父组件让 BaseScene 绘制 2 条轨道 + TCA 目标模型（与点选热力云同一动作）。
+ * 按天柱状图：固定 7 天（后端按窗口补齐 0 事件天），点击筛选当天，再点取消
  * ============================================================ */
-/** 列表行（抹平三种来源的字段差异；color / label 均由后端按各自口径算好） */
+const dayBars = computed(() => heatDayGroups.value)
+const maxDayCount = computed(() => Math.max(1, ...dayBars.value.map((d) => d.count)))
+function barHeight(count: number) {
+  if (!count) return '3px'
+  return `${Math.max(8, Math.round((count / maxDayCount.value) * 100))}%`
+}
+function toggleDay(day: number) {
+  heatDay.value = heatDay.value === day ? -1 : day
+}
+
+/* ============================================================
+ * 等级芯片：图例 + 显隐 + 计数（两个标签共用，含「数据不足」）
+ * ============================================================ */
+const levelCounts = computed<Record<HeatLevel, number>>(() => {
+  const out: Record<HeatLevel, number> = { red: 0, orange: 0, yellow: 0, insufficient: 0 }
+  if (!isReady.value) return out
+  for (const e of heatList.value) {
+    const lv = levelOfPc(e.collision_probability, e.pc_max)
+    if (lv) out[lv] += 1
+  }
+  return out
+})
+/** 已隐藏档位的配色（传给 HeatLevelChips 做置灰） */
+const offColors = computed(() => [...heatHiddenColors])
+function toggleChip(lv: HeatLevel) {
+  const c = colorFor(lv)
+  if (heatHiddenColors.has(c)) heatHiddenColors.delete(c)
+  else heatHiddenColors.add(c)
+}
+
+/* ============================================================
+ * 数据时效条：一行摘要 + 展开明细（/cgi2/sync/status）
+ * ============================================================ */
+const freshOpen = ref(false)
+const freshList = ref<Heat2SyncStatus[]>([])
+const freshDown = ref(false)
+const freshLoading = ref(false)
+
+/** 后端 UTC 'YYYY-MM-DD HH:mm:ss' → UTC+8 'MM-DD HH:mm' */
+function fmtBj(utc?: string | null): string {
+  if (!utc) return '—'
+  const ms = Date.parse(`${String(utc).replace(' ', 'T')}Z`)
+  if (!Number.isFinite(ms)) return String(utc)
+  const d = new Date(ms + 8 * 3600_000)
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())} ${p(d.getUTCHours())}:${p(d.getUTCMinutes())}`
+}
+
+const STATE_COLOR: Record<string, string> = { ok: '#4fd18b', stale: '#f2c14e', error: '#e8453c', skipped: '#93a4bd' }
+const STATE_LABEL: Record<string, string> = { ok: '正常', stale: '待更新', error: '失败', skipped: '未配置' }
+
+function srcOf(source: string): Heat2SyncStatus | undefined {
+  return freshList.value.find((s) => s.source === source)
+}
+
+/** 当前标签对应的主数据源：左签看 TLE 同步时效，右签看星历生成时效 */
+const primaryFreshKey = computed(() => (heatSource.value === 'tle-threat' ? 'gp' : 'eph'))
+const primaryFresh = computed(() => srcOf(primaryFreshKey.value))
+
+/** 一行摘要：TLE 同步 … · 每 N 小时；星历生成 … · 每 48 小时 */
+const freshLine = computed(() => {
+  if (freshDown.value) return '服务未连接'
+  const key = primaryFreshKey.value
+  const s = srcOf(key)
+  if (!s) return '读取中…'
+  const bits = key === 'gp'
+    ? [`TLE 同步 ${fmtBj(s.last_success_at)}（UTC+8）`]
+    : [`星历生成 ${fmtBj(s.generated_at ?? s.last_success_at)}（UTC+8）`]
+  if (s.rows) bits.push(`${s.rows} 份`)
+  bits.push(s.interval_hours ? `每 ${s.interval_hours} 小时` : '每 2 天')
+  return bits.join(' · ')
+})
+
+const freshRows = computed(() => {
+  const out: { label: string; text: string; color: string }[] = []
+  const eph = srcOf('eph')
+  if (eph) {
+    out.push({
+      label: '精密星历',
+      color: STATE_COLOR[eph.state] ?? '#93a4bd',
+      text: eph.rows ? `${eph.rows} 份 · 生成 ${fmtBj(eph.generated_at)}（UTC+8）` : '无星历文件'
+    })
+  }
+  const gp = srcOf('gp')
+  if (gp) {
+    const bits: string[] = []
+    if (gp.median_age_hours != null) bits.push(`龄期中位 ${gp.median_age_hours.toFixed(1)} h`)
+    if (gp.last_success_at) bits.push(`同步 ${fmtBj(gp.last_success_at)}`)
+    bits.push(STATE_LABEL[gp.state] ?? gp.state)
+    out.push({ label: 'TLE 根数', color: STATE_COLOR[gp.state] ?? '#93a4bd', text: bits.join(' · ') })
+  }
+  return out
+})
+
+async function loadFresh() {
+  freshLoading.value = true
+  try {
+    const res = await getHeat2SyncStatus()
+    freshList.value = res.list || []
+    freshDown.value = false
+  } catch {
+    freshDown.value = true
+    freshList.value = []
+  } finally {
+    freshLoading.value = false
+  }
+}
+
+/* ============================================================
+ * 事件列表（三个标签共用）
+ * ============================================================ */
 interface ListRow {
   key: string
+  id?: number | string
   norad_a: number
   norad_b: number
   tca: string
   name_a: string
   name_b: string
-  /** 最近距离（km） */
-  dist: number
-  /** 风险点配色（local = 等级档；CDM = 碰撞概率分档；cri = CRP 五级，均由后端算好，与热力云同一套阈值） */
+  miss: number
+  pc: number
+  level: HeatLevel | null
   color: string
-  /** 风险文案（local = 高危/警告/关注；CDM = 碰撞概率；cri = CRP 五级文案） */
-  label: string
 }
 
-/** 等级档 → 颜色（danger/warning 与热力图图例一致；info 为列表专有的「关注」档） */
-const LEVEL_COLOR: Record<string, string> = { danger: '#ff6b6b', warning: '#ffb454', info: '#93a4bd' }
-
-function toLocalRow(r: ConjEvent): ListRow {
+function toRow(r: {
+  id?: number | string
+  norad_a: number; norad_b: number; tca: string
+  name_a: string; name_b: string; miss: number; pc: number; pcMax?: number
+}): ListRow {
+  const lv = levelOfPc(r.pc, r.pcMax)
   return {
     key: `${r.norad_a}-${r.norad_b}-${r.tca}`,
-    norad_a: r.norad_a, norad_b: r.norad_b, tca: r.tca,
-    name_a: r.name_a || `NORAD ${r.norad_a}`,
-    name_b: r.name_b || `NORAD ${r.norad_b}`,
-    dist: r.min_distance,
-    color: LEVEL_COLOR[r.level] || '#93a4bd',
-    label: LEVEL_LABEL[r.level] || r.level || '—'
-  }
-}
-
-function toCdmRow(r: CdmListItem): ListRow {
-  return {
-    key: `${r.norad_a}-${r.norad_b}-${r.tca}`,
-    norad_a: r.norad_a, norad_b: r.norad_b, tca: r.tca,
-    name_a: r.name_a || `NORAD ${r.norad_a}`,
-    name_b: r.name_b || `NORAD ${r.norad_b}`,
-    dist: r.miss_distance_km,
-    color: r.color || '#93a4bd',
-    label: r.metric_text || '—'
-  }
-}
-
-function toCriRow(r: CriListItem): ListRow {
-  return {
-    key: `${r.norad_a}-${r.norad_b}-${r.tca}`,
-    norad_a: r.norad_a, norad_b: r.norad_b, tca: r.tca,
-    name_a: r.name_a || `NORAD ${r.norad_a}`,
-    name_b: r.name_b || `NORAD ${r.norad_b}`,
-    dist: r.min_distance,
-    color: r.color || '#93a4bd',
-    label: r.metric_text || '—'
-  }
-}
-
-/** 星历热力（本机联算）：列表直接取自 heatList（BaseScene 已把联算结果转成热力事件），
- *  与三维热力云同一份数据，避免再向后端请求一次。 */
-function toAoeRow(r: CdmHeatEvent): ListRow {
-  return {
-    key: `${r.norad_a}-${r.norad_b}-${r.tca}`,
-    norad_a: r.norad_a, norad_b: r.norad_b,
+    id: r.id,
+    norad_a: r.norad_a,
+    norad_b: r.norad_b,
     tca: r.tca,
     name_a: r.name_a || `NORAD ${r.norad_a}`,
     name_b: r.name_b || `NORAD ${r.norad_b}`,
-    dist: r.miss_distance_km,
-    color: heatBandColor(r.risk),
-    label: `${r.level === 'high' ? '高危' : r.level === 'medium' ? '警告' : '关注'} · Pc ${r.collision_probability > 0 ? r.collision_probability.toExponential(1) : '0'}`
+    miss: r.miss,
+    pc: r.pc,
+    level: lv,
+    color: colorFor(lv)
   }
+}
+
+function toHeat2Row(r: Heat2ListItem): ListRow {
+  return toRow({
+    id: r.id,
+    norad_a: r.norad_a, norad_b: r.norad_b, tca: r.tca,
+    name_a: r.name_a, name_b: r.name_b,
+    miss: r.miss_distance_km, pc: r.collision_probability, pcMax: r.pc_max
+  })
 }
 
 const rows = ref<ListRow[]>([])
 const total = ref(0)
 const listLoading = ref(false)
-/** 列表是分页查询，正常毫秒级返回：默认不显示「加载中」，超过 1.5s 才出现兜底提示 */
 const listLoadingHint = useDelayed(listLoading)
 const listError = ref('')
-const query = reactive({ page: 1, pageSize: 20, keyword: '', level: '', dateFrom: '', dateTo: '' })
+const query = reactive({ page: 1, pageSize: 20, keyword: '', level: '' })
 const maxPage = computed(() => Math.max(1, Math.ceil(total.value / query.pageSize)))
 
-/* ---- 列表虚拟滚动（P3） ----
- * 后端单页上限 200 行（pageSize=500 也只返回 200），大页全量渲染会拖慢面板滚动；
- * 超过 120 行时只渲染视口附近的行，上下用占位块撑起滚动高度，DOM 节点数恒定在 ~20。 */
-const ROW_H = 62               // .hc-item 高度 58px + margin-bottom 4px
+/* ---- 列表虚拟滚动（大页全量渲染会拖慢面板滚动） ---- */
+const ROW_H = 62
 const VIRT_TRIGGER = 120
 const listEl = ref<HTMLElement | null>(null)
 const listScrollTop = ref(0)
@@ -231,230 +280,131 @@ function onListScroll() {
   listScrollTop.value = el.scrollTop
   listViewH.value = el.clientHeight
 }
-/** 翻页 / 改每页条数时回到列表顶部（避免沿用上一页的滚动位置导致空白） */
 function resetListScroll() {
   listScrollTop.value = 0
   if (listEl.value) listEl.value.scrollTop = 0
 }
 
-/** 列表标题：按来源区分口径（local / cri = 各自库当前批次明细；CDM = 官方 CDM 库表明细） */
-const listTitle = computed(() => ephTab.value
-  ? '我的星历事件（本机）'
-  : heatSource.value === 'local' ? '本批次交会数据'
-    : heatSource.value === 'cri' ? '交会分析数据'
-      : heatSource.value === 'eph-aoe' ? '星历热力事件（本机联算）'
-        : 'CDM 交会数据')
-
-/** 拉取当前来源的交会明细：local = 当前批次（heatBatchRunId 指定 / 后端默认最近全量批次），
- *  cri = 交会分析库当前批次（同样支持批次回看），CDM = sat_cdm 库表全量明细；关键词与日期范围口径一致。 */
-async function loadList() {
-  if (ephTab.value) {
-    await loadEphList()
-    return
-  }
-  // 星历热力：列表就是当前 heatList（联算结果），在前端按关键词 / 等级 / 日期筛选
-  if (heatSource.value === 'eph-aoe') {
-    const kw = query.keyword.trim().toLowerCase()
-    const from = query.dateFrom ? new Date(`${query.dateFrom}T00:00:00`).getTime() : -Infinity
-    const to = query.dateTo ? new Date(`${query.dateTo}T23:59:59`).getTime() : Infinity
-    const lvl = query.level === 'danger' ? 'high' : query.level === 'warning' ? 'medium' : query.level === 'info' ? 'low' : ''
-    const out: ListRow[] = []
-    for (const ev of heatList.value) {
-      if (lvl && ev.level !== lvl) continue
-      const tcaMs = new Date(ev.tca).getTime()
-      if (tcaMs < from || tcaMs > to) continue
-      if (kw && !`${ev.name_a} ${ev.name_b} ${ev.norad_a} ${ev.norad_b}`.toLowerCase().includes(kw)) continue
-      out.push(toAoeRow(ev))
-    }
-    rows.value = out
-    total.value = out.length
-    loadedOnce.value = true
-    tryAutoSelectFirst()
-    return
-  }
-  listLoading.value = true
-  listError.value = ''
-  try {
-    // 日期选择器为「日」粒度：起止各补足一天边界，避免当天事件被漏掉
-    const base = {
-      page: query.page,
-      pageSize: query.pageSize,
-      keyword: query.keyword.trim() || undefined,
-      dateFrom: query.dateFrom ? `${query.dateFrom} 00:00:00` : undefined,
-      dateTo: query.dateTo ? `${query.dateTo} 23:59:59` : undefined
-    }
-    if (heatSource.value === 'local') {
-      const res = await listConjPublic({
-        ...base,
-        level: query.level || undefined,
-        run_id: heatBatchRunId.value ?? undefined
-      })
-      rows.value = res.list.map(toLocalRow)
-      total.value = res.total
-    } else if (heatSource.value === 'cri') {
-      const res = await listCriPublic({
-        ...base,
-        level: query.level || undefined,
-        run_id: heatBatchRunId.value ?? undefined
-      })
-      rows.value = res.list.map(toCriRow)
-      total.value = res.total
-    } else {
-      const res = await listCdmPublic(base)
-      rows.value = res.list.map(toCdmRow)
-      total.value = res.total
-    }
-  } catch (e) {
-    listError.value = (e as Error)?.message || '交会数据加载失败'
-    rows.value = []
-    total.value = 0
-  } finally {
-    listLoading.value = false
-    loadedOnce.value = true
-    tryAutoSelectFirst()
-  }
-}
-
-/* ============================================================
- * 「我的星历」页签：读取本机 IndexedDB 里保存的筛选结果
- *  - 不改变 heatSource（三维热力仍按后端来源绘制），只替换下方列表数据；
- *  - 行点击上报 setId + 事件，由父组件激活星历并选中该威胁事件。
- * ============================================================ */
-const ephTab = ref(false)
-/** 本机保存的事件总数（不随关键词/日期筛选变化，用于头部计数） */
-const ephCount = ref(0)
-/** 行 key → 事件来源（列表行抹平了字段，点击时需要原始事件） */
-const ephPicks = new Map<string, { setId: string; event: ThreatEvent }>()
-const EPH_LEVEL: Record<ThreatEvent['level'], { label: string; color: string }> = {
-  high: { label: '高危', color: '#ff6b6b' },
-  medium: { label: '警告', color: '#ffb454' },
-  low: { label: '关注', color: '#7fb0ff' }
-}
-
-/** unix ms → `YYYY-MM-DD HH:mm:ss`（与后端 TCA 字符串同格式，复用 fmtTca 渲染） */
-function utcText(ms: number) {
+/** Unix ms → 'YYYY-MM-DD HH:mm:ss'(UTC)，用作列表接口的时间窗参数 */
+function utcParam(ms: number): string {
   const d = new Date(ms)
-  if (Number.isNaN(d.getTime())) return ''
-  return d.toISOString().slice(0, 19).replace('T', ' ')
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())} `
+    + `${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())}`
 }
 
-/** 读取并归一化本机星历事件（关键词 / 日期 / 等级筛选与后端列表同口径） */
-async function loadEphList() {
-  listLoading.value = true
-  listError.value = ''
-  ephPicks.clear()
-  try {
-    const sets = await listThreatEventRows()
-    const kw = query.keyword.trim().toLowerCase()
-    const from = query.dateFrom ? new Date(`${query.dateFrom}T00:00:00`).getTime() : -Infinity
-    const to = query.dateTo ? new Date(`${query.dateTo}T23:59:59`).getTime() : Infinity
-    const lvl = query.level === 'danger' ? 'high' : query.level === 'warning' ? 'medium' : query.level === 'info' ? 'low' : ''
-    const out: ListRow[] = []
-    let count = 0
-    for (const s of sets) {
-      const nameA = s.selfName || `NORAD ${s.selfNorad}`
-      for (const ev of s.events) {
-        count++
-        if (lvl && ev.level !== lvl) continue
-        if (ev.tca < from || ev.tca > to) continue
-        const nameB = ev.otherName || `NORAD ${ev.otherNorad}`
-        if (kw && !`${nameA} ${nameB} ${ev.otherNorad}`.toLowerCase().includes(kw)) continue
-        const lv = EPH_LEVEL[ev.level] || EPH_LEVEL.low
-        const key = `eph-${s.setId}-${ev.otherNorad}-${ev.tca}`
-        ephPicks.set(key, { setId: s.setId, event: ev })
-        out.push({
-          key,
-          norad_a: ev.selfNorad,
-          norad_b: ev.otherNorad,
-          tca: utcText(ev.tca),
-          name_a: nameA,
-          name_b: nameB,
-          dist: ev.missKm,
-          color: lv.color,
-          label: `${lv.label} · Pc ${ev.pc > 0 ? ev.pc.toExponential(1) : '0'}`
-        })
-      }
-    }
-    out.sort((a, b) => a.tca.localeCompare(b.tca))
-    rows.value = out
-    total.value = out.length
-    ephCount.value = count
-    loadedOnce.value = true
-  } catch (e) {
-    listError.value = (e as Error)?.message || '读取本机星历事件失败'
+/** TCA 统一解析：兼容 'YYYY-MM-DD HH:mm:ss'(UTC) 与 ISO 'YYYY-MM-DDTHH:mm:ss.sssZ' */
+function parseTcaMs(tca?: string): number {
+  if (!tca) return NaN
+  const s = String(tca).trim()
+  const ms = Date.parse(/^\d{4}-\d{2}-\d{2}T/.test(s) ? s : `${s.replace(' ', 'T')}Z`)
+  return Number.isFinite(ms) ? ms : NaN
+}
+
+/** TCA 'YYYY-MM-DD HH:mm:ss'(UTC) → Unix ms（联动机型匹配用） */
+function tcaMsOf(tca?: string): number {
+  return parseTcaMs(tca)
+}
+
+/** TCA → 'MM-DD HH:mm'（北京时间） */
+function fmtTca(tca?: string) {
+  if (!tca) return '—'
+  const ms = parseTcaMs(tca)
+  if (!Number.isFinite(ms)) return String(tca)
+  const d = new Date(ms + 8 * 3600_000)
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())} ${p(d.getUTCHours())}:${p(d.getUTCMinutes())}`
+}
+
+async function loadList() {
+  if (isUnavailable.value) {
     rows.value = []
     total.value = 0
-    ephCount.value = 0
+    return
+  }
+  listLoading.value = true
+  listError.value = ''
+  try {
+    const keyword = query.keyword.trim() || undefined
+    // 与热力云同一时间窗（未来 N 天），否则标题计数 / 芯片计数会和列表条数对不上
+    const nowMs = Date.now()
+    const dateFrom = utcParam(nowMs)
+    const dateTo = utcParam(nowMs + heatDays.value * 86400_000)
+    {
+      // 两个标签共用同一份 sidecar 事件明细；TLE×TLE 初筛没有「主星星历」概念，固定 official
+      const p = heatPrimaryFilter.value
+      const res = await listHeat2({
+        kind: heatSource.value === 'tle-threat' ? 'tle-threat' : 'tle',
+        keyword,
+        level: query.level || undefined,
+        dateFrom,
+        dateTo,
+        primary: heatSource.value === 'tle-threat'
+          ? 'official'
+          : p.kind === 'uploaded' ? `ephem:${p.ephemId}` : 'official'
+      })
+      rows.value = res.list.map(toHeat2Row)
+      total.value = res.total
+    }
+    // 星历窗联动：命中同一对 + 同一 TCA 时高亮该行
+    const fp = focusPair.value
+    if (fp) {
+      const hit = rows.value.find((r) => r.norad_a === fp.a && r.norad_b === fp.b
+        && Math.abs(tcaMsOf(r.tca) - fp.tcaMs) < 1000)
+      if (hit) pickedKey.value = hit.key
+    }
+  } catch {
+    rows.value = []
+    total.value = 0
   } finally {
     listLoading.value = false
+    loadedOnce.value = true
+    tryAutoSelectFirst()
   }
 }
 
-/** 星历热力的有效时间窗：heatDays 落在 0/7/30 等档位时按 24h 处理（前向联算只认 24h / 3d） */
-const activeDay = computed(() => heatSource.value === 'eph-aoe'
-  ? (heatDays.value >= 3 ? 3 : 1)
-  : heatDays.value)
-
-/** 切到后端来源：关掉「我的星历」页签，交给 heatSource 的 watch 重载列表 */
+/** 切换标签：交给 heatSource 的 watch 重载热力与列表 */
 function pickSource(k: HeatSource) {
-  ephTab.value = false
   heatSource.value = k
 }
 
-/** 切到「我的星历」页签：只读本机数据，不触发后端请求 */
-function openEphTab() {
-  if (ephTab.value) return
-  ephTab.value = true
-  query.page = 1
-  query.level = ''
-  resetListScroll()
-  void loadEphList()
-}
-
-function search() { query.page = 1; resetListScroll(); loadList() }
-
-function resetSearch() {
-  query.keyword = ''
-  query.level = ''
-  query.dateFrom = ''
-  query.dateTo = ''
-  search()
-}
+function search() { query.page = 1; resetListScroll(); void loadList() }
 
 function goPage(p: number) {
   if (p < 1 || p > maxPage.value) return
   query.page = p
   resetListScroll()
-  loadList()
+  void loadList()
 }
 
-/** 切换某一图例档位的显隐：按配色（后端下发的档位色，事件 color 必与其一致）在 heatHiddenColors 中增删，
- *  三维热力视图经 heatFiltered 过滤后重建，档位一勾即隐藏 / 取消即恢复。 */
-function toggleLegend(color: string) {
-  if (heatHiddenColors.has(color)) heatHiddenColors.delete(color)
-  else heatHiddenColors.add(color)
-}
+/** 搜索改为输入即筛选（300 ms 防抖），不再需要查询 / 重置按钮 */
+let kwTimer: number | undefined
+watch(() => query.keyword, () => {
+  if (kwTimer) window.clearTimeout(kwTimer)
+  kwTimer = window.setTimeout(() => { query.page = 1; resetListScroll(); void loadList() }, 300)
+})
+watch(() => query.level, () => { query.page = 1; resetListScroll(); void loadList() })
 
-/** 面板展开 / 切换数据批次 / 切换来源时重载：检索条件保留，回到第 1 页。
- *  智能体联动：若本次打开携带目标卫星（heatFocusNorad），先把关键词设为该 NORAD（后端按 norad_a/norad_b 精确匹配），
- *  再重载 —— 保证列表/自动选中都落在目标卫星的交会上。 */
-watch([dockMode, heatBatchRunId, heatSource], () => {
+/** 面板展开 / 切换标签 / 状态变化 / 主星筛选 / 时间窗变化时重载 */
+watch([dockMode, heatSource, heatPrimaryFilter, status, heatDays], () => {
   if (dockMode.value !== 'heat') return
   applyFocusNorad()
   query.page = 1
-  loadList()
-})
+  void loadList()
+  void loadFresh()
+}, { deep: true })
 
-/** 星历热力：联算完成后 heatList 整体替换，列表数据源就是 heatList，需再刷一次列表 */
-watch(heatList, () => {
-  if (dockMode.value !== 'heat' || ephTab.value || heatSource.value !== 'eph-aoe') return
-  applyFocusNorad()
+/** 星历窗 → 热力：定位同一事件（列表加载后高亮该行） */
+const focusPair = ref<{ a: number; b: number; tcaMs: number } | null>(null)
+watch(threatFocus, (f) => {
+  if (!f || f.from !== 'ephem' || f.kind !== 'tle') return
+  focusPair.value = { a: f.primaryNorad, b: f.secondaryNorad, tcaMs: f.tcaMs }
+  if (dockMode.value !== 'heat') return
   query.page = 1
-  loadList()
+  void loadList()
 })
 
-/** 消费「本次打开要聚焦的目标卫星」：读取 heatFocusNorad → 写入关键词检索框 → 置回 null（只对本次打开生效，
- *  之后用户可自由检索，也不会残留影响下次打开）。返回是否确实设置了过滤。 */
+/** 消费「本次打开要聚焦的目标卫星」NORAD */
 function applyFocusNorad(): boolean {
   const n = Number(heatFocusNorad.value)
   if (!Number.isFinite(n) || n <= 0) return false
@@ -463,55 +413,35 @@ function applyFocusNorad(): boolean {
   return true
 }
 
-/** 批次下拉文案：`#id · MM-DD HH:mm`（扫描时间；不带事件数，避免文案过长被截断） */
-function batchLabel(id: number, createdAt?: string) {
-  if (!createdAt) return `#${id}`
-  const d = new Date(createdAt)
-  if (Number.isNaN(d.getTime())) return `#${id}`
-  const p = (n: number) => String(n).padStart(2, '0')
-  return `#${id} · ${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
-}
-
-/** 「数据批次」下拉项：最近 N 个「全体 × 全体」全量批次（总交会库历史）。
- *  若当前批次不在列表中（如库中暂无 mode='all' 批次、回退到别的批次），补一条占位项保证回显不空。 */
-const batchOptions = computed(() => {
-  const list = heatBatches.value.map((b) => ({ id: b.id, label: batchLabel(b.id, b.created_at) }))
-  const cur = heatBatchRunId.value
-  if (cur && !list.some((o) => o.id === cur)) {
-    list.unshift({ id: cur, label: `当前批次 #${cur}` })
-  }
-  return list
-})
-
-/** 切换数据批次：null 表示回到「总交会库」当前批次（由后端解析最近全量批次） */
-function onBatchChange(e: Event) {
-  const v = Number((e.target as HTMLSelectElement).value)
-  heatBatchRunId.value = Number.isFinite(v) && v > 0 ? v : null
-}
-
-/** 已点选（正在三维中绘制轨道与目标模型）的那一对：用 norad 对 + TCA 做键，翻页 / 重载后仍能高亮 */
+/** 已点选的那一对：用 norad 对 + TCA 做键，翻页 / 重载后仍能高亮 */
 const pickedKey = ref('')
 
-/** 点击某一对交会事件：高亮该项，并上报给 index.vue 让 BaseScene 绘制这 2 颗卫星的轨道线与 TCA 目标模型 */
 function pickRow(r: ListRow) {
   pickedKey.value = r.key
-  if (ephTab.value) {
-    const hit = ephPicks.get(r.key)
-    if (hit) emit('pick-ephem', { setId: hit.setId, event: hit.event })
-    return
-  }
   emit('select', { norad_a: r.norad_a, norad_b: r.norad_b, tca: r.tca })
+  // 热力 → 星历窗（03 §15.5）：仅星历增强标签的事件在星历窗里有对应轮次；TLE×TLE 初筛无星历事件
+  if (heatSource.value === 'tle-threat') return
+  const filter = heatPrimaryFilter.value
+  focusThreat({
+    from: 'heat',
+    kind: 'tle',
+    eventId: r.id ?? r.key,
+    primaryNorad: r.norad_a,
+    secondaryNorad: r.norad_b,
+    tcaMs: tcaMsOf(r.tca),
+    primaryScope: filter.kind === 'uploaded' ? 'uploaded' : 'official',
+    ephemId: filter.kind === 'uploaded' ? filter.ephemId : undefined,
+    primaryName: r.name_a,
+    secondaryName: r.name_b,
+    level: r.level ?? undefined
+  })
 }
 
-/* ---- 智能体联动：打开面板后自动选中第一条（交会 / 碰撞问题 → 直接展示第一条交会信息） ---- */
-/** 待选中标记：外部触发后置 true，列表就绪并选中第一条（或确认无数据）后清掉 */
+/* ---- 智能体联动：打开面板后自动选中第一条 ---- */
 const awaitingFirst = ref(false)
-/** 已处理过的触发计数（本组件常驻挂载，避免重挂载时重复触发同一个 tick） */
 let autoSelectHandledTick = 0
-/** 是否已成功加载过一次列表（未加载过则先等 loadList 完成，避免用旧数据误选） */
 const loadedOnce = ref(false)
 
-/** 列表就绪后选中第一条并上报；无数据则什么都不做 —— 只停在页面（符合「没有交会事件也定位到该页」） */
 function tryAutoSelectFirst() {
   if (!awaitingFirst.value || listLoading.value || !loadedOnce.value) return
   awaitingFirst.value = false
@@ -519,25 +449,29 @@ function tryAutoSelectFirst() {
   if (first) pickRow(first)
 }
 
-/** 外部触发入口：autoSelectTick 比上次处理的大即标记待选（并尝试立即选中，如列表已就绪）。
- *  交会 / 碰撞类问题：目标卫星已由 index.vue 写入 heatFocusNorad（动作显式 norad 或当前选中星）。
- *  · 若 dockMode 刚切到 heat，上面的 watch 已消费它并触发重载，这里只需等加载完成再选中第一条；
- *  · 若面板本就开着（dockMode 未变化，watch 不触发），这里补一次「过滤 + 重载」，
- *    否则会选中旧列表的第一条（即用户反馈的「定位到了别的卫星上」）。 */
 function armAutoSelect() {
   if (props.autoSelectTick > autoSelectHandledTick) {
     autoSelectHandledTick = props.autoSelectTick
     awaitingFirst.value = true
     if (applyFocusNorad()) {
       query.page = 1
-      loadList()
+      void loadList()
       return
     }
     tryAutoSelectFirst()
   }
 }
 watch(() => props.autoSelectTick, armAutoSelect)
-onMounted(armAutoSelect)
+onMounted(() => {
+  armAutoSelect()
+  void loadHeatLevels()
+  if (dockMode.value === 'heat') void loadFresh()
+})
+
+/** 重试：清掉 sidecar 健康缓存并重新拉取（由父组件 baseScene expose 的 retryHeat 完成） */
+function retry() {
+  emit('retry')
+}
 
 function close() {
   emit('close')
@@ -555,129 +489,94 @@ function close() {
         @touchend="onDragEnd"
         @touchcancel="onDragEnd">
         <div class="sp-head-main">
-          <b class="sp-title">安全热力图</b>
-          <span class="sp-count">{{ (ephTab ? ephCount : heatList.length).toLocaleString() }} 个事件</span>
+          <b class="sp-title">威胁热力图</b>
+          <span class="sp-count">{{ headSub }}</span>
         </div>
-        <!-- 收起按钮：向下三角（与太空安全目标列表的三角收起键同款矢量图标） -->
         <button class="sp-close sp-close-tri" title="收起（点底部菜单可再次展开）" aria-label="收起热力图" @click="close">
           <svg viewBox="0 0 10 10" aria-hidden="true"><path d="M1.6 3.1 L8.4 3.1 L5 7.1 Z" /></svg>
         </button>
       </div>
 
-      <!-- 来源页签：后端三种热力来源 + 本机星历事件（我的星历只切换下方列表，不改三维热力） -->
+      <!-- 两个标签 + 各来源就绪圆点 -->
       <div class="heat-src">
         <button v-for="s in HEAT_SOURCES" :key="s.key" class="hs-btn"
-          :class="{ on: !ephTab && heatSource === s.key }" @click="pickSource(s.key)">{{ s.label }}</button>
-        <button class="hs-btn is-eph" :class="{ on: ephTab }" @click="openEphTab">我的星历</button>
+          :class="{ on: heatSource === s.key }" :title="srcTitle(s.key)" @click="pickSource(s.key)">
+          <i class="hs-dot" :style="{ background: srcDot(s.key) }"></i>{{ s.label }}
+        </button>
       </div>
 
-      <!-- P3 筛选条：时间窗（heatDays）/ 高度层 / 指标阈值 + 按天柱状图。
-           时间窗改动会触发 BaseScene.loadHeat 重新拉取；高度层与阈值只作用于 heatFiltered（前端过滤） -->
-      <div v-if="!ephTab" class="heat-filter">
+      <!-- 数据时效：一行摘要，点开看各源明细 -->
+      <div class="heat-fresh">
+        <button class="hf-head" :title="freshOpen ? '收起数据时效' : '展开数据时效'" @click="freshOpen = !freshOpen">
+          <span class="hf-title">数据时效</span>
+          <span class="hf-dot" :style="{ background: freshDown ? '#f2c14e' : '#4fd18b' }"></span>
+          <span class="hf-sum" :class="{ 'is-down': freshDown }">{{ freshLine }}</span>
+          <span class="hf-info" :class="{ on: freshOpen }">ⓘ</span>
+        </button>
+        <div v-if="freshOpen" class="hf-body">
+          <div v-if="freshDown" class="hf-down">heat-sidecar 未连接，威胁事件数据不可用。</div>
+          <div v-for="r in freshRows" :key="r.label" class="hf-line">
+            <span class="hf-line-dot" :style="{ background: r.color }"></span>
+            <span class="hf-name">{{ r.label }}</span>
+            <span class="hf-text">{{ r.text }}</span>
+          </div>
+          <div class="hf-tip">Pc 统一按等级档位着色；miss 仅作服务端次级过滤（≤10 km），不参与分级。</div>
+        </div>
+      </div>
+
+      <!-- 主星筛选（仅星历增强标签） -->
+      <div v-if="heatSource === 'tle-eph'" class="heat-primary">
+        <span class="hf-label">主星</span>
+        <button class="hp-chip" :class="{ on: heatPrimaryFilter.kind === 'official' }"
+          @click="heatPrimaryFilter = { kind: 'official' }">官方星历（全部 Starlink）</button>
+        <button v-if="heatPrimaryFilter.kind === 'uploaded'" class="hp-chip on"
+          title="点击取消该筛选"
+          @click="heatPrimaryFilter = { kind: 'official' }">
+          已上传星历 · {{ ephemLabel(heatPrimaryFilter.ephemId) }} ×
+        </button>
+      </div>
+
+      <!-- 时间窗 + 按天柱 + 等级芯片 -->
+      <div class="heat-filter" :class="{ 'is-dim': isUnavailable }">
         <div class="hf-row">
           <span class="hf-label">时间窗</span>
           <div class="hf-seg">
             <button v-for="o in dayOptions" :key="o.v" class="hf-btn"
-              :class="{ on: activeDay === o.v }" @click="heatDays = o.v">{{ o.label }}</button>
+              :class="{ on: heatDays === o.v }" :disabled="isUnavailable" @click="heatDays = o.v">{{ o.label }}</button>
           </div>
         </div>
-        <div class="hf-row">
-          <span class="hf-label">高度层</span>
-          <div class="hf-seg">
-            <button v-for="o in ALT_OPTIONS" :key="o.v" class="hf-btn"
-              :class="{ on: heatAltBand === o.v }" @click="heatAltBand = o.v">{{ o.label }}</button>
-          </div>
-        </div>
-        <div class="hf-row">
-          <span class="hf-label">指标</span>
-          <div class="hf-seg">
-            <button v-for="o in METRIC_OPTIONS" :key="o.v" class="hf-btn"
-              :class="{ on: heatMetric === o.v }" @click="heatMetric = o.v">{{ o.label }}</button>
-          </div>
-          <span class="hf-val">{{ thresholdText }}</span>
-        </div>
-        <div class="hf-row">
-          <span class="hf-label">阈值</span>
-          <input v-model.number="sliderVal" class="hf-range" type="range" min="0" max="100" step="1" />
-        </div>
-        <div v-if="heatSource !== 'eph-aoe'" class="hf-row">
-          <span class="hf-label">聚合格边</span>
-          <div class="hf-seg">
-            <button v-for="o in HEAT_CELL_OPTIONS" :key="o.v" class="hf-btn"
-              :class="{ on: heatCell === o.v }" @click="heatCell = o.v">{{ o.label }}</button>
-          </div>
-          <span class="hf-val">{{ heatCell.toFixed(2) }}</span>
-        </div>
-        <div class="hf-count">
-          三维显示 <b>{{ heatFiltered.length.toLocaleString() }}</b> /
-          {{ heatList.length.toLocaleString() }} 个事件
-          <span v-if="altUnavailable" class="hf-warn">· 官方 CDM 无高度数据</span>
-        </div>
-        <!-- 星历热力：本机联算进度 / 无星历提示（不落后端，进度来自 Worker 两阶段回传） -->
-        <div v-if="heatSource === 'eph-aoe' && heatEphStatus.state !== 'idle'" class="hf-count">
-          <template v-if="heatEphStatus.state === 'running'">
-            AOE 点云 × 精密星历联算中 {{ Math.round(heatEphStatus.p * 100) }}%
-            <span class="hf-warn">· {{ heatEphStatus.text }}</span>
-          </template>
-          <span v-else class="hf-warn">{{ heatEphStatus.text }}</span>
-        </div>
-        <!-- 按天柱状图：后端 day_groups（仅时间窗 > 0 下发），点柱切到该天，点「全」回到总览 -->
-        <div v-if="dayBars.length" class="hf-days">
-          <button class="hf-day" :class="{ on: heatDay === -1 }" @click="heatDay = -1">全</button>
+
+        <div class="hf-row is-days">
+          <span class="hf-label">按天</span>
           <div class="hf-bars">
             <button v-for="d in dayBars" :key="d.day" class="hf-bar"
               :class="{ on: heatDay === d.day }" :title="`${d.date} · ${d.count} 个事件`"
-              @click="heatDay = d.day">
+              :disabled="isUnavailable" @click="toggleDay(d.day)">
+              <b class="hf-bar-n">{{ isReady ? d.count : '—' }}</b>
               <i :style="{ height: barHeight(d.count) }"></i>
+              <span class="hf-bar-d">{{ d.date.slice(5) }}</span>
             </button>
           </div>
         </div>
+
+        <div class="hf-row is-chips">
+          <span class="hf-label">等级</span>
+          <HeatLevelChips :counts="isReady ? levelCounts : null" :off="offColors"
+            :disabled="isUnavailable"
+            @toggle="toggleChip" />
+        </div>
       </div>
 
-      <!-- 数据批次（总库）：交会热力 / 交会分析热力来源展示（各自独立批次表）；回看历史「全体 × 全体」全量扫描批次。
-           主从计算 / 配对标注批次属后台分析工具，不进前台，故此处只列全量批次；CDM 热力无批次概念，不展示 -->
-      <div v-if="!ephTab && heatSource !== 'spacetrack' && heatSource !== 'eph-aoe'" class="heat-batch">
-        <span class="heat-batch-label">数据批次</span>
-        <select class="heat-batch-sel" :value="heatBatchRunId ?? ''" @change="onBatchChange">
-          <option v-if="!batchOptions.length" value="" disabled>暂无全量批次</option>
-          <option v-for="b in batchOptions" :key="b.id" :value="b.id">{{ b.label }}</option>
-        </select>
-      </div>
+      <!-- 未就绪：灰色空状态卡（不显示任何旧计数） -->
+      <HeatEmptyState v-if="isUnavailable" :reason="heatUnavailableReason" :loading="heatLoading" @retry="retry" />
+      <div v-else-if="status === 'loading' && !rows.length" class="heat-none">加载中…</div>
+      <div v-else-if="isReady && !heatList.length" class="heat-none">未来 {{ heatDays }} 天无事件</div>
 
-      <!-- 配色图例：档位 / 配色 / 阈值文案全部由后端按当前来源口径下发，前端直接渲染。
-           每一行可勾选：取消勾选即隐藏该档位在三维热力视图中的事件（按配色匹配），只影响渲染不影响列表数据 -->
-      <div v-if="!ephTab" class="heat-scale">
-        <div class="heat-scale-title">{{ heatMetricLabel || '指标' }}</div>
-        <label
-          v-for="s in legendRows"
-          :key="s.label"
-          class="heat-scale-row"
-          :class="{ off: heatHiddenColors.has(s.color) }"
-          :title="heatHiddenColors.has(s.color) ? '勾选以显示该档位事件' : '取消勾选以隐藏该档位事件'"
-        >
-          <input
-            class="hs-check"
-            type="checkbox"
-            :checked="!heatHiddenColors.has(s.color)"
-            @change="toggleLegend(s.color)"
-          />
-          <span class="hs-dot" :style="{ background: s.color }"></span>
-          <span class="hs-label">{{ s.label }}</span>
-          <span class="hs-thresh">{{ s.thresh }}</span>
-        </label>
-      </div>
-
-      <div v-if="!ephTab && heatError" class="heat-err">{{ heatError }}</div>
-      <div v-else-if="!ephTab && !heatLoading && !heatList.length" class="heat-none">暂无碰撞事件</div>
-
-      <!-- 交会数据列表：三种来源共用（local 取「总交会库」当前批次明细，cri 取交会分析库当前批次明细，
-           CDM 取 sat_cdm 库表明细）。检索：关键词（NORAD / 名称）+ 接近日期范围；等级下拉仅批次来源
-           （local / cri）有（CDM 按碰撞概率分级，风险文案与配色由后端下发直接渲染）。
-           与上方「数据批次」下拉（local / cri 联动，CDM 无批次）联动。 -->
-      <div class="heat-conj">
+      <!-- 事件列表 -->
+      <div v-if="!isUnavailable" class="heat-conj">
         <div class="hc-head">
-          <b class="hc-title">{{ listTitle }}</b>
-          <span class="hc-total">{{ total.toLocaleString() }} 条</span>
+          <b class="hc-title">事件列表</b>
+          <span class="hc-total">{{ isReady ? `${total.toLocaleString()} 条` : '—' }} · 按 TCA 升序</span>
         </div>
 
         <div class="hc-search">
@@ -685,35 +584,24 @@ function close() {
             v-model="query.keyword"
             class="hc-input"
             type="text"
-            placeholder="NORAD 编号或名称"
-            @keyup.enter="search"
+            placeholder="NORAD 编号或名称（输入即筛选）"
           />
-          <select v-if="!ephTab && heatSource !== 'spacetrack'" v-model="query.level" class="hc-sel">
+          <select v-model="query.level" class="hc-sel">
             <option value="">全部等级</option>
-            <option value="danger">高危</option>
-            <option value="warning">警告</option>
-            <option value="info">关注</option>
+            <option value="red">高危</option>
+            <option value="orange">警告</option>
+            <option value="yellow">关注</option>
+            <option value="insufficient">数据不足</option>
           </select>
-          <div class="hc-dates">
-            <input v-model="query.dateFrom" class="hc-date" type="date" title="接近日期从" />
-            <span class="hc-date-sep">~</span>
-            <input v-model="query.dateTo" class="hc-date" type="date" title="接近日期至" />
-          </div>
-          <div class="hc-btns">
-            <button class="hc-btn is-primary" :disabled="listLoading" @click="search">查询</button>
-            <button class="hc-btn" :disabled="listLoading" @click="resetSearch">重置</button>
-          </div>
         </div>
 
         <div ref="listEl" class="hc-list" @scroll.passive="onListScroll">
           <div v-if="listLoadingHint" class="hc-empty">加载中…</div>
-          <div v-else-if="listError" class="hc-empty is-err">{{ listError }}</div>
-          <!-- 未超时的加载中：保留上一次结果、不闪「暂无」（正常毫秒级返回，这个分支几乎不可见） -->
-          <div v-else-if="!listLoading && !rows.length" class="hc-empty">{{ ephTab
-            ? '本机暂无星历筛选结果'
-            : heatSource === 'eph-aoe' ? (heatEphStatus.state === 'running' ? '联算中…' : '暂无接近事件') : '暂无交会数据' }}</div>
+          <div v-else-if="listError" class="hc-empty">{{ listError }}</div>
+          <div v-else-if="!listLoading && !rows.length" class="hc-empty">
+            {{ isReady ? '该时间窗内无事件' : '暂无交会数据' }}
+          </div>
           <template v-else>
-            <!-- 虚拟滚动：上方占位 -->
             <div v-if="virtOn && padTop" :style="{ height: padTop + 'px' }"></div>
             <div
               v-for="r in visibleRows"
@@ -727,29 +615,24 @@ function close() {
                 <span class="hc-names" :title="`${r.name_a} × ${r.name_b}`">
                   {{ r.name_a }} × {{ r.name_b }}
                 </span>
-                <span class="hc-dist" :style="{ color: r.color }">{{ fmtNum(r.dist, 3) }} km</span>
+                <span class="hc-pc" :style="{ color: r.color }">{{ r.pc > 0 ? `Pc ${r.pc.toExponential(1)}` : 'Pc —' }}</span>
               </div>
               <div class="hc-item-sub">
-                <span class="hc-tca">{{ fmtTca(r.tca) }}</span>
                 <span class="hc-dot" :style="{ background: r.color }"></span>
-                <span class="hc-level">{{ r.label }}</span>
+                <span class="hc-level" :style="{ color: r.color }">{{ r.level ? labelForLevel(r.level) : '—' }}</span>
+                <span class="hc-tca">TCA {{ fmtTca(r.tca) }}（UTC+8）</span>
+                <span class="hc-miss">miss {{ fmtNum(r.miss, 3) }} km</span>
               </div>
             </div>
-            <!-- 虚拟滚动：下方占位 -->
             <div v-if="virtOn && padBottom" :style="{ height: padBottom + 'px' }"></div>
           </template>
         </div>
 
-        <div v-if="!ephTab && heatSource !== 'eph-aoe'" class="hc-pager">
-          <select v-model.number="query.pageSize" class="hc-sel" title="每页条数" @change="search">
-            <option :value="20">20 条/页</option>
-            <option :value="100">100 条/页</option>
-            <option :value="200">200 条/页</option>
-          </select>
-          <button class="hc-btn" :disabled="query.page <= 1 || listLoading" @click="goPage(query.page - 1)">上一页</button>
-          <span class="hc-page">{{ query.page }} / {{ maxPage }}</span>
-          <button class="hc-btn" :disabled="query.page >= maxPage || listLoading" @click="goPage(query.page + 1)">下一页</button>
-        </div>
+        <button
+          v-if="heatSource === 'tle-eph' && rows.length"
+          class="hc-ephem-link"
+          @click="emit('open-ephem', { norad: rows[0].norad_a, name: rows[0].name_a })"
+        >在星历窗中打开该主星 ›</button>
       </div>
     </aside>
   </transition>
@@ -758,13 +641,8 @@ function close() {
 <style scoped lang="scss">
 @use './index.scss' as *;
 
-/* 碰撞热力面板内容较短，高度自适应内容即可，不必像列表面板那样撑满整屏（覆盖 .side-panel 的 height:100%） */
-.heat-panel {
-  height: auto;
-}
+.heat-panel { height: auto; }
 
-/* 桌面端：热力面板改为底部居中卡片，位置与尺寸对齐「专家」弹窗（.ai-glass.docked .ag-card）：
-   width min(560px, 94vw)、max-height min(62vh, 520px)、底边浮在底部「按钮栏 + 时间条」之上。 */
 @media (min-width: 769px) {
   .side-panel.heat-panel {
     top: auto;
@@ -776,7 +654,6 @@ function close() {
     height: auto;
     max-height: min(62vh, 520px);
     z-index: 8;
-    /* 卡片高度受限后内容整体滚动（筛选条 / 图例 / 列表都能滚到），避免溢出卡片外 */
     overflow-y: auto;
     overscroll-behavior: contain;
     border-radius: 16px;
@@ -785,7 +662,6 @@ function close() {
     backdrop-filter: blur(22px) saturate(1.3);
     box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 24px 60px rgba(0, 0, 0, 0.55);
   }
-  /* 过渡：底部卡片改为「自下浮起 + 淡入」，覆盖默认的从左滑入（translateX(-100%)） */
   .heat-panel.panel-enter-active,
   .heat-panel.panel-leave-active { transition: transform 0.24s ease, opacity 0.24s ease; }
   .heat-panel.panel-enter-from,
@@ -795,7 +671,7 @@ function close() {
   }
 }
 
-/* ---------------- 来源页签：三种后端热力来源 + 我的星历 ---------------- */
+/* ---------------- 来源页签 ---------------- */
 .heat-src {
   display: flex;
   gap: 4px;
@@ -814,6 +690,10 @@ function close() {
     font-size: 11.5px;
     white-space: nowrap;
     cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
     transition: background 0.15s, color 0.15s, border-color 0.15s;
 
     &:hover { color: #d7e6fb; border-color: rgba(120, 165, 225, 0.5); }
@@ -822,40 +702,98 @@ function close() {
       border-color: #4c9aff;
       background: rgba(38, 92, 156, 0.75);
     }
-    /* 我的星历：与后端来源用描边区分（本机数据，不请求后端） */
-    &.is-eph { border-style: dashed; }
-    &.is-eph.on { border-style: solid; }
+  }
+  .hs-dot { width: 6px; height: 6px; border-radius: 50%; flex: none; }
+}
+
+/* ---------------- 数据时效 ---------------- */
+.heat-fresh {
+  margin: 0 0 8px;
+  padding: 0 0 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  pointer-events: auto;
+
+  .hf-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+    padding: 2px 0;
+    background: none;
+    border: none;
+    cursor: pointer;
+    text-align: left;
+
+    .hf-title { flex: none; font-size: 11.5px; color: #8b9bb5; letter-spacing: 0.02em; }
+    .hf-dot { flex: none; width: 6px; height: 6px; border-radius: 50%; }
+    .hf-sum {
+      flex: 1;
+      min-width: 0;
+      font-size: 11.5px;
+      color: #7fd8ff;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      &.is-down { color: #f2c14e; }
+    }
+    .hf-info { flex: none; font-size: 11px; color: #7d8ba3; &.on { color: #7fd8ff; } }
+    &:hover .hf-title { color: #cfdcea; }
+  }
+
+  .hf-body { padding-top: 4px; }
+  .hf-line { display: flex; align-items: center; gap: 6px; padding: 2px 0; font-size: 11px; }
+  .hf-line-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; }
+  .hf-name { flex: 0 0 78px; color: #a7b6cc; white-space: nowrap; }
+  .hf-text {
+    flex: 1; min-width: 0; color: #d8e2f0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .hf-down { padding: 2px 0 4px; font-size: 11px; color: #f2c14e; }
+  .hf-tip { padding-top: 4px; font-size: 10.5px; color: #7d8ba3; line-height: 1.5; }
+}
+
+/* ---------------- 主星筛选 ---------------- */
+.heat-primary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 0 8px;
+  pointer-events: auto;
+}
+.hp-chip {
+  height: 24px;
+  padding: 0 10px;
+  font-size: 11px;
+  border-radius: 12px;
+  cursor: pointer;
+  color: #a7b6cc;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(120, 160, 220, 0.28);
+  white-space: nowrap;
+  &.on {
+    color: #ffd98a;
+    border-color: rgba(242, 193, 78, 0.65);
+    background: rgba(242, 193, 78, 0.16);
   }
 }
 
-/* ---------------- P3 筛选条：时间窗 / 高度层 / 指标 / 阈值 / 按天柱状图 ---------------- */
+/* ---------------- 筛选条 ---------------- */
 .heat-filter {
   padding: 2px 0 10px;
-  /* 面板整体 pointer-events:none（空白区域穿透拾取卫星），筛选控件必须恢复事件 */
   pointer-events: auto;
+  &.is-dim { opacity: 0.45; }
 
   .hf-row {
     display: flex;
     align-items: center;
     gap: 8px;
     margin-bottom: 6px;
+    &.is-days { align-items: flex-end; }
+    &.is-chips { align-items: flex-start; }
   }
+  .hf-label { flex: 0 0 42px; font-size: 12px; color: #a7b6cc; white-space: nowrap; }
 
-  .hf-label {
-    flex: 0 0 42px;
-    font-size: 12px;
-    color: #a7b6cc;
-    white-space: nowrap;
-  }
-
-  /* 分段按钮组：等分剩余宽度，选中项高亮为主题蓝 */
-  .hf-seg {
-    display: flex;
-    flex: 1;
-    min-width: 0;
-    gap: 2px;
-  }
-
+  .hf-seg { display: flex; flex: 1; min-width: 0; gap: 2px; }
   .hf-btn {
     flex: 1;
     min-width: 0;
@@ -871,80 +809,35 @@ function close() {
     border: 1px solid rgba(120, 160, 220, 0.22);
     color: #a7b6cc;
     transition: all 0.15s ease;
-    &:hover { background: rgba(255, 255, 255, 0.12); color: #e6edf7; }
-    &.on {
-      background: rgba(79, 195, 247, 0.2);
-      border-color: rgba(79, 195, 247, 0.6);
-      color: #8fe2ff;
-    }
-  }
-
-  .hf-val {
-    flex: 0 0 auto;
-    font-size: 11px;
-    color: #7fd8ff;
-    white-space: nowrap;
-  }
-
-  /* 阈值滑杆：原生 range，用 accent-color 贴合深色主题 */
-  .hf-range {
-    flex: 1;
-    min-width: 0;
-    height: 16px;
-    margin: 0;
-    accent-color: #4fc3f7;
-    cursor: pointer;
-  }
-
-  .hf-count {
-    font-size: 11px;
-    color: #8b9bb5;
-    b { color: #8fe2ff; font-weight: 700; }
-    .hf-warn { color: #ffb454; }
-  }
-
-  /* 按天柱状图（纯 SVG 不必要，这里用 flex 柱高百分比实现，点击切天） */
-  .hf-days {
-    display: flex;
-    align-items: flex-end;
-    gap: 6px;
-    margin-top: 8px;
-    height: 46px;
-  }
-
-  .hf-day {
-    flex: none;
-    height: 20px;
-    padding: 0 7px;
-    font-size: 11px;
-    line-height: 18px;
-    border-radius: 5px;
-    cursor: pointer;
-    background: rgba(255, 255, 255, 0.05);
-    border: 1px solid rgba(120, 160, 220, 0.22);
-    color: #a7b6cc;
+    &:hover:not(:disabled) { background: rgba(255, 255, 255, 0.12); color: #e6edf7; }
     &.on { background: rgba(79, 195, 247, 0.2); border-color: rgba(79, 195, 247, 0.6); color: #8fe2ff; }
+    &:disabled { cursor: default; }
   }
 
+  /* 按天柱：固定一列 7 天 */
   .hf-bars {
     display: flex;
     flex: 1;
-    align-items: flex-end;
-    gap: 2px;
-    height: 100%;
     min-width: 0;
+    align-items: flex-end;
+    gap: 3px;
+    height: 58px;
   }
-
   .hf-bar {
     flex: 1;
     min-width: 0;
     height: 100%;
-    padding: 0 1px;
+    padding: 0;
     display: flex;
-    align-items: flex-end;
+    flex-direction: column;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 2px;
     background: none;
     border: none;
     cursor: pointer;
+
+    .hf-bar-n { font-size: 10px; line-height: 1; color: #8b9bb5; font-weight: 700; }
     i {
       display: block;
       width: 100%;
@@ -952,102 +845,13 @@ function close() {
       background: rgba(127, 176, 255, 0.45);
       transition: height 0.2s ease, background 0.15s ease;
     }
+    .hf-bar-d { font-size: 9px; line-height: 1; color: #6f819c; white-space: nowrap; }
     &:hover i { background: rgba(143, 226, 255, 0.8); }
     &.on i { background: #4fc3f7; }
+    &:disabled { cursor: default; }
   }
-}
 
-.heat-batch {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 2px 0 10px;
-  /* 面板整体 pointer-events:none（空白区域穿透拾取卫星），交互控件必须恢复事件，否则下拉点不动 */
-  pointer-events: auto;
-  .heat-batch-label {
-    font-size: 12px;
-    /* 面板为深色底：这里不能依赖未定义的 CSS 变量，直接给可读的次级文字色 */
-    color: #a7b6cc;
-    white-space: nowrap;
-  }
-  .heat-batch-sel {
-    flex: 1;
-    min-width: 0;
-    padding: 5px 8px;
-    font-size: 12px;
-    border-radius: 6px;
-    /* 不透明深底 + 深色配色方案：避免半透明背景透出亮色地图导致选中项文字看不清 */
-    background: rgba(20, 28, 44, 0.96);
-    border: 1px solid rgba(120, 160, 220, 0.28);
-    color: #e6edf7;
-    color-scheme: dark;
-    cursor: pointer;
-    &:focus {
-      outline: none;
-      border-color: var(--heat, #ff4d4f);
-    }
-    option {
-      background: #1b2130;
-      color: #e6edf7;
-    }
-  }
-}
-
-.heat-scale {
-  padding: 10px 0 12px;
-  border-top: 1px solid rgba(255, 255, 255, 0.08);
-  /* 面板整体 pointer-events:none（空白区域穿透拾取卫星），图例要能点勾选框，必须恢复事件 */
-  pointer-events: auto;
-  .heat-scale-title {
-    font-size: 12px;
-    /* 同上：深色底下用固定次级文字色，避免 undefined 变量导致文字发虚 */
-    color: #a7b6cc;
-    margin-bottom: 8px;
-  }
-  .heat-scale-row {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-bottom: 6px;
-    cursor: pointer;
-    /* 勾选框：浏览器原生控件，用 accent-color 贴合深色主题 */
-    .hs-check {
-      flex: none;
-      width: 13px;
-      height: 13px;
-      margin: 0;
-      cursor: pointer;
-      accent-color: #4fc3f7;
-    }
-    .hs-dot {
-      width: 12px;
-      height: 12px;
-      border-radius: 50%;
-      flex-shrink: 0;
-    }
-    .hs-label {
-      font-size: 12px;
-      color: #d8e2f0;
-      flex: 1;
-    }
-    .hs-thresh {
-      font-size: 11px;
-      /* 阈值文案此前用未定义变量导致发虚：给深色底上可读的次级色 */
-      color: #a7b6cc;
-    }
-    &:hover .hs-label { color: #fff; }
-    /* 已取消勾选（该档位事件不参与三维渲染）：整体弱化提示 */
-    &.off {
-      .hs-dot { opacity: 0.3; }
-      .hs-label, .hs-thresh { opacity: 0.45; }
-    }
-  }
-}
-
-.heat-err {
-  margin-top: 10px;
-  font-size: 12px;
-  color: #ff8a80;
+  /* 等级芯片由 HeatLevelChips 组件渲染（与星历分析窗共用） */
 }
 
 .heat-none {
@@ -1057,8 +861,7 @@ function close() {
   color: #7d8ba3;
 }
 
-/* ---------------- 本批次交会数据（检索 + 列表） ---------------- */
-
+/* ---------------- 事件列表 ---------------- */
 .heat-conj {
   margin-top: 10px;
   padding-top: 10px;
@@ -1066,7 +869,6 @@ function close() {
   display: flex;
   flex-direction: column;
   min-height: 0;
-  /* 面板整体 pointer-events:none（空白穿透拾取），数据区必须恢复事件才能输入 / 滚动 / 点按钮 */
   pointer-events: auto;
 
   .hc-head {
@@ -1075,35 +877,18 @@ function close() {
     justify-content: space-between;
     gap: 8px;
     margin-bottom: 8px;
-
-    .hc-title {
-      font-size: 12px;
-      font-weight: 700;
-      color: #cfdcea;
-    }
-    .hc-total {
-      font-size: 11px;
-      color: #7fb0ff;
-      white-space: nowrap;
-    }
+    .hc-title { font-size: 12px; font-weight: 700; color: #cfdcea; }
+    .hc-total { font-size: 11px; color: #7fb0ff; white-space: nowrap; }
   }
 
-  /* 检索区：关键词 / 等级 / 日期范围 / 查询重置，两行紧凑排布 */
-  .hc-search {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-    margin-bottom: 8px;
-  }
+  .hc-search { display: flex; gap: 6px; margin-bottom: 8px; }
 
   .hc-input,
-  .hc-sel,
-  .hc-date {
+  .hc-sel {
     height: 28px;
     padding: 0 8px;
     font-size: 12px;
     border-radius: 6px;
-    /* 不透明深底 + 深色配色方案：避免半透明背景透出亮色地图导致文字看不清 */
     background: rgba(20, 28, 44, 0.96);
     border: 1px solid rgba(120, 160, 220, 0.28);
     color: #e6edf7;
@@ -1112,34 +897,15 @@ function close() {
     box-sizing: border-box;
     &:focus { border-color: #4fc3f7; }
   }
-
   .hc-input {
-    flex: 1 1 120px;
+    flex: 1;
     min-width: 0;
     &::placeholder { color: #7d8ba3; }
   }
-
   .hc-sel {
-    flex: 0 0 88px;
+    flex: 0 0 92px;
     cursor: pointer;
     option { background: #1b2130; color: #e6edf7; }
-  }
-
-  .hc-dates {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    flex: 1 1 190px;
-    min-width: 0;
-
-    .hc-date { flex: 1 1 0; min-width: 0; cursor: pointer; }
-    .hc-date-sep { color: #7d8ba3; font-size: 11px; flex: none; }
-  }
-
-  .hc-btns {
-    display: flex;
-    gap: 6px;
-    flex: none;
   }
 
   .hc-btn {
@@ -1151,18 +917,10 @@ function close() {
     background: rgba(255, 255, 255, 0.06);
     border: 1px solid rgba(120, 160, 220, 0.28);
     color: #cfdcea;
-    transition: all 0.15s ease;
     &:hover:not(:disabled) { background: rgba(255, 255, 255, 0.12); color: #e6edf7; }
-    &.is-primary {
-      background: rgba(79, 195, 247, 0.18);
-      border-color: rgba(79, 195, 247, 0.5);
-      color: #7fd8ff;
-      &:hover:not(:disabled) { background: rgba(79, 195, 247, 0.28); }
-    }
     &:disabled { opacity: 0.4; cursor: not-allowed; }
   }
 
-  /* 列表：面板高度自适应内容，故用 max-height 限高并内部滚动，避免撑出屏幕 */
   .hc-list {
     flex: 1 1 auto;
     min-height: 0;
@@ -1178,7 +936,6 @@ function close() {
     text-align: center;
     font-size: 12px;
     color: #7d8ba3;
-    &.is-err { color: #ff8a80; }
   }
 
   .hc-item {
@@ -1190,21 +947,13 @@ function close() {
     cursor: pointer;
     transition: background 0.15s, border-color 0.15s;
 
-    &:hover {
-      background: rgba(55, 194, 255, 0.1);
-      border-color: rgba(55, 194, 255, 0.35);
-    }
-
-    &.on {
-      background: rgba(55, 194, 255, 0.16);
-      border-color: rgba(55, 194, 255, 0.6);
-    }
+    &:hover { background: rgba(55, 194, 255, 0.1); border-color: rgba(55, 194, 255, 0.35); }
+    &.on { background: rgba(55, 194, 255, 0.16); border-color: rgba(55, 194, 255, 0.6); }
 
     .hc-item-top {
       display: flex;
       align-items: center;
       gap: 8px;
-
       .hc-names {
         flex: 1;
         min-width: 0;
@@ -1214,13 +963,11 @@ function close() {
         text-overflow: ellipsis;
         white-space: nowrap;
       }
-      .hc-dist {
+      .hc-pc {
         flex: none;
         font-size: 12px;
         font-weight: 700;
         font-family: 'Consolas', 'Menlo', monospace;
-        /* 具体颜色由行数据下发（等级档 / 碰撞概率分档）内联覆盖 */
-        color: #93a4bd;
       }
     }
 
@@ -1231,17 +978,22 @@ function close() {
       margin-top: 3px;
       font-size: 11px;
       color: #7d8ba3;
-
-      .hc-dot {
-        width: 7px;
-        height: 7px;
-        border-radius: 50%;
-        flex: none;
-        /* 具体颜色由行数据下发内联覆盖 */
-        background: #93a4bd;
-      }
-      .hc-level { color: #93a4bd; }
+      .hc-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+      .hc-level { font-weight: 600; }
+      .hc-miss { color: #93a4bd; }
     }
+  }
+
+  .hc-ephem-link {
+    align-self: flex-end;
+    margin-top: 6px;
+    padding: 2px 0;
+    font-size: 11px;
+    color: #7fb0ff;
+    background: none;
+    border: 0;
+    cursor: pointer;
+    &:hover { color: #a9c6ea; }
   }
 
   .hc-pager {
@@ -1250,60 +1002,23 @@ function close() {
     justify-content: center;
     gap: 10px;
     padding-top: 8px;
-
-    .hc-page {
-      font-size: 12px;
-      color: #93a4bd;
-      font-family: 'Consolas', 'Menlo', monospace;
-    }
+    .hc-page { font-size: 12px; color: #93a4bd; font-family: 'Consolas', 'Menlo', monospace; }
   }
 }
 
 html.is-mobile {
-  /* 移动端面板改为底部抽屉（见 index.scss），抽屉本身就是滚动容器：
-     热力面板内容较长（批次 + 图例 + 检索 + 列表 + 分页），此处取消列表内部限高，
-     整体交由抽屉滚动，避免「抽屉 + 列表」双层滚动互相打架 */
   .heat-conj .hc-list { max-height: none; overflow: visible; }
   .heat-conj .hc-input { flex: 1 1 100%; }
-  /* 批次下拉：空间压到极致 */
-  .heat-batch {
-    padding: 3px 0 6px;
-    .heat-batch-label { font-size: 11px; }
-    .heat-batch-sel { padding: 5px 6px; font-size: 11.5px; }
-  }
-  /* 配色图例：行距与勾选框一起收窄到「能看清即可」 */
-  .heat-scale {
-    padding: 4px 0 6px;
-    .heat-scale-title { font-size: 10.5px; margin-bottom: 4px; }
-    .heat-scale-row {
-      padding: 2px 0; margin-bottom: 1px;
-      .hs-check { width: 13px; height: 13px; }
-      .hs-dot { width: 11px; height: 11px; }
-      .hs-label { font-size: 11px; }
-      .hs-thresh { font-size: 10px; }
-    }
-  }
-  /* 检索控件：与抽屉内控件（列表条目 / sp-input）同一尺度，压到 26px / 11.5px，避免偏大 */
   .heat-conj .hc-input,
-  .heat-conj .hc-sel,
-  .heat-conj .hc-date { height: 26px; font-size: 11.5px; }
+  .heat-conj .hc-sel { height: 26px; font-size: 11.5px; }
   .heat-conj .hc-btn { height: 26px; padding: 0 10px; font-size: 11.5px; }
-  .heat-conj .hc-pager { padding-top: 6px; }
-  /* 交会列表项：行高与间距压到极致（≈32-34px） */
   .heat-conj .hc-item {
     padding: 5px 7px; margin-bottom: 3px; border-radius: 7px;
-    background: rgba(255,255,255,0.04); border: 1px solid rgba(120,160,220,0.12);
+    background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(120, 160, 220, 0.12);
     .hc-item-top .hc-names { font-size: 11.5px; }
-    .hc-item-top .hc-dist { font-size: 11px; }
+    .hc-item-top .hc-pc { font-size: 11px; }
     .hc-item-sub { margin-top: 2px; font-size: 9.5px; }
-    &.on { background: rgba(55,194,255,0.18); border-color: rgba(55,194,255,0.6); }
   }
-
-  /* 宽屏移动端（平板 / 大屏 Pad / 手机横屏，宽度 ≥600px）：
-     抽屉此刻横跨整屏，若仍让关键词输入框独占一整行（flex 1 1 100%）、交会列表单列铺排，
-     输入框会被拉成长条，交会条目被拉长且右侧大片留白。此处只用 CSS 重排、不新增任何高度：
-     ① 关键词输入框回到与「等级 / 日期范围 / 查询」同一行的常规宽度；
-     ② 交会列表改自适应多列网格（一排多个），同样高度内可见条目数成倍增加。 */
   @media (min-width: 600px) {
     .heat-conj {
       .hc-input { flex: 1 1 220px; }
@@ -1319,15 +1034,8 @@ html.is-mobile {
   }
 }
 
-/* 桌面端：固定行高，供虚拟滚动按固定步长计算占位高度（移动端保持压缩行高，不启用虚拟滚动） */
 @media (min-width: 769px) {
   .heat-panel .hc-item { height: 58px; box-sizing: border-box; }
-  /* 底部居中面板本身是 flex 列且 max-height 受限：.hc-list 若沿用 flex:1 1 auto + min-height:0
-     会被压缩到 0 高（列表塌陷、分页条盖住首行），故改为固定高度、不参与收缩。 */
-  .heat-panel .hc-list {
-    flex: 0 0 auto;
-    height: min(40vh, 330px);
-    max-height: none;
-  }
+  .heat-panel .hc-list { flex: 0 0 auto; height: min(40vh, 330px); max-height: none; }
 }
 </style>

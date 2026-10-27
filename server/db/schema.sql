@@ -588,6 +588,7 @@ CREATE TABLE IF NOT EXISTS `sat_tle` (
   `object_name` varchar(100) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT '',
   `object_type` varchar(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT 'UNKNOWN',
   `intl_desig` varchar(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT '',
+  `launch_date` date DEFAULT NULL COMMENT '发射日期（Space-Track gp.LAUNCH_DATE 原值；国际编号里的序号是年内第几次发射，不能换算日期）',
   `regime` varchar(10) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT '',
   `epoch` datetime DEFAULT NULL,
   `mean_motion` double DEFAULT NULL,

@@ -31,6 +31,37 @@ services:
       timeout: 3s
       retries: 30
 
+  # heat-sidecar：安全热力计算服务（纯 Node 22/TS，独立进程；不依赖 server.jsc，故可容器化）
+  # 凭据写在 heat-sidecar/.env（已被 gitignore），compose 只覆盖连接本容器的 DB 地址。
+  heat-sidecar:
+    build:
+      context: ./heat-sidecar
+      dockerfile: Dockerfile
+    image: openspace-heat-sidecar:latest
+    container_name: openspace-heat-sidecar
+    restart: unless-stopped
+    env_file:
+      - path: ./heat-sidecar/.env
+        required: false
+    environment:
+      PORT: "1235"
+      DB_HOST: mysql
+      DB_PORT: "3306"
+      EPH_STORE_DIR: /data/eph
+    depends_on:
+      mysql:
+        condition: service_healthy
+    ports:
+      - "1235:1235"
+    volumes:
+      - ./heat-sidecar/data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:1235/cgi2/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
   # ⚠️ 后端服务弃用：Linux 容器加载不了 Windows 编译的 server.jsc（roChecksum 绑定平台）。
   # 保留定义仅作参考；如需容器化，须先用源码重编 Linux 版字节码。
   # server:

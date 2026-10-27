@@ -160,6 +160,16 @@ const PROXY_TARGET =
   process.env.VITE_PROXY_TARGET ||
   `http://${SERVER_HOST || '127.0.0.1'}:${parseRootEnv('BACK_PORT') || 1234}/`
 
+/**
+ * heat-sidecar（/cgi2）代理目标，默认 127.0.0.1:1235。
+ * 覆盖方式：根 .env 写 SIDECAR_PORT，或临时 VITE_CGI2_TARGET=http://127.0.0.1:1236/。
+ * 注意：/cgi2 必须排在 /cgi 之前 —— http-proxy 按对象键顺序做前缀匹配，
+ * 否则 /cgi2/... 会被 /cgi 规则先截走，转发到 1234（jsc 后端）返回 404。
+ */
+const SIDECAR_TARGET =
+  process.env.VITE_CGI2_TARGET ||
+  `http://${SERVER_HOST || '127.0.0.1'}:${parseRootEnv('SIDECAR_PORT') || 1235}/`
+
 // https://vite.dev/config/
 export default defineConfig(() => ({
   plugins: [
@@ -217,6 +227,17 @@ export default defineConfig(() => ({
           proxy.on('error', (err, _req, res) => {
             res.writeHead(502, { 'Content-Type': 'application/json; charset=utf-8' })
             res.end(JSON.stringify({ code: 502, msg: '后端服务未就绪，请稍后重试', data: null }))
+          })
+        }
+      },
+      // heat-sidecar（安全热力计算服务）：必须排在 '/cgi' 之前，否则会被前缀优先匹配截走
+      '/cgi2': {
+        target: SIDECAR_TARGET,
+        changeOrigin: false,
+        configure: (proxy) => {
+          proxy.on('error', (err, _req, res) => {
+            res.writeHead(502, { 'Content-Type': 'application/json; charset=utf-8' })
+            res.end(JSON.stringify({ code: 502, msg: 'heat-sidecar 未就绪，请稍后重试', data: null }))
           })
         }
       },

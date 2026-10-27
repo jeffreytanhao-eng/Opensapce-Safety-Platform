@@ -6,6 +6,7 @@
  * - 位置单位 km，速度单位 km/s；
  * - 协方差为 6x6 行主序（36 个数），顺序 [x,y,z,vx,vy,vz]，已旋转到 ECI。
  */
+import type { HeatLevel } from '../heat/riskLevels'
 
 /** 三维向量（行向量语义，索引 0/1/2 对应 X/Y/Z） */
 export type Vec3 = [number, number, number]
@@ -35,7 +36,8 @@ export interface EphemSet {
   name: string
   format: EphemFormat
   frame: EphemFrame
-  source: 'upload' | 'builtin'
+  /** upload = 本机上传；official = heat-sidecar 官方星历（最新一轮）；builtin = 旧内置样本 */
+  source: 'upload' | 'official' | 'builtin'
   createdAt: number
   start: number
   stop: number
@@ -85,12 +87,18 @@ export interface ThreatEvent {
   relSpeedKmS: number
   /** 碰撞概率 */
   pc: number
+  /** Alfano 协方差缩放上界（Foster 2D）：Pc 低但上界过危险门限时说明协方差尺度不可信 */
+  pcMax?: number
+  /** 数据不足：pc < 危险门限 但 pcMax ≥ 危险门限 */
+  diluted?: boolean
   /** 风险归一化分值 0~1 */
   risk: number
-  level: 'high' | 'medium' | 'low'
+  level: HeatLevel
   /** TCA 时刻本星 ECI 位置 km */
   midEci: Vec3
   /** TCA 时刻对方 ECI 位置 / 速度（km、km/s），供三维绘制对方轨道 */
   otherEci?: Vec3
   otherVel?: Vec3
+  /** 对方 TLE：优先用 SGP4 采样整圈与局部弧，避免开普勒近似在长弧上偏离 */
+  otherTle?: { l1: string; l2: string }
 }

@@ -10,6 +10,8 @@
  *
  * 输出：public/ephemeris-samples/<norad>.json 与 index.json。
  * 每个文件保留首个历元起 72 小时、步长 60s 的状态（4320 点），与面板标注的「72h / 60s」一致。
+ *
+ * 说明：本脚本仅用于生成**开发样本**；生产环境的星历入库与热力计算由 heat-sidecar 同步任务负责。
  */
 import fs from 'node:fs'
 import path from 'node:path'
@@ -41,13 +43,16 @@ function parseEpoch(tok) {
   return dayStart + Math.round(((Number(m[3]) * 60 + Number(m[4])) * 60 + Number(m[5])) * 1000)
 }
 
-/** 从文件名提取名称与 NORAD */
+/** 从文件名提取名称与 NORAD
+ *  MEME id < 100000 与 NORAD 编号空间一致，可直接当编目号；
+ *  ≥ 100000 是服务商内部 id，不能当 NORAD（置 null，避免热力筛查把本星当成对方目标）。
+ */
 function metaFromFileName(fileName) {
   const base = path.basename(fileName).replace(/\.txt$/i, '')
   const m = /^MEME_(\d+)_([A-Za-z0-9-]+)_/.exec(base)
   const name = m ? m[2] : base
-  const num = /\b(\d{5})\b/.exec(name)
-  const norad = num ? Number(num[1]) : m ? Number(m[1]) : 0
+  const memeId = m ? Number(m[1]) : 0
+  const norad = memeId > 0 && memeId < 100000 ? memeId : null
   return { name, norad }
 }
 

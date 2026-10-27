@@ -187,49 +187,34 @@ export function buildAiTarget(d: AiTargetDeps): AiTarget | null {
   return null
 }
 
-/** 基于当前目标生成 3 条推荐问题（纯本地模板；问法均限定在现有工具能答准的范围） */
+/** 基于当前目标生成推荐问题（纯本地模板；问法均限定在五能力与现有工具能答准的范围） */
 export function buildSuggestions(t: AiTarget | null): string[] {
   if (!t) return []
   if (t.kind === 'satellite') {
     const id = `NORAD ${t.norad}`
     return [
       `介绍 ${id} 的类型、轨道区域与 TLE 历元新鲜度`,
-      // 两条链路必须都查：只说「碰撞扫描」会把模型引向单一数据源，进而误答「没有事件」
-      `${id} 有没有接近事件或交会风险？（碰撞预警与交会分析两条链路都查）`,
-      `本批次碰撞预警与交会分析的整体态势如何（事件数、等级分布）？`
+      `${id} 有没有接近事件或碰撞风险？`,
+      `本批次碰撞预警的整体态势如何（事件数、等级分布）？`
     ]
   }
   if (t.kind === 'constellation') {
     const kw = t.keyword || t.constellation || ''
     return [
       `用关键词「${kw}」能查到哪些目标？列出前几个及它们的 TLE 历元龄期`,
-      `关键词「${kw}」的目标有没有出现在最近的接近或交会事件里？（两条链路都查）`,
+      `关键词「${kw}」的目标有没有出现在最近的接近事件里？`,
       `当前整体碰撞预警态势如何（事件数与等级分布）？`
     ]
   }
   if (t.kind === 'conjunction') {
     return [
       `NORAD ${t.norad} 与 NORAD ${t.noradB} 分别是什么目标？TLE 历元新鲜度如何？`,
-      `除了这次接近，这两颗星在最近扫描里还有别的接近或交会事件吗？（两条链路都查）`,
+      `除了这次接近，这两颗星在最近扫描里还有别的接近事件吗？`,
       `本批次碰撞预警的整体态势（事件数、等级分布）如何？`
     ]
   }
-  if (t.kind === 'pass_target') {
-    const city = t.label
-    return [
-      `${city} 未来 24 小时有哪些过境窗口？`,
-      `${city} 最值得关注的一次过境是哪颗卫星、最大仰角多少？`,
-      `${city} 的过境里有没有适合光学成像的？`
-    ]
-  }
-  // 过境记录
-  const id = `NORAD ${t.norad}`
-  const nm = String(t.name || '').trim()
-  return [
-    `介绍 ${id}${nm ? `（${nm}）` : ''} 的类型、轨道区域与 TLE 历元新鲜度`,
-    `最近扫描里这颗星有没有接近或交会事件？（两条链路都查）`,
-    `当前空间环境是否适合对它做光学观测？`
-  ]
+  // 过境类目标不在五能力范围内（产品面不再引导过境预报）：不生成推荐问题
+  return []
 }
 
 /**

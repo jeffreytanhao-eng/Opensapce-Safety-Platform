@@ -439,6 +439,9 @@
   }
   .cd-none { font-size: 11.5px; color: #8398b5; line-height: 1.4;
     &.err { color: #ff8a80; } }
+  /* 说明性脚注（数据时效 / 坐标系 / 官方 CDM 对比结论） */
+  .cd-note { margin-top: 8px; font-size: 10.5px; line-height: 1.5; color: #7d8ba3;
+    &.is-warn { color: #f2c14e; } }
   /* 原始 TLE 两行 + 复制按钮 */
   .cd-tle-wrap { display: flex; align-items: stretch; gap: 8px; }
   .cd-tle { flex: 1; min-width: 0; margin: 0; padding: 6px 8px; border-radius: 8px;
@@ -690,7 +693,8 @@
   width: 0;
   height: 0;
 }
-/* 白色小圆环拾取器：外圈白环 + 内圈淡光晕，中心留空不遮挡卫星本体 */
+/* 选中蓝小圆环拾取器：外圈蓝环 + 内圈淡光晕，中心留空不遮挡卫星本体
+   （与三维里的「选中蓝」同色，见 scene.ts 的 SAT_SELECT_COLOR） */
 .sat-reticle-ring {
   position: absolute;
   width: 44px;
@@ -698,8 +702,8 @@
   margin-left: -22px;
   margin-top: -22px;
   border-radius: 50%;
-  border: 1.6px solid rgba(255, 255, 255, 0.95);
-  box-shadow: 0 0 6px rgba(255, 255, 255, 0.55), inset 0 0 6px rgba(255, 255, 255, 0.25);
+  border: 1.6px solid rgba(47, 143, 255, 0.95);
+  box-shadow: 0 0 6px rgba(47, 143, 255, 0.6), inset 0 0 6px rgba(47, 143, 255, 0.28);
   animation: sat-reticle-pulse 2s ease-in-out infinite;
 }
 @keyframes sat-reticle-pulse {

@@ -5,15 +5,15 @@
  * 共享响应式状态集中在 scene.ts（satPanel / g.cloudList / constellations / filterConst / consOrbitOn）。
  * 纯动作（点选卫星、星座展示开关、关闭面板）通过 emit 交给父组件 index.vue 编排（父组件调用 BaseScene.expose）。
  */
-import { computed, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import {
   TYPE_KEYS,
-  satPanel, g, dockMode,
+  satPanel, g, cloudRev, dockMode,
   dataSource, SAT_SOURCE_OPTIONS,
-  constellations, filterConst, consOrbitOn, consShowOf, consCardBound,
+  constellations, filterConst, consOrbitOn, consShowOf, consCardBound, stationFocus,
   drawerHeightVh, isDrawerDragging, useDrawerDrag
 } from './scene'
-import type { SatSource } from '@/api/sat_public'
+import { listConstellationLaunches, type ConstellationLaunch, type SatSource } from '@/api/sat_public'
 import type { ConstellationItem } from '@/api/satTypes'
 import { ephemMetas } from './ephem/useUserEphemeris'
 
@@ -90,6 +90,32 @@ function metaOf(c: ConstellationItem) {
   return null
 }
 
+/** 库内实时发射日期（sidecar /cgi2/cons/launch，随每日 GP 同步刷新）：key = code / name_en 小写 */
+const consLaunch = ref<Record<string, ConstellationLaunch>>({})
+onMounted(async () => {
+  try {
+    const r = await listConstellationLaunches()
+    const m: Record<string, ConstellationLaunch> = {}
+    for (const it of r.list || []) {
+      if (it.code) m[it.code.toLowerCase()] = it
+      if (it.name_en) m[it.name_en.toLowerCase()] = it
+    }
+    consLaunch.value = m
+  } catch {
+    // sidecar 未启动时静默回落 CONST_META 静态值，不影响卡片其余信息
+  }
+})
+
+/** 卡片「首发 / 最近发射」：最近发射取库内实时值与精选元数据中较晚者（成员表未及时补链时不回退），
+ *  首发优先用精选元数据（库里只能看到仍在轨的成员，早期首发星多已再入）。 */
+function datesOf(c: ConstellationItem): { first: string; last: string } | null {
+  const meta = metaOf(c)
+  if (!meta) return null
+  const dyn = consLaunch.value[(c.code || '').toLowerCase()] || consLaunch.value[(c.name_en || '').toLowerCase()]
+  const last = dyn?.last_launch && dyn.last_launch > meta.last ? dyn.last_launch : meta.last
+  return { first: meta.first, last }
+}
+
 /** 用途标签：精选星座外的全部在轨星座（网络检索用途后归一为短标签，轨道信息不算用途） */
 const CONS_TAG: Record<string, string> = {
   // 宽带互联网
@@ -155,6 +181,8 @@ const emit = defineEmits<{
   (e: 'pickSat', gi: number): void
   /** 星座卡片「星座展示」开关：父组件切换 filterConst 通道 */
   (e: 'consShow', name: string): void
+  /** 空间站卡片「位置展示」：按 NORAD 单星揭示并拉近（同一颗再点即收起） */
+  (e: 'stationShow', norad: number): void
   /** 打开星历分析面板；带 id 时同时激活该份「我的星历」 */
   (e: 'openEph', id?: string): void
 }>()
@@ -172,6 +200,7 @@ function close() {
 /** 点云内各星座的在轨成员数（载荷口径，与星座过滤/成员列表同源）：
  *  一次遍历建 Map，供卡片「在轨 Y」统计与排序使用 */
 const consStat = computed(() => {
+  void cloudRev.value // 建立响应式依赖：g 非响应式，数据源切换后靠代次触发重算
   const m = new Map<string, number>()
   for (const p of g.cloudList) {
     if (p.object_type !== 'PAYLOAD') continue
@@ -179,15 +208,33 @@ const consStat = computed(() => {
   }
   return m
 })
-/** 卡片列表：仅保留点云中有在轨成员的星座，按在轨数降序（大星座在前，同参考图） */
+/** 卡片列表：仅保留点云中有在轨成员的星座，按在轨数降序（大星座在前，同参考图）。
+ *  国际空间站 / 中国空间站改由上方两张「空间站」卡片呈现，这里排除避免重复。 */
 const consCards = computed(() => {
   return constellations.value
     .map((c) => ({ c, on: consStat.value.get(c.name) || 0 }))
-    .filter((x) => x.on > 0)
+    .filter((x) => x.on > 0 && x.c.code !== 'iss' && x.c.code !== 'css')
     .sort((a, b) => b.on - a.on)
+})
+
+/** 空间站卡片（不是星座：只展示单颗核心舱，无在轨数、无成员列表）
+ *  NORAD 固定：25544 = ISS (ZARYA)，48274 = CSS (TIANHE-1)，与三维模型的专用 glb 一一对应。 */
+const stationCards = [
+  { key: 'css', name: '天宫空间站', operator: '中国载人航天工程', country: '中国', iso: 'cn',
+    first: '2021-04-29', last: '2022-10-31', norad: 48274 },
+  { key: 'iss', name: '国际空间站', operator: '多国合作', country: '国际', iso: '',
+    first: '1998-11-20', last: '2021-07-21', norad: 25544 }
+] as const
+
+/** 位置展示态：独立通道（stationFocus）恰好指向该空间站时点亮；
+ *  其它入口（星座展示 / 成员点选）不写这个状态，卡片与三维显隐互不干扰。 */
+const stationOn = computed(() => {
+  const f = stationFocus.value
+  return f == null ? '' : stationCards.find((s) => s.norad === f)?.key ?? ''
 })
 /** 编目国兜底：取该星座在轨成员中出现最多的编目国 */
 const consOwner = computed(() => {
+  void cloudRev.value // 同上：编目国统计也依赖 g.cloudList
   const m = new Map<string, Map<string, number>>()
   for (const p of g.cloudList) {
     if (p.object_type !== 'PAYLOAD') continue
@@ -222,6 +269,7 @@ function toggleExpand(name: string) {
 }
 /** 展开星座的成员全局下标（载荷口径，与星座过滤一致） */
 const expandIdx = computed(() => {
+  void cloudRev.value // 展开成员下标随点云代次失效
   const name = expandName.value
   if (!name) return [] as number[]
   const out: number[] = []
@@ -266,7 +314,7 @@ function toggleOrbit(name: string) {
         @touchend="onDragEnd"
         @touchcancel="onDragEnd">
         <div class="sp-head-main sat-head-main">
-          <b class="sp-title">太空安全目标列表</b>
+          <b class="sp-title">太空目标列表</b>
         </div>
         <!-- 收起按钮：向左三角（CSS 矢量，替代原 » 文本符号） -->
         <button class="sp-close sp-close-tri" title="收起（点底部菜单可再次展开）" aria-label="收起列表" @click="close">
@@ -284,9 +332,6 @@ function toggleOrbit(name: string) {
           :title="'切换到' + o.label"
           @click="emit('source', o.value)"
         >{{ o.label }}</button>
-        <!-- 「我的星历」入口：不是数据源，单独放在分段控件右侧，点击展开星历分析面板 -->
-        <button class="sp-src-btn is-eph" title="打开星历分析（上传 / 我的星历 / 威胁筛选）"
-          @click="emit('openEph')">我的星历</button>
       </div>
       <div class="sp-show-label">太空目标展示</div>
       <div class="sp-types">
@@ -296,6 +341,29 @@ function toggleOrbit(name: string) {
           <span class="sp-type-txt">{{ TYPE_UI[k].label }}</span>
         </label>
       </div>
+      <!-- 空间站卡片：固定两颗核心舱，不参与星座排序；「位置展示」= 单星揭示 + 拉近镜头 -->
+      <div class="sp-station-cards">
+        <div v-for="s in stationCards" :key="s.key" class="sp-cons-card" :class="{ on: stationOn === s.key }">
+          <div class="sp-cons-head">
+            <span class="sp-cons-name" :title="s.name">{{ s.name }}</span>
+            <span class="sp-cons-op" :title="s.operator">运营方：{{ s.operator }}</span>
+            <span class="sp-cons-tag">空间站</span>
+          </div>
+          <div class="sp-cons-meta">
+            <span class="sp-cons-country">{{ s.country }}</span>
+            <img v-if="s.iso" class="sp-cons-flag" :src="'https://flagcdn.com/w20/' + s.iso + '.png'" alt="" />
+          </div>
+          <div class="sp-cons-dates">
+            <span>首发：{{ s.first }}</span><span>·</span><span>最近发射：{{ s.last }}</span>
+          </div>
+          <div class="sp-cons-actions">
+            <button class="sp-cons-btn" :class="{ on: stationOn === s.key }"
+              :title="stationOn === s.key ? '点暗：取消该站的单独展示（之后跟随「卫星」开关）' : '点亮：单独展示该空间站并拉近镜头（不影响其它目标）'"
+              @click="emit('stationShow', s.norad)">位置展示</button>
+          </div>
+        </div>
+      </div>
+
       <!-- 类型开关下方分割线 + 「卫星星座」标签 + 星座卡片列表 -->
       <div class="sp-const-label">卫星星座</div>
       <div class="sp-cons-scroll">
@@ -310,13 +378,16 @@ function toggleOrbit(name: string) {
           <div class="sp-cons-meta">
             <span class="sp-cons-country">{{ countryOf(x.c) }}</span>
             <img v-if="flagIsoOf(x.c)" class="sp-cons-flag" :src="'https://flagcdn.com/w20/' + flagIsoOf(x.c) + '.png'" alt="" />
-            <span class="sp-cons-stat">共 {{ x.c.satellite_count }} 颗 · 在轨 {{ x.on }}</span>
+            <!-- 「共 X 颗」取自 sat_constellation 注册表（固定 TLE 口径），与 AOE 数据源不一致，AOE 下只显示在轨数 -->
+            <span class="sp-cons-stat">
+              <template v-if="dataSource !== 'aoe'">共 {{ x.c.satellite_count }} 颗 · </template>在轨 {{ x.on }}
+            </span>
           </div>
-          <!-- 第三排：首发 / 最近发射（仅精选星座有数据，左对齐） -->
-          <div v-if="metaOf(x.c)" class="sp-cons-dates">
-            <span>首发：{{ metaOf(x.c)!.first }}</span>
+          <!-- 第三排：首发 / 最近发射（仅精选星座有数据，左对齐；最近发射取库内实时值） -->
+          <div v-if="datesOf(x.c)" class="sp-cons-dates">
+            <span>首发：{{ datesOf(x.c)!.first }}</span>
             <span>·</span>
-            <span>最近发射：{{ metaOf(x.c)!.last }}</span>
+            <span>最近发射：{{ datesOf(x.c)!.last }}</span>
           </div>
           <div class="sp-cons-actions">
             <button class="sp-cons-btn" :class="{ on: consShowOf(x.c.name) }"
@@ -356,7 +427,7 @@ function toggleOrbit(name: string) {
             <span class="sp-eph-name">{{ m.name }}</span>
             <span class="sp-eph-meta">{{ m.format.toUpperCase() }} · {{ m.points.toLocaleString() }} 点</span>
           </div>
-          <div v-if="!ephemMetas.length" class="sp-eph-empty">尚未上传星历，点击上方「我的星历」进入上传</div>
+          <div v-if="!ephemMetas.length" class="sp-eph-empty">尚未上传星历，可在右侧「星历分析」中上传</div>
         </div>
       </div>
     </aside>
@@ -390,6 +461,10 @@ function toggleOrbit(name: string) {
   margin-top: 14px; padding-top: 0;
   flex-wrap: nowrap; gap: 4px;
   .sp-type { flex: 1 1 0; justify-content: center; padding: 3px 0; gap: 4px; font-size: 11px; }
+}
+/* 空间站卡片区：固定在「卫星星座」标签之上，不随星座列表滚动；左右边距与滚动区一致 */
+.side-panel .sp-station-cards {
+  margin: 10px -12px 0; padding: 0 12px; pointer-events: auto;
 }
 /* 「卫星星座」标签行：类型开关下方新分割线（顶部边框），字号同「太空目标展示」、居中。
    分割线位于「卫星」按钮与标签文字间隔的正中：.sp-types 自带 margin-bottom 10px，
@@ -455,12 +530,6 @@ function toggleOrbit(name: string) {
 }
 .side-panel .sp-cons-empty { padding: 14px 0; text-align: center; font-size: 11px; color: rgba(160,180,210,0.6); }
 
-/* 「我的星历」入口：与数据源分段按钮同高，用描边区分「这不是数据源」 */
-.side-panel .sp-src .sp-src-btn.is-eph {
-  flex: 0 0 78px; height: 26px; border-radius: 7px; border: 1px solid rgba(110,160,230,0.42);
-  background: rgba(46,96,168,0.28); color: #9fc6ff;
-  &:hover { color: #dbe9fb; background: rgba(62,120,200,0.45); }
-}
 /* 我的星历分组：与星座卡片同区滚动的尾部区块 */
 .side-panel .sp-eph { margin-top: 14px; padding-top: 10px; border-top: 1px solid rgba(120,160,220,0.16); }
 .side-panel .sp-eph-title {

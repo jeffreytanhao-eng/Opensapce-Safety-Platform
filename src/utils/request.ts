@@ -163,4 +163,31 @@ export function httpCgi<T = unknown>(cfg: AxiosRequestConfig): Promise<T> {
   return cgiRequest(cfg) as unknown as Promise<T>
 }
 
+/**
+ * /cgi2 —— 安全热力独立计算服务 heat-sidecar 的接口实例
+ * 与 /cgi 隔离：sidecar 可能未部署（本地开发常见），请求失败一律静默 reject、且**不做自动重试**，
+ * 由调用方展示「服务未就绪」提示，避免每次打开面板都白等 1.4s 的重试窗口。
+ */
+const cgi2Request = axios.create({
+  baseURL: API_BASE ? `${API_BASE}/cgi2` : '/cgi2',
+  timeout: 30000,
+  withCredentials: false
+})
+
+cgi2Request.interceptors.response.use(
+  (res) => {
+    const body = res.data as ApiResult
+    if (body && typeof body.code === 'number' && body.code !== 0) {
+      return Promise.reject(new Error(body.msg || '请求失败'))
+    }
+    return body?.data as never
+  },
+  (err) => Promise.reject(err)
+)
+
+/** 泛型封装：httpCgi2<T>({ url, method, data, params }) → Promise<T> */
+export function httpCgi2<T = unknown>(cfg: AxiosRequestConfig): Promise<T> {
+  return cgi2Request(cfg) as unknown as Promise<T>
+}
+
 export default request

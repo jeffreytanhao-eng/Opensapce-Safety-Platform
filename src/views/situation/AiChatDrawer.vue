@@ -26,7 +26,6 @@ import AiRichText from './AiRichText.vue'
 import { buildSuggestions, toContext } from './aiTarget'
 import type { AiTarget } from './aiTarget'
 import { uploadUrl } from '@/utils/request'
-import ContactDialog from '@/components/ContactDialog.vue'
 
 const props = defineProps<{ open: boolean; target?: AiTarget | null }>()
 const emit = defineEmits<{
@@ -34,7 +33,7 @@ const emit = defineEmits<{
   /** 界面动作上抛：/situation 容器负责定位选中 / 打开面板 / 绘制区域 / 图谱下钻 */
   (e: 'action', a: AiAction): void
   /** 新一轮提问开始：容器据此重置「本轮是否已清空展示效果」标志（保证下次效果前清空） */
-  (e: 'round-start'): void
+  (e: 'round-start', q: string): void
 }>()
 
 interface ChatItem {
@@ -159,7 +158,7 @@ const inputRef = ref<HTMLTextAreaElement | null>(null)
 const cardRef = ref<HTMLElement | null>(null)
 const wrapRef = ref<HTMLElement | null>(null)
 const dropRef = ref<HTMLElement | null>(null)
-/** 打开即底部小窗（不进全屏毛玻璃态）：上方三维态势保持可见可交互；标题栏 ⤢ 可随时放大全屏 */
+/** 打开即底部卡片（与「安全热力图」同款几何）：上方三维态势保持可见可交互，不再提供放大成全屏模态的入口 */
 const docked = ref(true)
 /** 移动端「收起小横条」态：底部大卡片收成一条小横条，给三维主屏让位。
  *  仅由模型下发「态势类界面动作」时自动进入（见 dockForSituation）；标题栏「收起」按钮走的是关闭浮层，不进入此态 */
@@ -167,21 +166,6 @@ const collapsed = ref(false)
 /** 是否窄屏（≤768px，与样式断点一致）：收起只在移动端生效，回到宽屏自动复位避免残留 */
 const narrow = ref(false)
 let mqNarrow: MediaQueryList | null = null
-
-/** 标题栏入口：问题反馈 / 商业合作（免登录匿名提交） */
-const feedbackOpen = ref(false)
-const cooperationOpen = ref(false)
-function openFeedback() {
-  feedbackOpen.value = true
-}
-function openCooperation() {
-  cooperationOpen.value = true
-}
-
-/** 标题栏缩放按钮：全屏 ↔ 右侧小窗切换 */
-function onToggleDock() {
-  docked.value = !docked.value
-}
 
 /** 标题栏「最小化」（宽屏）：关闭整个浮层，底部 dock 的「智能体」入口取消高亮、框体隐藏。
  *  与移动端「收起」同义（同一意图的两种形态），故直接复用其关闭逻辑。 */
@@ -293,15 +277,11 @@ const mode = computed(() => (docked.value ? 'docked' : items.value.length ? 'cha
 
 /** 输入联想池：每条带一个能力标签，点下拉里的一项把问句填进输入框（不直接发送）供继续编辑 */
 const IDEAS: Array<{ tag: string; q: string }> = [
-  { tag: '态势感知', q: '现在有多少在轨目标，数据新鲜吗？' },
+  { tag: '编目总览', q: '现在有多少在轨目标？类型分布和数据新鲜度如何？' },
+  { tag: '目标查询', q: '帮我查一下开运一号卫星的基本信息' },
   { tag: '碰撞预警', q: '最近一次碰撞扫描有哪些危险的接近事件？' },
-  { tag: '交会分析', q: '最近的交会扫描事件结论如何？' },
-  { tag: '过境预报', q: '帮我看看近期的卫星过境情况' },
-  { tag: '即将发射', q: '最近哪个发射站即将发射火箭？' },
-  { tag: '知识图谱', q: '这个系统的知识图谱里都关联了哪些内容？' },
-  { tag: '找卫星', q: '帮我搜一下开运一号卫星的详细信息' },
-  { tag: '找星座', q: '帮我找一下国网星座并展示它的全部成员' },
-  { tag: '发射记录', q: '最近有哪些火箭发射记录？' }
+  { tag: '卫星档案', q: '给我一份开运一号的完整档案（轨道、发射、所属星座）' },
+  { tag: '星座档案', q: '国网星座有多少成员？列一些典型成员' }
 ]
 
 /** 基于当前选中目标的推荐问题：本地模板生成，秒出、不占 CPU、不经过大模型 */
@@ -340,7 +320,7 @@ function onRichGo(p: { source: string; key: string }) {
     if (!(targetId > 0)) return
     action = { kind: 'select_pass_city', targetId, norad: Number.isFinite(norad) && norad > 0 ? norad : undefined }
   } else {
-    action = { kind: 'select_conj_event', source: src === 'cri' ? 'cri' : 'local', key }
+    action = { kind: 'select_conj_event', source: src === 'cri' ? 'cri' : 'conj', key }
   }
   emit('action', action)
   if (SITUATION_KINDS.has(action.kind)) dockForSituation()
@@ -483,8 +463,19 @@ function historyPayload() {
     .map((m) => ({ role: m.role, content: m.role === 'assistant' ? stripMarks(m.content) : m.content }))
 }
 
+/** 五能力范围前缀（L2 约束）：后端 jsc 内的工具表无法从产品面删除，只能靠每轮提问前缀把模型
+ *  引导回「编目总览 / 目标查询 / 碰撞预警 / 卫星档案 / 星座档案」这五个口径，并优先用本地工具。
+ *  只拼在下发给后端的最后一条 user 文本上：不进对话历史、不显示给用户、不改用户自己的提问气泡。 */
+const SCOPE_PREFIX = '【能力范围】仅回答：编目总览、目标查询、碰撞预警、卫星档案、星座档案；可辅以联网检索。勿主动提供过境预报、发射记录、知识图谱、交会分析。优先本地工具，不足再用 web_search。'
+
+function withScopePrefix(list: AiMessage[]): AiMessage[] {
+  const last = list[list.length - 1]
+  if (!last || last.role !== 'user') return list
+  return [...list.slice(0, -1), { ...last, content: `${SCOPE_PREFIX}\n${last.content}` }]
+}
+
 /** 无意义输入的委婉回绝（不走大模型，本地直接答复） */
-const JUNK_REPLY = '宝子，问点有趣的问题吧～ 比如「北京未来 24 小时有哪些卫星过境」，或者试试输入框里的联想问题'
+const JUNK_REPLY = '宝子，问点有趣的问题吧～ 比如「现在有多少在轨目标？类型分布和数据新鲜度如何」，或者试试输入框里的联想问题'
 /** 常见无意义词（去标点、转小写后精确匹配） */
 const JUNK_WORDS = new Set([
   'test', 'testing', 'tests', 'ceshi', 'demo', 'sample', 'foo', 'bar',
@@ -531,7 +522,7 @@ async function send(text?: string, opts?: { estimate?: boolean }) {
   // 无意义输入（test / 测试 / 11 / 22…）：本地委婉回绝，不走大模型
   if (isMeaninglessInput(q)) { replyJunk(q); return }
   // 新一轮提问开始：通知容器重置「本轮已清空展示效果」标志（下一轮首个展示型动作前再清空一次）
-  emit('round-start')
+  emit('round-start', q)
   // 上下文在「发出这一条」时快照：之后用户切换目标，不会改变这条提问的指代
   const ctx = toContext(props.target || null)
   items.value.push({
@@ -564,7 +555,7 @@ async function runStream(reply: ChatItem, payload: AiMessage[], ctx: Record<stri
   try {
     await streamAiChat({
       scope: 'public',
-      messages: payload,
+      messages: withScopePrefix(payload),
       context: ctx,
       estimate,
       signal: ac.signal,
@@ -647,14 +638,14 @@ function stop() {
  * 对外接口：外部入口（区域 / 多区域过境面板的「计算」）把一段提示词直接交给智能体提问。
  * 语义就是「以当前用户身份发起一轮提问」，因此完全复用 send()：无意义输入过滤、
  * 上下文快照、流式渲染等都不另写一套。
- * 点「计算」时用户期待结果立刻呈现在眼前：先展开浮层并退出小窗 / 小横条，再发送。
+ * 点「计算」时用户期待结果立刻呈现在眼前：先展开浮层并退出小横条，再发送（卡片几何恒为底部热力同款）。
  * 该入口固定走「推算模式」（estimate）：不占本机 CPU、不查历史批次、结果不落库。
  */
 async function ask(text: string) {
   const q = String(text ?? '').trim()
   if (!q) return
   emit('update:open', true)
-  docked.value = false
+  docked.value = true
   collapsed.value = false
   await nextTick()
   await send(q, { estimate: true })
@@ -741,35 +732,21 @@ watch(() => props.target?.key || '', (k, old) => {
         @pointerup="onHeadPointerUp"
         @pointercancel="onHeadPointerUp"
       >
-        <span class="ag-title"><i class="dot"></i>太空安全专家<b>AI</b></span>
-        <span class="ag-links">
-          <button class="ag-link" type="button" @click="openFeedback">问题反馈</button>
-          <i class="ag-link-sep"></i>
-          <button class="ag-link" type="button" @click="openCooperation">商业合作</button>
-        </span>
-        <!-- 顶部缩放入口：小窗 ↔ 全屏 一个按钮切换（宽屏用）；不提供关闭（智能体是态势页主体，由页面左侧入口启停） -->
-        <button
-          class="ag-icon ag-scale"
-          :title="docked ? '放大全屏' : '缩小为小窗'"
-          @click="onToggleDock"
-        >{{ docked ? '⤢' : '⤡' }}</button>
-        <!-- 最小化（宽屏）：直接关闭整个浮层，底部 dock 的「智能体」入口随之取消高亮、框体一并隐藏 -->
+        <span class="ag-title"><i class="dot"></i>太空<b>AI</b>专家</span>
+        <!-- 最小化（宽屏）：与安全热力图弹窗收起键同款的倒三角按钮，固定卡片右上角，
+             点击关闭整个浮层（底部 dock 的「智能体」入口随之取消高亮、框体一并隐藏） -->
         <button
           class="ag-icon ag-min"
           title="最小化（关闭智能体，露出三维主屏）"
           @click="onMinimize"
-        >—</button>
+        ><svg viewBox="0 0 10 10" aria-hidden="true"><path d="M1.6 3.1 L8.4 3.1 L5 7.1 Z" /></svg></button>
         <!-- 移动端「收起」：直接关闭整个浮层（底部 dock 的「智能体」入口随之取消高亮），把三维主屏交还用户；
-             已处于收起小横条时点它先展开回对话（宽屏隐藏，用上面的缩放入口） -->
+             已处于收起小横条时点它先展开回对话（宽屏隐藏，用上面的「最小化」） -->
         <button
           class="ag-icon ag-collapse"
           :title="collapsed ? '展开智能体' : '收起（关闭智能体，露出三维主屏）'"
           @click="onToggleCollapse"
         >{{ collapsed ? '▴' : '▾' }}</button>
-      </div>
-
-      <div v-if="status?.enabled === false" class="ag-warn">
-        智能体暂未开放（后端尚未配置大模型）。
       </div>
 
       <div
@@ -784,7 +761,7 @@ watch(() => props.target?.key || '', (k, old) => {
         <!-- 空态：品牌大标题 + 能力说明（idle 态的主体） -->
         <div v-if="!items.length" class="ag-hero">
           <h2>开源太空安全</h2>
-          <p class="ag-sub">卫星资料 · 知识图谱 · 碰撞预警 · 交会分析 · 过境预报 · 发射记录</p>
+          <p class="ag-sub">编目总览 · 目标查询 · 碰撞预警 · 卫星档案 · 星座档案</p>
         </div>
 
         <template v-for="(m, i) in items" :key="i">
@@ -902,7 +879,7 @@ watch(() => props.target?.key || '', (k, old) => {
         <div ref="wrapRef" class="ag-box-wrap">
           <!-- 输入联想下拉：仅在输入框有字符时才出现（聚焦空输入不弹），按关键字过滤检索思路，点击填入输入框继续编辑 -->
           <div
-            v-if="dropOpen && mode !== 'docked' && dropItems.length"
+            v-if="dropOpen && dropItems.length"
             ref="dropRef"
             class="ag-drop"
             :class="{ up: dropUp }"
@@ -925,7 +902,7 @@ watch(() => props.target?.key || '', (k, old) => {
               v-model="input"
               rows="1"
               maxlength="500"
-              placeholder="问我任何空间目标、碰撞风险、过境或发射记录的问题…"
+              placeholder="问我编目规模、目标查询、碰撞预警、卫星或星座档案…"
               @focus="openDropdown"
               @blur="dropOpen = false"
               @input="onInput"
@@ -936,13 +913,7 @@ watch(() => props.target?.key || '', (k, old) => {
           </div>
         </div>
       </div>
-
-      <div class="ag-note">初筛结果仅供参考，不构成规避决策依据。</div>
     </div>
-
-    <!-- 标题栏入口：问题反馈 / 商业合作（免登录匿名提交） -->
-    <ContactDialog v-model="feedbackOpen" kind="feedback" />
-    <ContactDialog v-model="cooperationOpen" kind="cooperation" />
   </div>
 </template>
 
@@ -973,41 +944,25 @@ watch(() => props.target?.key || '', (k, old) => {
   opacity: 1;
   visibility: visible;
 }
-.ai-glass.idle {
-  align-items: center;
-}
-.ai-glass.chat {
-  align-items: center;
-  padding: 56px 0 40px;
-}
+/* 三态统一锚点：底部居中，浮在「底部按钮栏 + 时间条」之上（与安全热力图同款几何） */
+.ai-glass.idle,
+.ai-glass.chat,
 .ai-glass.docked {
   align-items: flex-end;
   justify-content: center;
-  /* 底部小窗：浮在底部「按钮栏 + 时间条」之上，避开左侧「复位」与右侧图例 */
   padding: 0 14px calc(122px + env(safe-area-inset-bottom));
 }
 
-/* 毛玻璃底：三维背景当底图（docked 时完全透明，左侧态势直接可交互） */
+/* 底衬：不再压暗/虚化三维场景 —— 地球与点云保持清晰可见、可拾取（与安全热力图一致） */
 .ag-scrim {
   position: absolute;
   inset: 0;
-  /* idle/chat 时它是虚化底：吃事件只为「点空白别穿到底下三维场景」，点击不再关闭对话框；
-     docked 时靠下面单条规则彻底放行，让左侧态势可交互 */
-  pointer-events: auto;
-  background: rgba(7, 11, 19, 0.5);
-  backdrop-filter: blur(16px) saturate(1.25);
-  -webkit-backdrop-filter: blur(16px) saturate(1.25);
-  transition: background 0.24s ease, backdrop-filter 0.24s ease;
-}
-.ai-glass.docked .ag-scrim {
-  background: transparent;
-  backdrop-filter: none;
-  -webkit-backdrop-filter: none;
   pointer-events: none;
+  background: transparent;
 }
 
-/* 卡片本体：布局容器。全屏态（idle/chat）刻意「不画框」——像搜索页那样直接浮在虚化背景上展开；
-   只有收成右侧小窗（docked）时才套上玻璃框（用户口径：展开不要框，缩放变成框可以） */
+/* 卡片本体：与「安全热力图」面板同款尺寸与玻璃外观（三态共用一套几何）。
+   高度按内容自适应，封顶 min(62vh, 520px)，超出交给 .ag-list 内部滚动。 */
 .ag-card {
   position: relative;
   z-index: 1;
@@ -1015,40 +970,20 @@ watch(() => props.target?.key || '', (k, old) => {
   pointer-events: auto;
   display: flex;
   flex-direction: column;
-  width: min(820px, 92vw);
-  height: min(78vh, 720px);
-  color: var(--text-1);
-  overflow: hidden;
-  transition: width 0.26s ease, height 0.26s ease, background 0.26s ease;
-}
-.ai-glass.idle .ag-card {
-  height: auto;
-  /* 空态内容可能较高（历史恢复等场景）：封顶到 88vh，超出部分交给 .ag-list 内部滚动 */
-  max-height: 88vh;
-}
-/* docked（底部小窗）：套上玻璃框，成为一张贴在底部的独立卡片 */
-.ai-glass.docked .ag-card {
   width: min(560px, 94vw);
   height: auto;
   max-height: min(62vh, 520px);
+  color: var(--text-1);
+  overflow: hidden;
   border: 1px solid rgba(127, 216, 255, 0.18);
   border-radius: 16px;
-  background: linear-gradient(180deg, rgba(22, 30, 44, 0.78), rgba(13, 19, 30, 0.86));
+  background: linear-gradient(180deg, rgba(22, 30, 44, 0.88), rgba(13, 19, 30, 0.92));
   backdrop-filter: blur(22px) saturate(1.3);
   -webkit-backdrop-filter: blur(22px) saturate(1.3);
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.08),
     0 24px 60px rgba(0, 0, 0, 0.55);
-}
-/* 全屏态：标题栏与输入区也一并去分隔线与底色，让整体「展开」而不是「卡片」 */
-.ai-glass.idle .ag-head,
-.ai-glass.chat .ag-head {
-  border-bottom-color: transparent;
-  background: transparent;
-}
-.ai-glass.idle .ag-input,
-.ai-glass.chat .ag-input {
-  border-top-color: transparent;
+  transition: width 0.26s ease, height 0.26s ease, background 0.26s ease;
 }
 
 /* 标题栏：提升层级，保证关闭按钮永不被输入联想下拉盖住 */
@@ -1097,34 +1032,6 @@ watch(() => props.target?.key || '', (k, old) => {
   border: 1px solid rgba(127, 216, 255, 0.35);
   color: #7fd8ff;
 }
-.ag-links {
-  margin-left: 10px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  /* 窗口窄时优先让位给缩放入口：超出即裁掉，不把图标挤出可视区 */
-  min-width: 0;
-  overflow: hidden;
-}
-.ag-link {
-  border: none;
-  background: transparent;
-  padding: 0;
-  font-size: 12px;
-  color: var(--text-3);
-  cursor: pointer;
-  white-space: nowrap;
-  transition: color 0.15s;
-}
-.ag-link:hover { color: #7fd8ff; }
-.ag-link-sep {
-  flex: none;
-  width: 1px;
-  height: 10px;
-  color: var(--text-3);
-  background: currentColor;
-  opacity: 0.28;
-}
 .ag-icon {
   margin-left: auto;
   /* 图标按钮不参与收缩，避免卡片变窄时被裁掉 */
@@ -1148,9 +1055,35 @@ watch(() => props.target?.key || '', (k, old) => {
   display: none;
   margin-left: 2px;
 }
-/* 「最小化」按钮（宽屏）：紧贴缩放入口，关闭整个浮层（移动端由「收起」承担同一职责，故窄屏隐藏） */
+/* 「最小化」按钮（宽屏）：与安全热力图弹窗收起键（sp-close-tri）同款倒三角，绝对定位卡片右上角；
+   关闭整个浮层（移动端由「收起」承担同一职责，故窄屏隐藏）。
+   绝对定位脱离 flex 流：不占标题栏宽度，标题可放心占满整行 */
 .ag-icon.ag-min {
-  margin-left: 2px;
+  position: absolute;
+  right: 10px;
+  top: 8px;
+  z-index: 7;
+  width: 24px;
+  height: 24px;
+  margin: 0;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 0;
+  border-radius: 6px;
+  background: rgba(120, 160, 220, 0.12);
+  border-color: rgba(120, 160, 220, 0.25);
+  color: #cfdcea;
+}
+.ag-icon.ag-min svg {
+  width: 9px;
+  height: 9px;
+  fill: currentColor;
+  display: block;
+}
+.ag-icon.ag-min:hover {
+  background: rgba(255, 255, 255, 0.14);
 }
 
 /* 小窗（docked）态：卡片仅 420px 宽，标题栏可用宽度有限。
@@ -1175,24 +1108,12 @@ watch(() => props.target?.key || '', (k, old) => {
   font-size: 9px;
   padding: 0 4px;
 }
-.ai-glass.docked .ag-links {
-  margin-left: 4px;
-  gap: 5px;
-}
-.ai-glass.docked .ag-link { font-size: 11px; }
 .ai-glass.docked .ag-icon {
   padding: 3px 5px;
   font-size: 12px;
 }
-.ai-glass.docked .ag-icon.ag-min { margin-left: 1px; }
-
-.ag-warn {
-  padding: 8px 14px;
-  font-size: 12px;
-  color: #ffb347;
-  border-bottom: 1px solid rgba(255, 179, 71, 0.25);
-  background: rgba(255, 179, 71, 0.08);
-}
+/* 小窗态下最小化键仍是右上角同款倒三角：抵消上面 .ai-glass.docked .ag-icon 的收紧 padding（三角需居中） */
+.ai-glass.docked .ag-icon.ag-min { margin: 0; padding: 0; }
 
 /* 消息区（透明容器：玻璃感来自卡片本身，避免再叠一层实色把背景糊死） */
 .ag-list {
@@ -1665,12 +1586,6 @@ watch(() => props.target?.key || '', (k, old) => {
   font-size: 12px;
 }
 
-.ag-note {
-  padding: 0 14px 10px;
-  font-size: 11px;
-  color: var(--text-3);
-}
-
 @media (max-width: 768px) {
   /* 移动端：一律底部大卡片，不做左右分栏（屏幕太窄，态势与对话无法并存） */
   .ai-glass,
@@ -1687,6 +1602,8 @@ watch(() => props.target?.key || '', (k, old) => {
   .ai-glass.docked .ag-card {
     width: auto;
     height: 78vh;
+    /* 移动端保留原「底部大卡片」高度，不吃桌面端的 62vh 封顶 */
+    max-height: 78vh;
     margin: 0 8px 78px;
     border: 1px solid rgba(127, 216, 255, 0.18);
     border-radius: 16px;
@@ -1740,14 +1657,8 @@ watch(() => props.target?.key || '', (k, old) => {
     font-size: 9px;
     padding: 0 4px;
   }
-  .ag-links {
-    margin-left: 4px;
-    gap: 5px;
-  }
-  .ag-link { font-size: 11px; }
 
-  /* 移动端智能体入口：显示「收起」、隐藏「缩小为小窗」（窄屏下小窗即底部卡片，原按钮无意义） */
-  .ag-icon.ag-scale,
+  /* 移动端智能体入口：显示「收起」、隐藏「最小化」（窄屏下两种关闭语义重复，只留一个） */
   .ag-icon.ag-min { display: none; }
   .ag-icon.ag-collapse {
     display: inline-flex;
@@ -1776,10 +1687,6 @@ watch(() => props.target?.key || '', (k, old) => {
     padding: 9px 12px;
     border-bottom-color: transparent;
     background: transparent;
-  }
-  /* 收起横条只留「标题 + 展开按钮」：入口文案让位，保持紧凑 */
-  .ai-glass.collapsed .ag-links {
-    display: none;
   }
 }
 </style>

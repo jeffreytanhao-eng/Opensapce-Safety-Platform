@@ -3,7 +3,6 @@ import { parseIso } from './time'
 import { frameToEci, uvwCovToEci } from './frames'
 
 const NUM_RE = /^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$/
-const FRAME_SET: EphemFrame[] = ['UVW', 'EME2000', 'ICRF', 'ITRF', 'TEME']
 
 /** CCSDS 下三角（行主序）：C11, C21, C22, C31, ... 共 21 个数 */
 function lowerTriangleToCov(nums: number[]): Float64Array {
@@ -19,6 +18,31 @@ function lowerTriangleToCov(nums: number[]): Float64Array {
   return cov
 }
 
+/** CCSDS 上三角（行主序，COV_ORDERING=UTM）：C11, C12, ... 共 21 个数 */
+function upperTriangleToCov(nums: number[]): Float64Array {
+  const cov = new Float64Array(36)
+  let k = 0
+  for (let i = 0; i < 6; i++) {
+    for (let j = i; j < 6; j++) {
+      const v = nums[k++]
+      cov[i * 6 + j] = v
+      cov[j * 6 + i] = v
+    }
+  }
+  return cov
+}
+
+/** OCM 参考系取值归一：ITRF2000/ITRF2014 → ITRF，GCRF → ICRF，RTN/RSW → UVW（相对系） */
+function normalizeFrame(v: string): EphemFrame | null {
+  const f = v.trim().toUpperCase()
+  if (f.startsWith('ITRF')) return 'ITRF'
+  if (f === 'GCRF' || f === 'ICRF') return 'ICRF'
+  if (f === 'EME2000' || f === 'J2000') return 'EME2000'
+  if (f === 'TEME') return 'TEME'
+  if (f === 'UVW' || f === 'RTN' || f === 'RSW') return 'UVW'
+  return null
+}
+
 function medianStep(states: EphemState[]): number {
   if (states.length < 2) return 0
   const diffs: number[] = []
@@ -27,17 +51,18 @@ function medianStep(states: EphemState[]): number {
   return diffs[Math.floor(diffs.length / 2)]
 }
 
+/** 状态点按时间严格递增（pushState 保证），协方差逐历元挂接用二分查找避免 O(n²) */
 function nearestIndex(states: EphemState[], t: number): number {
-  let best = -1
-  let bestD = Infinity
-  for (let i = 0; i < states.length; i++) {
-    const d = Math.abs(states[i].t - t)
-    if (d < bestD) {
-      bestD = d
-      best = i
-    }
+  if (!states.length) return -1
+  let lo = 0
+  let hi = states.length - 1
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1
+    if (states[mid].t < t) lo = mid + 1
+    else hi = mid
   }
-  return best
+  if (lo > 0 && Math.abs(states[lo - 1].t - t) <= Math.abs(states[lo].t - t)) return lo - 1
+  return lo
 }
 
 /**
@@ -47,8 +72,12 @@ function nearestIndex(states: EphemState[], t: number): number {
  * (a) 每行 7 列数字：`ISO时间 x y z vx vy vz`；
  * (b) 键值组：`EPOCH = <iso>` 后跟 `X/Y/Z/X_DOT/Y_DOT/Z_DOT = ...`。
  *
- * 协方差段 `COVARIANCE_START ... COVARIANCE_STOP` 内 `EPOCH =` 起 21 个下三角值，
- * 默认按 RTN(=UVW) 处理并旋转到 ECI（若 COV_REF_FRAME 明确为惯性系则不旋转）。
+ * 协方差段 `COVARIANCE_START / COV_START ... COVARIANCE_STOP / COV_STOP` 支持两种写法：
+ * (a) `EPOCH = <iso>` 后跟 21 个下三角值；
+ * (b) 每历元一行 `ISO时间 + 21 个协方差元素`（SpaceX Starlink 公开 OCM 的写法）。
+ * 默认按 RTN(=UVW) 处理并旋转到 ECI；`COV_REF_FRAME` 为 ITRF 时保持原系并给出提示。
+ *
+ * 参考系支持 `REF_FRAME` 与 `TRAJ_REF_FRAME` 两种键名，取值 ITRF2000 / GCRF 等会归一化。
  */
 export function parseOcm(text: string): ParseResult {
   const warnings: string[] = []
@@ -61,6 +90,8 @@ export function parseOcm(text: string): ParseResult {
   let objectName = ''
   let objectId = ''
   let covFrame: string = 'RTN'
+  /** 协方差元素排列：LTM=下三角（默认），UTM=上三角 */
+  let covOrdering: 'LTM' | 'UTM' = 'LTM'
 
   let covEpoch: number | null = null
   let covNums: number[] = []
@@ -113,7 +144,8 @@ export function parseOcm(text: string): ParseResult {
       warnings.push(`协方差历元 ${new Date(covEpoch).toISOString()} 附近 60s 内无状态点，已忽略`)
     } else {
       const st = states[idx]
-      const cov = lowerTriangleToCov(covNums.slice(0, 21))
+      const tri = covNums.slice(0, 21)
+      const cov = covOrdering === 'UTM' ? upperTriangleToCov(tri) : lowerTriangleToCov(tri)
       const isRtn = /RTN|UVW|RSW/i.test(covFrame)
       st.cov = isRtn ? uvwCovToEci(cov, st.r, st.v) : cov
     }
@@ -144,13 +176,13 @@ export function parseOcm(text: string): ParseResult {
       section = 'none'
       continue
     }
-    if (upper.startsWith('COVARIANCE_START')) {
+    if (upper.startsWith('COVARIANCE_START') || upper.startsWith('COV_START')) {
       flushPending()
       attachCov()
       section = 'cov'
       continue
     }
-    if (upper.startsWith('COVARIANCE_STOP')) {
+    if (upper.startsWith('COVARIANCE_STOP') || upper.startsWith('COV_STOP')) {
       attachCov()
       section = 'none'
       continue
@@ -169,6 +201,12 @@ export function parseOcm(text: string): ParseResult {
           if (covEpoch === null) warnings.push(`第 ${ln} 行协方差 EPOCH 无法解析：${value}`)
         } else if (key === 'COV_REF_FRAME') {
           covFrame = value
+        } else if (key === 'COV_ORDERING') {
+          covOrdering = value.trim().toUpperCase() === 'UTM' ? 'UTM' : 'LTM'
+        } else if (key === 'COV_TYPE') {
+          if (value.trim().toUpperCase() !== 'CARTPV') {
+            warnings.push(`COV_TYPE=${value} 暂不支持，协方差按笛卡尔 [r,v] 处理`)
+          }
         } else if (NUM_RE.test(value)) {
           covNums.push(Number(value))
         }
@@ -189,15 +227,17 @@ export function parseOcm(text: string): ParseResult {
         continue
       }
 
-      if (key === 'REF_FRAME') {
-        const f = value.toUpperCase() as EphemFrame
-        if (FRAME_SET.indexOf(f) >= 0) refFrame = f
-        else warnings.push(`未识别的 REF_FRAME=${value}，按 EME2000 处理`)
+      if (key === 'REF_FRAME' || key === 'TRAJ_REF_FRAME') {
+        const f = normalizeFrame(value)
+        if (f) refFrame = f
+        else warnings.push(`未识别的 ${key}=${value}，按 EME2000 处理`)
       } else if (key === 'TIME_SYSTEM') {
         timeSystem = value.toUpperCase()
       } else if (key === 'OBJECT_NAME') {
         objectName = value
       } else if (key === 'OBJECT_ID') {
+        objectId = value
+      } else if (key === 'OBJECT_DESIGNATOR' && !objectId) {
         objectId = value
       }
       continue
@@ -207,6 +247,16 @@ export function parseOcm(text: string): ParseResult {
       const tokens = line.split(/\s+/)
       if (tokens.every((c) => NUM_RE.test(c))) {
         for (const c of tokens) covNums.push(Number(c))
+        continue
+      }
+      // 每历元一行的写法：`ISO时间 + 21 个协方差元素`（SpaceX Starlink OCM）
+      const tCov = parseIso(tokens[0])
+      const vals = tokens.slice(1)
+      if (tCov !== null && vals.length >= 21 && vals.every((c) => NUM_RE.test(c))) {
+        attachCov()
+        covEpoch = tCov
+        covNums = vals.slice(0, 21).map(Number)
+        attachCov()
       }
       continue
     }
@@ -251,11 +301,13 @@ export function parseOcm(text: string): ParseResult {
       st.r = conv.r
       st.v = conv.v
     }
-    warnings.push('状态已从 ITRF 旋转到 ECI（仅 GMST 绕 Z 轴），协方差未旋转')
+    warnings.push('状态已从 ITRF 旋转到 ECI（仅 GMST 绕 Z 轴）')
     usedFrame = 'EME2000'
   }
   if (/RTN|UVW|RSW/i.test(covFrame)) {
     warnings.push('协方差按 RTN(UVW) 处理，已旋转到 ECI')
+  } else if (/ITRF/i.test(covFrame) && states.some((s) => s.cov)) {
+    warnings.push('协方差参考系为 ITRF，未旋转到 ECI（位置/速度已旋转）')
   }
 
   const first = states[0]

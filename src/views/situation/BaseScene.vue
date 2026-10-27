@@ -20,7 +20,7 @@ import { LineSegments2 } from 'three/addons/lines/LineSegments2.js'
 import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js'
 import { LineMaterial } from 'three/addons/lines/LineMaterial.js'
 import { twoline2satrec, propagate, gstime, eciToGeodetic, degreesLat, degreesLong } from 'satellite.js'
-import { listConstellationPublic, listTleLinesPublic, decodeConstellation, getSatDetailPublic, listAllConstellationsPublic, listSatConstellationsPublic, getCdmHeatmap, getConjHeatmap, getConjBatches, getCriHeatmap, getCriBatches, getConjEllipsoid, type ConstellationPoint, type ConstellationSnapshot, type SatTleItem, type CdmHeatEvent, type HeatmapResult, type ConjEllipsoidSide, type SatSource } from '@/api/sat_public'
+import { listConstellationPublic, listTleLinesPublic, decodeConstellation, normalizeObjectType, getSatDetailPublic, listAllConstellationsPublic, listSatConstellationsPublic, type ConstellationPoint, type ConstellationSnapshot, type SatTleItem, type CdmHeatEvent, type HeatmapResult, type SatSource } from '@/api/sat_public'
 import { cacheGet, cacheSet, cacheFirst, ensurePersistent } from '@/utils/persistCache'
 import { useDevice, detectDeviceTier } from '@/composables/useDevice'
 import { useDelayed } from '@/composables/useDelayed'
@@ -37,20 +37,18 @@ import {
   eciToScene, sunDirection, moonDirection, parseEpoch, orbitSteps, disposeGroup, disposeScene,
   g, loading, error, notice, modelNotice,
   sel, hasSel, selDetail, detailOpen, selConstellations,
-  constellations, filterKw, filterConst, altMin, altMax, filterNorads, satSetActive, cloudRevealed,
+  constellations, filterKw, filterConst, altMin, altMax, filterNorads, stationFocus, satSetActive, cloudRevealed,
   consShowMap, consOverrideActive, consShowOf, consCardBound,
   compareConsts, compareActive,
-  visibleCount, orbitTotal, orbitSkipped, loadProgress, orbitBuilding, orbitProgress, filterActive,
-  consHighlightNorad, CONS_HIGHLIGHT_COLOR, rebuildConsSatIndex, consOrbitOn,
+  visibleCount, orbitTotal, orbitSkipped, loadProgress, orbitBuilding, orbitProgress, orbitDrawCount, cloudRev, filterActive,
+  consHighlightNorad, SAT_SELECT_COLOR, SAT_THREAT_COLOR, rebuildConsSatIndex, consOrbitOn,
   dockMode, dockActive, satPanel, dataSource, visible, rebuildSatIndex, orbitVisible,
   simSpeed, simPlaying, simTimeMs,
-  heatMode, heatDays, heatDay, heatList, heatLoading, heatError, heatSel, heatSelList, heatOpen,
+  heatMode, heatDays, heatDay, heatList, heatLoading, heatSel, heatSelList, heatOpen,
   heatSource, heatLegend, heatMetricLabel, heatDayGroups,
-  heatBatchRunId, heatBatches,
   heatFiltered, heatHiddenColors,
-  heatAltBand, heatMetric, heatRiskFloor, heatPcFloor, heatMissCeil,
-  heatCell, heatColorOf, heatBandColor, HEAT_RISK_BANDS,
-  heatEphSetId, heatEphStatus,
+  heatCell, heatColorOf, heatStatus, heatUnavailableReason, heatPrimaryFilter,
+  type HeatUnavailableReason,
   passMode, passGeoLoading, passGeoError, passBorders, passDistricts, passProvinces, passCities, passTargets, findPassTargetById,
   passDistrictVisible, passBorderVisible, passCityVisible, passSelTarget, passDetail, passLoading, passError,
   passDetailOpen,
@@ -61,7 +59,6 @@ import {
   multiPassSel, multiPassPlaying, multiPassProgress,
   skyLayers, spaceWeather, spaceWeatherError, spaceWeatherLoading, spaceWeatherAt,
   sceneQualityTier,
-  conjEllipsoid, conjEllipsoidError, conjEllipsoidLoading, covDisplayScale,
   launchSites, siteMarkersVisible, siteSel, siteOpen
 } from './scene'
 import {
@@ -74,7 +71,9 @@ import { buildLunarMansions, SKY_LABELS } from './lunarMansions'
 import { buildWesternConstellations, WESTERN_LABELS } from './westernConstellations'
 import { interpolateAt } from './ephem/interp'
 import type { EphemSet, EphemState, ThreatEvent } from './ephem/types'
-import { activeEphem, runAoeHeat } from './ephem/useUserEphemeris'
+import type { ThreatFocus } from './threatLink'
+import { colorOfLevel, levelOfPc, normalizeLevel, riskOfPc } from './heat/riskLevels'
+import { getHeat2Health, getHeat2Map } from '@/api/heat2'
 import { buildStarfield } from './starfield'
 import {
   getPassMap, getPassBatches, getPassCityIds, getPassCityDetail,
@@ -130,7 +129,7 @@ const centerLoading = computed<{ text: string; bar: number | null } | null>(() =
   }
   if (orbitBuildingHint.value) {
     return {
-      text: `正在绘制轨道线… ${orbitProgress.value}%（${visibleCount.value.toLocaleString()} 颗）`,
+      text: `正在绘制轨道线… ${orbitProgress.value}%（${orbitDrawCount.value.toLocaleString()} 颗）`,
       bar: orbitProgress.value
     }
   }
@@ -445,8 +444,9 @@ async function applyCesiumBase() {
   const ok = await initCesium(el, {
     // 对齐原 OrbitControls 'start'/'end'：相机交互期间冻结虚拟时间（simStepSec=0），帧率让给交互。
     // 程序化跟踪（双击卫星 / 点击星历）每帧都会推相机，Cesium 因此持续发 moveStart、迟迟不发 moveEnd，
-    // 若照单全收会把 userInteracting 焊死为 true → 虚拟时间永久冻结（播放键失效），故跟踪态下忽略。
-    onMoveStart: () => { if (trackGi != null || trackEphem) return; g.userInteracting = true },
+    // 若照单全收会把 userInteracting 焊死为 true → 虚拟时间永久冻结（播放键失效），故跟踪态下忽略；
+    // 空间站「位置展示」的自由视角在飞行期间同样是每帧程序化推相机（此时无跟踪态），一并排除。
+    onMoveStart: () => { if (camFly.active || trackGi != null || stationFollowGi != null || trackEphem) return; g.userInteracting = true },
     onMoveEnd: () => { g.userInteracting = false }
   }).catch(() => false)
   // 异步期间组件可能已卸载 / 场景可能已重建
@@ -671,127 +671,7 @@ function buildSky(scene: THREE.Scene) {
   // ---- 太阳风粒子流：粒子位置每帧沿日地连线推进（见 updateSolarWind）----
   initSolarWind(scene)
 
-  // ---- 误差椭球组（惯性系，挂场景根；选中交会事件后重建，见 loadConjEllipsoids）----
-  const cov = new THREE.Group()
-  cov.visible = false
-  scene.add(cov)
-  g.covGroup = cov
 }
-
-/* ============================================================
- * 误差椭球（选中交会事件的两端）
- *
- * ⚠ 数据是「经验 σ」——由同一目标连续两条 TLE 的预报差按 区域×类型×dt 分桶统计，
- *   反映 TLE 自洽性，**不是定轨协方差**。故图例与详情面板都必须显著标注，禁止当真实协方差展示。
- * 椭球三轴 = RTN 基方向上的 (σr, σt, σn)。真实 σ 在 LEO 常见量级只有 10~100 km ≈ 0.002~0.016 场景单位，
- * 按实际比例画在默认机位下**完全看不见**，故统一放大到「最大轴 ≥ COV_MIN_AXIS_SCENE」再显示，
- * 倍数由 scene.ts 的 covDisplayScale 给出，并在右侧面板如实标注（数值口径两处共用同一函数）。
- * ============================================================ */
-const COV_COLOR = 0xff9a5c
-
-/**
- * 单个椭球：三个主轴平面上的椭圆环（而不是 wireframe 球）+ 中心点
- *
- * 为什么不用 wireframe 球：WebGL 里线宽恒为 1 像素，球面网格是一大堆 1px 线，在椭球很小时会糊成
- * 一团看不见的东西；三个主轴椭圆环（rt / rn / tn 三个平面）线条少、形状可读得多，也是协方差可视化的惯例。
- * 放大口径：真实 σ 太小（LEO 常见 10~100 km ≈ 0.002~0.016 场景单位），按实际比例画完全看不见，
- * 故统一放大到「最大轴 ≥ COV_MIN_AXIS_SCENE」，倍数由 scene.ts 的 covDisplayScale 给出，
- * 并在右侧面板如实标注放大倍数（数值口径两处共用同一个函数）。
- */
-function buildEllipsoidMesh(side: ConjEllipsoidSide): THREE.Object3D | null {
-  if (!side?.pos || !side.sigma) return null
-  const group = new THREE.Group()
-  // 三轴一律按真实比例取，**不能设「每轴下限」**：逐轴钳位会把小轴单独抬起来，椭球直接变成球
-  //（真实 σ 的径向 / 法向往往只有沿迹的 1/3 甚至更小，如 LEO 载荷 0.022 / 0.070 / 0.046 km，
-  // 若三轴都钳到 0.1 km，形状信息就全丢了 —— 这正是「交会热力 / 交会分析热力 椭球都是圆的」的原因）。
-  // 可见性由 covDisplayScale 的「等比放大」（把最大轴抬到 COV_MIN_AXIS_SCENE）保证，三轴比例不变。
-  const sr = Math.abs(Number(side.sigma.sr) || 0)
-  const st = Math.abs(Number(side.sigma.st) || 0)
-  const sn = Math.abs(Number(side.sigma.sn) || 0)
-  const k = covDisplayScale([sr, st, sn])
-  const a = (sr * k) * KM_TO_SCENE
-  const b = (st * k) * KM_TO_SCENE
-  const c = (sn * k) * KM_TO_SCENE
-  const center = eciToScene(side.pos.x, side.pos.y, side.pos.z)
-  // RTN 基：ECI 向量经同一映射进入场景系（映射是正交变换，右手性保持）
-  const bx = eciToScene(side.r.x, side.r.y, side.r.z).normalize()
-  const by = eciToScene(side.t.x, side.t.y, side.t.z).normalize()
-  const bz = eciToScene(side.n.x, side.n.y, side.n.z).normalize()
-  const basis = new THREE.Matrix4().makeBasis(bx, by, bz)
-  const rot = new THREE.Quaternion().setFromRotationMatrix(basis)
-  const SEG = 96
-  /** 第 i 个主轴平面上的椭圆：u/v 为该平面的两个半轴 */
-  const addEllipse = (u: number, v: number, ui: number, vi: number) => {
-    const pts: number[] = []
-    for (let i = 0; i <= SEG; i++) {
-      const th = (i / SEG) * Math.PI * 2
-      const p = new THREE.Vector3()
-      p.setComponent(ui, Math.cos(th) * u)
-      p.setComponent(vi, Math.sin(th) * v)
-      pts.push(p.x, p.y, p.z)
-    }
-    const geo = new THREE.BufferGeometry()
-    geo.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3))
-    const line = new THREE.Line(geo, new THREE.LineBasicMaterial({
-      color: COV_COLOR, transparent: true, opacity: 0.95, depthWrite: false
-    }))
-    line.position.copy(center)
-    line.quaternion.copy(rot)
-    line.frustumCulled = false
-    group.add(line)
-  }
-  addEllipse(a, b, 0, 1) // R-T 平面（沿迹误差主导的那个面）
-  addEllipse(a, c, 0, 2) // R-N 平面
-  addEllipse(b, c, 1, 2) // T-N 平面
-  // 中心点：椭球被缩到很小时也能一眼找到位置
-  const dot = new THREE.Mesh(
-    new THREE.SphereGeometry(0.01, 10, 10),
-    new THREE.MeshBasicMaterial({ color: COV_COLOR })
-  )
-  dot.position.copy(center)
-  group.add(dot)
-  return group
-}
-
-/** 清空椭球组（取消选中 / 切换事件时调用） */
-function clearConjEllipsoids() {
-  const grp = g.covGroup
-  if (!grp) return
-  const old = grp.children.slice()
-  grp.clear()
-  for (const c of old) disposeGroup(c as THREE.Object3D)
-  grp.visible = false
-}
-
-/** 拉取并绘制某交会事件两端的误差椭球（经验 σ） */
-async function loadConjEllipsoids(ev: CdmHeatEvent) {
-  const tcaMs = parseEpoch(ev.tca)
-  if (!Number.isFinite(tcaMs) || !ev.norad_a || !ev.norad_b) { clearConjEllipsoids(); return }
-  conjEllipsoidLoading.value = true
-  conjEllipsoidError.value = ''
-  try {
-    const r = await getConjEllipsoid({ norad_a: ev.norad_a, norad_b: ev.norad_b, tca: tcaMs })
-    if (disposed) return
-    conjEllipsoid.value = r
-    clearConjEllipsoids()
-    const grp = g.covGroup
-    if (!grp) return
-    for (const side of [r.a, r.b]) {
-      const obj = side ? buildEllipsoidMesh(side) : null
-      if (obj) grp.add(obj)
-    }
-  } catch (e: unknown) {
-    if (!disposed) conjEllipsoidError.value = e instanceof Error ? e.message : '误差椭球数据获取失败'
-  } finally {
-    conjEllipsoidLoading.value = false
-  }
-}
-
-/** 选中交会事件变化：拉取椭球；取消选中则清空 */
-watch(heatSel, (ev) => {
-  if (ev) void loadConjEllipsoids(ev)
-  else { conjEllipsoid.value = null; clearConjEllipsoids() }
-})
 
 /* ============================================================
  * 星下点轨迹（选中卫星的一整圈贴地轨迹）
@@ -1456,8 +1336,6 @@ function updateSky(dtSec: number) {
   if (g.dipoleGroup) g.dipoleGroup.visible = skyLayers.dipole && g.dipoleGroup.children.length > 0
   if (g.solarWind) g.solarWind.visible = skyLayers.solarWind && hasSolarWindData()
   if (g.groundTrack) g.groundTrack.visible = skyLayers.groundTrack && trackHasData
-  // 误差椭球：只在选中交会事件且拿到数据时有内容（开关默认开启不影响观感）
-  if (g.covGroup) g.covGroup.visible = skyLayers.ellipsoid && g.covGroup.children.length > 0
   // 星下点轨迹随虚拟时间缓慢漂移，隔一段时间重采样一次（很便宜）
   maybeRefreshGroundTrack()
 
@@ -1619,15 +1497,17 @@ async function awaitSatrecs() {
   }
 }
 
-/** 点云本地缓存键（按数据源区分）；键里带版本号，编码口径变化时递增即可让旧缓存自然失效。
- *  v2：点云行 12 元 → 16 元（新增 ownerIdx / perigee / period / incl），旧的 12 元缓存必须弃用。 */
-const cloudCacheKey = (src: SatSource) => `cloud:${src}:v2`
+/** 点云快照持久缓存键（按数据源区分）；键里带版本号，编码口径变化时递增即可让旧缓存自然失效。
+ *  v2：点云行 12 元 → 16 元（新增 ownerIdx / perigee / period / incl），旧的 12 元缓存必须弃用。
+ *  v3：目标类型口径修正（AOE 的 ROCKET_BODY 归一为 ROCKET BODY、表外枚举回落 UNKNOWN），
+ *  且 sat_aoe.object_type 已按 NORAD 从 sat_tle 回填 —— 旧快照里整库类型都是 UNKNOWN，
+ *  必须整体失效，否则切到 AOE 后仍拿旧类型快照把目标全藏起来。 */
+const cloudCacheKey = (src: SatSource) => `cloud:${src}:v3`
 /** 星座主表（喂过滤器下拉）持久缓存键 */
 const CONS_CACHE_KEY = 'cons:all:v1'
-/** 热力持久缓存键（按来源 / 窗口 / 批次区分，与内存缓存 heatCache 同口径） */
-const heatPersistKey = (src: string, days: number, runId: number | null) => `heat:${src}:${days}:${runId ?? 'latest'}:v1`
-/** 热力批次列表持久缓存键（按来源区分） */
-const heatBatchesKey = (src: string) => `heatbatches:${src}:v1`
+/** 热力持久缓存键（按标签 / 窗口区分，与内存缓存 heatCache 同口径）。
+ *  v3：热力来源收敛为「TLE 初筛 / 星历增强」二标签，旧三标签缓存自然失效。 */
+const heatPersistKey = (src: string, days: number) => `heat:${src}:${days}:v3`
 /** 过境静态底图（行政区划面 + 国界 + 城市标注）持久缓存键；底图与批次无关，故不分批次 */
 const PASS_GEO_CACHE_KEY = 'pass:geo:v1'
 /** 过境批次列表 / 当前批次城市 id 集合持久缓存键 */
@@ -1641,6 +1521,8 @@ const PASS_CITY_DETAIL_CACHE_KEY = (targetId: number, runId: number | null) => `
 async function applyCloud(res: ConstellationSnapshot) {
   // 后端下发的是紧凑数组（无 TLE），先还原成对象数组供后续统一消费
   g.cloudList = decodeConstellation(res)
+  // g 非响应式：通知依赖点云数据的 computed（星座卡片「在轨」等）重算
+  cloudRev.value++
   if (res.t) g.simTimeMs = res.t
   // 整份重建：行序/数量都可能变，之前排队的时间追赶用的快照已对不上号，直接作废
   warpRes = null
@@ -1673,11 +1555,18 @@ async function applyCloud(res: ConstellationSnapshot) {
   if (!disposed) void ensureSatrecs()
 }
 
-/** 新快照与当前点云是否「逐条同序」（后端查询无 ORDER BY，行序可能变化；同序才可原地打补丁） */
+/** 新快照与当前点云是否「逐条同序」（后端查询无 ORDER BY，行序可能变化；同序才可原地打补丁）。
+ *  目标类型也算同序的一部分：类型变化（如 sat_aoe 回填后 UNKNOWN → PAYLOAD）必须走整体重建，
+ *  否则沿用旧型号实例，显隐 / 着色仍按旧类型，出现「库里已修正、图上仍是未知白点」。 */
 function sameCloudOrder(res: ConstellationSnapshot): boolean {
   const list = g.cloudList
   if (!list.length || list.length !== res.list.length) return false
-  for (let i = 0; i < list.length; i++) if (list[i].norad_id !== res.list[i][0]) return false
+  const types = res.typeIndex || []
+  for (let i = 0; i < list.length; i++) {
+    const r = res.list[i]
+    if (list[i].norad_id !== r[0]) return false
+    if (list[i].object_type !== normalizeObjectType(types[r[2]])) return false
+  }
   return true
 }
 
@@ -1710,6 +1599,8 @@ function applyCloudCoords(res: ConstellationSnapshot, smooth: boolean) {
   }
   if (res.t) g.simTimeMs = res.t
   if (!smooth) rewriteInstanceMatrices((gi) => g.filterMask[gi] === 1)
+  // 星座标签 / 编目国刚被原地刷新：入参对象没换，g 也非响应式，显式自增代次让卡片统计重算
+  cloudRev.value++
   // 分类字段刚被刷新：按当前着色维度重涂并更新图例占比（「目标类型」维度不受这些字段影响，跳过省算）
   if (colorMode.value !== 'type') applyPointColors()
 }
@@ -1780,6 +1671,23 @@ async function loadConstellation() {
   stopFakeProgress()
 }
 
+/** AOE 数据源类型质量兜底：sat_aoe 的历史导入数据可能整库 object_type 都是 UNKNOWN，
+ *  而界面默认只勾「卫星（PAYLOAD）」→ 实例虽已建出，却被类型开关整片隐藏，
+ *  观感就是「切到 AOE 后目标全没了」。这里检测到 UNKNOWN 占比过高时自动补勾「未知」并提示，
+ *  保证至少有目标可见（不重建点云、不回滚数据源；已回填类型的库不会触发）。 */
+function revealUnknownIfMostlyUnknown() {
+  const n = g.cloudList.length
+  if (!n) return
+  let unk = 0
+  for (let i = 0; i < n; i++) if (g.cloudList[i].object_type === 'UNKNOWN') unk++
+  const ratio = unk / n
+  if (ratio <= 0.9) return
+  // 置面板勾选态即可：typeF ↔ visible 的双向 watch 会同步三维显隐并揭示点云。
+  // 用顶部轻提示而非 error（error 是全屏错误遮罩，会把刚恢复的画面又盖住）。
+  satPanel.typeF.UNKNOWN = true
+  showTimedNotice(`AOE 库目标类型多为未分类（UNKNOWN 占 ${Math.round(ratio * 100)}%），已自动开启「未知物体」显示；建议执行 sat_aoe.object_type 回填。`, 8000)
+}
+
 /** 切换三维视图数据源（国际库 / AOE 库）：按新数据源重拉点云并重建实例，其余场景元素（地球 / 星空 /
  *  热力 / 过境图层）保持不变。切换即清掉当前选中与上一套目录的过滤索引，避免把旧索引带到新数据上；
  *  新数据源为空（该库尚未同步）时保留原画面，仅提示错误，不会把场景清空。 */
@@ -1793,6 +1701,7 @@ async function switchDataSource(src: SatSource) {
     await loadConstellation()
     if (disposed) return
     rebuildSatIndex()
+    if (dataSource.value === 'aoe') revealUnknownIfMostlyUnknown()
   } catch (e: unknown) {
     if (disposed) return
     error.value = e instanceof Error ? e.message : '数据源切换失败'
@@ -1886,9 +1795,105 @@ function makeTumble(idxs: number[]): Float32Array {
   return out
 }
 
+/** 星历激活时被「星历模型」接管的编目实例：NORAD + 缓存的全局索引（0 / -1 = 未接管）。
+ *  星历位置与 TLE 位置不同，两者同时显示会被看成同一目标的两份不同颜色副本，
+ *  故星历激活期间把该 NORAD 在点云里的实例隐藏（见 setEphemHiddenNorad）。 */
+let ephemHiddenNorad = 0
+let ephemHiddenGi = -1
+
+/* ---------- 空间站「位置展示」独立 Mesh（天宫 / ISS）----------
+ *  不走点云 InstancedMesh：点云路径在「卫星」开/关两种状态下会分别出现错模与「跑一会模型消失」——
+ *  外推位置与 SGP4 准星分叉、视锥剔除、LOD 重建丢模、邻近载荷抢视觉。独立 Mesh 每帧钉 SGP4，
+ *  固定用 tiangong.glb / iss-detailed.glb + 与点云相同的朝向变换（见 loadModelGeom）。 */
+let stationFocusMesh: THREE.Mesh | null = null
+let stationFocusMeshSeq = 0
+let stationFocusMeshNorad = 0
+const _stFocusVel = new THREE.Vector3()
+
+function stationModelKeyOf(norad: number): 'osp_css' | 'osp_iss' | null {
+  if (norad === 48274) return 'osp_css'
+  if (norad === 25544) return 'osp_iss'
+  return null
+}
+
+function cloudInstanceSuppressed(gi: number): boolean {
+  if (gi === ephemHiddenGi) return true
+  if (stationFocusMeshNorad > 0 && Number(g.cloudList[gi]?.norad_id) === stationFocusMeshNorad) return true
+  return stationSoloBlocked(gi)
+}
+
+function clearStationFocusMesh() {
+  stationFocusMeshSeq++
+  const prevNorad = stationFocusMeshNorad
+  stationFocusMeshNorad = 0
+  if (stationFocusMesh) {
+    g.scene?.remove(stationFocusMesh)
+    const mat = stationFocusMesh.material
+    if (Array.isArray(mat)) mat.forEach((m) => m.dispose())
+    else if (mat) (mat as THREE.Material).dispose()
+    // geometry 来自 geomCache，不能 dispose
+    stationFocusMesh = null
+  }
+  if (prevNorad > 0) {
+    const gi = g.cloudList.findIndex((p) => Number(p.norad_id) === prevNorad)
+    if (gi >= 0) setInstanceHidden(gi, false)
+  }
+}
+
+async function ensureStationFocusMesh(norad: number) {
+  const key = stationModelKeyOf(norad)
+  if (!key || !g.scene) return
+  if (stationFocusMesh && stationFocusMeshNorad === norad) {
+    stationFocusMesh.visible = true
+    return
+  }
+  clearStationFocusMesh()
+  const seq = ++stationFocusMeshSeq
+  stationFocusMeshNorad = norad
+  const gm = await loadGeom(modelUrlOf(key, 'high'), 'PAYLOAD', key)
+  if (seq !== stationFocusMeshSeq || !gm || !g.scene || stationFocus.value !== norad) {
+    if (seq === stationFocusMeshSeq) stationFocusMeshNorad = 0
+    return
+  }
+  const mat = (gm.mat as THREE.Material).clone()
+  const mesh = new THREE.Mesh(gm.geom, mat)
+  mesh.frustumCulled = false
+  mesh.renderOrder = 3
+  // 几何已按 MODEL_MAX_DIM×3 归一化；略放大便于位置展示时辨认桁架
+  mesh.scale.setScalar(1.4)
+  mesh.userData.stationFocus = true
+  g.scene.add(mesh)
+  stationFocusMesh = mesh
+  const gi = g.cloudList.findIndex((p) => Number(p.norad_id) === norad)
+  if (gi >= 0) setInstanceHidden(gi, true)
+  updateStationFocusMesh()
+}
+
+/** 每帧：独立 Mesh 钉在 satrec 真值上（与准星 / 轨道同源），彻底避免外推漂移造成的「模型消失」 */
+function updateStationFocusMesh() {
+  const mesh = stationFocusMesh
+  if (!mesh || !g.satrec) return
+  if (stationFocus.value == null || sel.id !== stationFocus.value) {
+    mesh.visible = false
+    return
+  }
+  const pv = propagate(g.satrec, new Date(g.simTimeMs))
+  if (!pv?.position) return
+  const pos = eciToScene(pv.position.x, pv.position.y, pv.position.z)
+  mesh.position.copy(pos)
+  if (pv.velocity) {
+    _stFocusVel.set(pv.velocity.x * KM_TO_SCENE, pv.velocity.z * KM_TO_SCENE, -pv.velocity.y * KM_TO_SCENE)
+  } else {
+    _stFocusVel.set(0, 0, 0)
+  }
+  orbitAttitude(pos, _stFocusVel, mesh.quaternion)
+  mesh.visible = true
+}
+
 /** 写一个实例的完整矩阵：位置 + 基准姿态（按当前位置 / 速度重算）；碎片 / 箭体在本地坐标叠加三轴 360° 翻滚。
  *  其余型号（载荷 / 未知）只用到基准姿态，与免四元数的快路径 writeInstanceUpright 结果一致。 */
 function writeInstance(imesh: THREE.InstancedMesh, local: number, gi: number) {
+  if (cloudInstanceSuppressed(gi)) { imesh.setMatrixAt(local, ZERO_M); return }
   const spin = imesh.userData.spin as Float32Array | null
   _pos.copy(g.scenePos[gi])
   orbitAttitude(g.scenePos[gi], g.sceneVel[gi], _quat)
@@ -1911,6 +1916,7 @@ function writeInstance(imesh: THREE.InstancedMesh, local: number, gi: number) {
  *  只是跳过「正交基→四元数→compose」的中转 —— 可见实例每帧都要重写姿态，上万颗时这一步开销差一个量级。
  *  模型几何已按 MODEL_MAX_DIM 归一化（缩放恒为 1），故矩阵前三列直接就是本地 X / Y / Z 轴（列主序）。 */
 function writeInstanceUpright(imesh: THREE.InstancedMesh, local: number, gi: number) {
+  if (cloudInstanceSuppressed(gi)) { imesh.setMatrixAt(local, ZERO_M); return }
   const p = g.scenePos[gi]
   orbitBasis(p, g.sceneVel[gi])
   const o = local * 16
@@ -1961,12 +1967,24 @@ function modelKeys(): string[] {
  *  同一次进入页面内，切换 LOD 档位 / 反复重建实例 / 热力目标模型都复用同一份几何，省掉重复下载与解析。 */
 const geomCache = new Map<string, { geom: THREE.BufferGeometry; mat: THREE.Material } | null>()
 
-/** 取模型（带缓存）。url 决定几何，coarse 只决定配色与碎片/箭体的额外缩小系数，model 决定是否需头尾翻转。 */
+/** 取模型（带缓存）。url 决定几何，coarse 只决定配色与碎片/箭体的额外缩小系数，model 决定是否需头尾翻转。
+ *  缓存键必须带 model：同 URL 若被不同型号键加载（理论上不应发生，但热力/点云并行时要防撞），
+ *  rotateX/rotateZ 等型号专属变换不能串台（否则天宫会落到通用卫星朝向）。 */
 function loadGeom(url: string, coarse: string, model: string) {
-  const hit = geomCache.get(url)
+  const cacheKey = `${url}::${model}`
+  const hit = geomCache.get(cacheKey)
   if (hit !== undefined) return Promise.resolve(hit)
-  return loadModelGeom(url, coarse, model).then((gm) => { geomCache.set(url, gm); return gm })
+  return loadModelGeom(url, coarse, model).then((gm) => {
+    // 只缓存成功结果：一次网络抖动 / CDN 超时导致的失败若被缓存成 null，
+    // 该型号在本次页面生命周期内就再也不会重试（表现为「有时候模型加载不出来」）。
+    if (gm) geomCache.set(cacheKey, gm)
+    return gm
+  })
 }
+
+/** 模型加载失败后的自动重试：剩余次数 / 定时器句柄（见 buildModelInstances 末尾） */
+let modelRetryLeft = 3
+let modelRetryTimer = 0
 
 /** 释放模型几何缓存（组件卸载时调用；场景内 InstancedMesh 的几何 / 材质由 disposeScene 统一回收） */
 function disposeGeomCache() {
@@ -2042,11 +2060,21 @@ async function loadModelGeom(url: string, coarse: string, model: string): Promis
     // 碎片 / 箭体 / 未知物体无固定机头且自带翻滚，保持原朝向（见 MODEL_NO_FLIP_Y）。
     // 绕 Y 轴不改变本地 +Y 与飞行方向的对应关系，故飞行方向、拾取、LOD 口径均不变。
     if (!MODEL_NO_FLIP_Y.has(model)) geom.rotateY(Math.PI)
+    // 星链素材（starlink-flat-wing.glb）与两个空间站的精细 glb 均按 glTF 规范 Y 轴向上建模：
+    // 底盘/桁架在 XZ 平面、竖直结构沿 +Y。场景约定本地 +Z = 天顶（见 orbitBasis），
+    // 故再绕本地 X 轴 90° 把 +Y 转到 +Z：底盘与地表平行、结构竖直指向太空
+    // （这一步须在 rotateY 之后，否则会被翻回朝地心）。
+    if (model === 'osp_flat' || model === 'osp_css' || model === 'osp_iss') geom.rotateX(Math.PI / 2)
+    // 天宫素材的桁架长轴建模时沿速度方向（本地 +Y），实际在轨姿态是桁架横跨轨道面；
+    // 故绕本地 Z（天顶）水平再转 90°。ISS 素材朝向已符合，不参与。
+    if (model === 'osp_css') geom.rotateZ(Math.PI / 2)
     geom.computeBoundingBox()
     const box = geom.boundingBox!
     const size = box.getSize(new THREE.Vector3())
     const maxDim = Math.max(size.x, size.y, size.z)
     let s = maxDim > 0 ? MODEL_MAX_DIM / maxDim : 1
+    // 空间站实际尺寸远大于普通卫星，归一化后按同一倍率只剩几十像素：单独放大以便看清桁架与太阳翼
+    if (model === 'osp_css' || model === 'osp_iss') s *= 3
     if (coarse === 'DEBRIS' || coarse === 'ROCKET BODY') s *= 1 / 3
     geom.scale(s, s, s)
     geom.computeBoundingBox()
@@ -2101,8 +2129,45 @@ function rewriteInstanceMatrices(show: (gi: number) => boolean) {
   matrixDrift = 0
 }
 
-/* ---------- 焦点卫星光点上色：选中卫星 / 星座点名成员在点云里的光点替换为亮青 ---------- */
-/** 当前需要在点云里以亮青显示的焦点卫星（全局索引集合）：选中单星（hasSel + sel.id）与星座点名成员
+/** 单个编目实例的显隐写矩阵（隐藏 = 零矩阵；恢复时服从当前过滤态 filterMask） */
+function setInstanceHidden(gi: number, hidden: boolean) {
+  if (gi < 0) return
+  const info = g.instOf[gi]
+  const imesh = info ? g.modelMeshes[info.model] : undefined
+  const local = g.localOf[gi]
+  if (!imesh || !(local >= 0)) return
+  if (hidden || g.filterMask[gi] !== 1) imesh.setMatrixAt(local, ZERO_M)
+  else writeInstance(imesh, local, gi)
+  imesh.instanceMatrix.needsUpdate = true
+}
+
+/** 设置 / 解除「星历本星接管」：星历激活时隐藏点云里同一 NORAD 的编目实例，
+ *  只保留星历位置上的那颗模型，避免同一目标以两种颜色显示成两份（null / 0 = 恢复）。 */
+function setEphemHiddenNorad(norad: number | null) {
+  const prevNorad = ephemHiddenNorad
+  const prevGi = ephemHiddenGi
+  ephemHiddenNorad = norad && norad > 0 ? norad : 0
+  ephemHiddenGi = ephemHiddenNorad > 0 ? g.cloudList.findIndex((p) => p.norad_id === ephemHiddenNorad) : -1
+  // 恢复上一个目标：仅当缓存索引在当前点云里仍指向它（点云重建后索引可能已换人，此时矩阵已由重建流程重写）
+  if (prevGi >= 0 && prevGi !== ephemHiddenGi && g.cloudList[prevGi]?.norad_id === prevNorad) {
+    setInstanceHidden(prevGi, false)
+  }
+  if (ephemHiddenGi >= 0) setInstanceHidden(ephemHiddenGi, true)
+}
+
+/** 点云重建 / 数据源切换后按 NORAD 重定位接管实例（索引变了就得重新隐藏一次）。
+ *  校验是 O(1)；未命中（该 NORAD 不在当前点云）时最多每 30 帧才全表重扫一次，避免每帧扫全库。 */
+let ephemHiddenScanTick = 0
+function refreshEphemHidden() {
+  if (!ephemHiddenNorad) return
+  if (ephemHiddenGi >= 0 && g.cloudList[ephemHiddenGi]?.norad_id === ephemHiddenNorad) return
+  if (ephemHiddenScanTick++ % 30 !== 0) return
+  ephemHiddenGi = -1
+  setEphemHiddenNorad(ephemHiddenNorad)
+}
+
+/* ---------- 焦点卫星光点上色：选中卫星 / 星座点名成员在点云里的光点替换为选中蓝 ---------- */
+/** 当前需要在点云里以选中蓝显示的焦点卫星（全局索引集合）：选中单星（hasSel + sel.id）与星座点名成员
  *  （consHighlightNorad）都算，同一颗星只算一次（Set 去重）。 */
 function focusPointGis(): Set<number> {
   const want = new Set<number>()
@@ -2136,17 +2201,17 @@ function paintSatPoint(gi: number, hex: number | null): boolean {
   return true
 }
 
-/** 已按亮青上色过的焦点光点（全局索引）：焦点变化时据此精确还原旧焦点、只增量上色新焦点 */
+/** 已按选中蓝上色过的焦点光点（全局索引）：焦点变化时据此精确还原旧焦点、只增量上色新焦点 */
 let paintedPointGis = new Set<number>()
 
-/** 焦点变化（选中 / 取消选中 / 星座点名 / 取消点名）后同步点云光点颜色：旧焦点还原分档色，新焦点上亮青。 */
+/** 焦点变化（选中 / 取消选中 / 星座点名 / 取消点名）后同步点云光点颜色：旧焦点还原分档色，新焦点上选中蓝。 */
 function syncFocusPointPaint() {
   const want = focusPointGis()
   for (const gi of paintedPointGis) {
     if (!want.has(gi)) paintSatPoint(gi, null)
   }
   for (const gi of want) {
-    if (!paintedPointGis.has(gi)) paintSatPoint(gi, CONS_HIGHLIGHT_COLOR)
+    if (!paintedPointGis.has(gi)) paintSatPoint(gi, SAT_SELECT_COLOR)
   }
   paintedPointGis = want
 }
@@ -2182,8 +2247,8 @@ function applyPointColors() {
   })
   // 多星座对比：只列「有命中的对比星座」，不列兜底档 —— 否则会显示全库其余卫星的总数（对比视图下的干扰项）
   colorLegend.value = mode === 'compare' ? rows.filter((r) => r.key !== NA_BUCKET_KEY && r.count > 0) : rows
-  // 逐实例着色已把全部实例刷成分档色，焦点光点（选中 / 星座点名）的亮青被一并覆盖：
-  // 清空上色记录后按当前焦点重涂，保证换档 / 切维度 / 重建点云后焦点光点仍是亮青
+  // 逐实例着色已把全部实例刷成分档色，焦点光点（选中 / 星座点名）的选中蓝被一并覆盖：
+  // 清空上色记录后按当前焦点重涂，保证换档 / 切维度 / 重建点云后焦点光点仍是选中蓝
   paintedPointGis.clear()
   syncFocusPointPaint()
 }
@@ -2194,13 +2259,51 @@ function cloudGate() {
   return cloudRevealed.value || satSetActive.value
 }
 
-/** 星座卡片通道的载荷 Mesh 例外：主开关关但有点亮卡片（consShowMap 非空）或绑定了卡片轨道
- *  （filterConst）时，载荷 Mesh 不依赖类型勾选即可见（逐实例显隐由掩码负责）；
+/** 显式指定目标的载荷 Mesh 例外：主开关关但有点亮卡片（consShowMap 非空）、绑定了卡片轨道
+ *  （filterConst）或存在单星白名单（filterNorads，含空间站「位置展示」/成员点选）时，
+ *  载荷 Mesh 不依赖类型勾选即可见（逐实例显隐由掩码负责）；
  *  非载荷类型（碎片/残骸/未知）不吃这个例外 —— 卡片开关不影响这三类（需求：类型开关状态与
  *  对应目标显示不受「星座展示」任何影响）。 */
 function consMeshBypass(model: string): boolean {
   if (MODEL_COARSE[model] !== 'PAYLOAD') return false
-  return consOverrideActive.value || !!filterConst.value
+  return consOverrideActive.value || !!filterConst.value || !!filterNorads.value?.length
+}
+
+/** 空间站「位置展示」通道：点亮的站所在载荷 Mesh 不依赖「无目标」门控与「卫星」开关即可见；
+ *  逐实例只放行被点亮的那一颗（stationSoloBlocked），碎片 / 残骸 / 未知与其它载荷完全不受影响。 */
+function stationBypass(model: string): boolean {
+  return stationFocus.value != null && MODEL_COARSE[model] === 'PAYLOAD'
+}
+
+/** 该实例是否为「位置展示」点亮的空间站（NORAD 精确匹配） */
+function isStationFocus(gi: number): boolean {
+  const f = stationFocus.value
+  return f != null && Number(g.cloudList[gi]?.norad_id) === f
+}
+
+/** 「位置展示」单站独显：被点亮的那一颗不受类型开关 / 门控约束；
+ *  其余载荷只在「无本通道时本就可见」的前提下保留矩阵，否则写零矩阵。
+ *  碎片 / 残骸 / 未知一概不参与（各自跟随自己的类型开关）。 */
+function stationSoloBlocked(gi: number): boolean {
+  if (stationFocus.value == null) return false
+  const info = g.instOf[gi]
+  if (!info || info.coarse !== 'PAYLOAD') return false
+  if (isStationFocus(gi)) return false
+  const normalVisible = cloudGate()
+    && (satSetActive.value || !!filterConst.value || (!heatMode.value && !passMode.value))
+    && (satSetActive.value || consMeshBypass(info.model) || modelVisible(info.model))
+  return !normalVisible
+}
+
+/** 单个型号 Mesh 的显隐口径（首建 / 门控重算 / 类型开关三处共用，避免各写一套漂移）。
+ *  热力 / 过境视图整片隐藏卫星云，例外 = 集合叠加层（satSetActive）、星座卡片载荷通道
+ *  （consMeshBypass，仅载荷）与空间站「位置展示」通道（stationBypass，仅载荷）。 */
+function modelMeshVisible(model: string): boolean {
+  const solo = stationBypass(model)
+  const gate = cloudGate() || solo
+  const sceneOk = satSetActive.value || !!filterConst.value || solo || (!heatMode.value && !passMode.value)
+  const typeOk = satSetActive.value || consMeshBypass(model) || solo || modelVisible(model)
+  return gate && sceneOk && typeOk
 }
 
 /** 门控变化时统一重算点云与过滤轨道线显隐（揭示 = 恢复普通模式口径；未揭示 = 全隐藏） */
@@ -2208,14 +2311,13 @@ function applyCloudGateVisible() {
   const gate = cloudGate()
   for (const model of modelKeys()) {
     const im = g.modelMeshes[model]
-    // 与 buildModelInstances 同口径：热力 / 过境视图整片隐藏卫星云，但集合叠加层（satSetActive）
-    // 与星座展示态（filterConst，仅载荷见 consMeshBypass）例外
-    if (im) im.visible = gate && (satSetActive.value || !!filterConst.value || (!heatMode.value && !passMode.value)) && (satSetActive.value || consMeshBypass(model) || modelVisible(model))
+    if (im) im.visible = modelMeshVisible(model)
   }
   // 未揭示时过滤轨道线一并隐藏（line.visible 只控制类型勾选/总开关，组级显隐在这里收口）
   if (g.filterOrbitGroup) g.filterOrbitGroup.visible = gate && orbitVisible.value
   if (!gate) {
-    if (g.orbitLine) g.orbitLine.visible = false
+    // 「位置展示」被点亮单站：其选中轨道线不随揭示门控隐藏（仍受图例「轨道线」总开关约束）
+    if (g.orbitLine) g.orbitLine.visible = stationOrbitOn()
     if (g.previewOrbitLine) g.previewOrbitLine.visible = false
   }
 }
@@ -2244,6 +2346,9 @@ async function buildModelInstances(lod: ModelLod) {
     if (!p.gm) { failModels.push(p.model); continue }
     const imesh = new THREE.InstancedMesh(p.gm.geom, p.gm.mat, p.globalIdxs.length)
     imesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage)
+    // 实例矩阵每帧外推改写，默认包围球停在地心几何附近：拉近单星时整片 InstancedMesh 会被误剔除
+    // （空间站「位置展示」表现为模型无故消失，准星/轨道仍在）
+    imesh.frustumCulled = false
     imesh.userData.model = p.model
     // 碎片 / 箭体：预生成逐实例翻滚参数（载荷 / 未知物体不翻滚，留 null 走无翻滚分支）
     imesh.userData.spin = p.coarse === 'DEBRIS' || p.coarse === 'ROCKET BODY' ? makeTumble(p.globalIdxs) : null
@@ -2254,7 +2359,7 @@ async function buildModelInstances(lod: ModelLod) {
     // 显隐口径与外部一致：图例按粗类型勾选（modelVisible 换算），热力 / 过境视图整片隐藏卫星云；
     // 例外 = NORAD 集合展示态（satSetActive）与星座卡片载荷通道（consMeshBypass，仅载荷）：
     // 在这两个通道下目标不依赖类型勾选即可见（掩码负责把非成员实例写成零矩阵），类型开关状态不受影响。
-    imesh.visible = cloudGate() && (satSetActive.value || !!filterConst.value || (!heatMode.value && !passMode.value)) && (satSetActive.value || consMeshBypass(p.model) || modelVisible(p.model))
+    imesh.visible = modelMeshVisible(p.model)
     built[p.model] = imesh
   }
   for (const model of models) if (built[model]) scene.add(built[model])
@@ -2274,6 +2379,17 @@ async function buildModelInstances(lod: ModelLod) {
   modelNotice.value = failModels.length
     ? `⚠ 模型加载失败：${failModels.join('、')}（详见控制台 console.error）`
     : ''
+  if (disposed) return
+  // 失败型号自动重试（最多 3 次，退避 4s）：几何缓存已不再保存失败结果，
+  // 重试命中可用网络即可补回模型（例如空间站 tiangong.glb 偶发超时）。
+  if (failModels.length && modelRetryLeft > 0) {
+    modelRetryLeft--
+    window.clearTimeout(modelRetryTimer)
+    modelRetryTimer = window.setTimeout(() => { void buildModelInstances(g.modelLod ?? lod) }, 4000)
+  } else if (!failModels.length) {
+    modelRetryLeft = 3
+    window.clearTimeout(modelRetryTimer)
+  }
 }
 
 /* ============================================================
@@ -2589,6 +2705,8 @@ function refreshFilter() {
         if (altMax.value != null && a > altMax.value) ok = false
       }
     }
+    // 空间站「位置展示」目标不受检索 / 星座 / 高度等过滤条件剔除（显式点亮的单站始终可见）
+    if (!ok && isStationFocus(i)) ok = true
     if (ok) { mask[i] = 1; cnt++ }
   }
   g.filterMask = mask
@@ -2634,6 +2752,8 @@ async function rebuildFilterOrbits() {
     g.filterOrbitGroup = null
   }
   g.filterOrbitQueue = []
+  // 轨道线待绘制数（loading 文案用）：先清零，队列收口完成后按实际入队数回填
+  orbitDrawCount.value = 0
   g.filterOrbitCursor = 0
   g.filterOrbitT0 = g.simTimeMs
   // 分组键是动态的（默认 TYPE_KEYS 4 类；多星座对比态为 `cmp:<星座名>`），
@@ -2687,6 +2807,8 @@ async function rebuildFilterOrbits() {
     }
     g.filterOrbitQueue.push(i)
   }
+  // 入队数 = 本次实际参与轨道绘制的卫星数（绑定星座时即该星座成员数），供 loading 文案使用
+  orbitDrawCount.value = g.filterOrbitQueue.length
   if (!g.filterOrbitQueue.length) {
     orbitPreparing.value = false
     orbitBuilding.value = false
@@ -2823,7 +2945,7 @@ function stepFilterOrbits(budget: { n: number }) {
     // 星座成员高亮：过滤轨道线重建后几何是全新的（默认分组色），按当前高亮 NORAD 重新上色
     if (consHighlightNorad.value > 0) {
       const hi = g.cloudList.findIndex((p) => p.norad_id === consHighlightNorad.value)
-      if (hi >= 0) paintConsOrbit(hi, CONS_HIGHLIGHT_COLOR)
+      if (hi >= 0) paintConsOrbit(hi, SAT_SELECT_COLOR)
     }
   }
 }
@@ -2893,6 +3015,8 @@ function resetFilter() {
   altMin.value = undefined
   altMax.value = undefined
   filterNorads.value = null
+  // 空间站「位置展示」一并点暗（独立通道，不参与过滤掩码）
+  stationFocus.value = null
   // 多星座对比一并清掉（还原到「按类型着色」的干净初始态）
   compareConsts.value = []
   // 直接重建掩码与实例矩阵：还原时即使过滤 ref 本就为空（watch 不触发 refreshFilter），
@@ -2961,11 +3085,14 @@ function selectSatelliteByIndex(gi: number) {
   selectSatellite(pt)
 }
 
-/** 由星座成员列表点击触发：与该星被双击完全一致（选中 + 详情面板 + 拉近到 TRACK_CAM_DIST 并居中跟踪） */
-function trackSatelliteByIndex(gi: number) {
+/** 由星座成员列表点击触发：与该星被双击完全一致（选中 + 详情面板 + 拉近到 TRACK_CAM_DIST 并居中跟踪）。
+ *  freeView = 空间站「位置展示」专用：只拉近落位，不进入逐帧跟踪 ——
+ *  跟踪会每帧把相机与焦点钉在目标上（Cesium 模式下还正向覆写底层相机），
+ *  用户左键拖拽会被立刻拉回，表现为「拖不动背景地球」。 */
+function trackSatelliteByIndex(gi: number, freeView = false) {
   const pt = g.cloudList[gi]
   if (!pt) return
-  startTargetTracking(gi, pt)
+  startTargetTracking(gi, pt, freeView)
 }
 
 /* ---------- 双击跟踪：拉近 + 居中逐帧跟随 ---------- */
@@ -2973,6 +3100,19 @@ function trackSatelliteByIndex(gi: number) {
  *  跟踪时镜头与环绕焦点逐帧随目标平移（保持落位时的相对机位，目标恒居中），
  *  直到用户单击画布任意位置解除；右侧详情面板是普通 DOM，点击事件不落在画布上，不影响跟踪态。 */
 let trackGi: number | null = null
+/** 「位置展示」自由视角的跟随目标（null = 不跟随）：落位后逐帧跟随该站保持居中，
+ *  但用户在画布上按下鼠标（开始拖拽地球 / 点选）即解除 —— 之后镜头交给用户，可自由旋转地球。 */
+let stationFollowGi: number | null = null
+/** 绝对跟随的落位机位偏移（相机相对本站）与上一帧期望机位：见动画循环里的绝对重锚定跟随 */
+const _followOff = new THREE.Vector3()
+const _followLast = new THREE.Vector3()
+const _followTmp = new THREE.Vector3()
+let followOffReady = false
+/** TEMP-DEBUG：60x 跟随漂移诊断日志上次打印时刻（验收后随日志块一并删除） */
+let stFollowAt = 0
+/** TEMP-DEBUG：方向探针暂存（推入 Cesium 的方向 / 相机指向目标的方向） */
+const _dbgDir = new THREE.Vector3()
+const _dbgTo = new THREE.Vector3()
 /** 跟踪目标上一帧的场景坐标：与当前帧求差得到镜头逐帧平移量 */
 const _trackPrev = new THREE.Vector3()
 const _trackDelta = new THREE.Vector3()
@@ -2985,12 +3125,23 @@ const TRACK_CAM_DIST = 0.15
 
 /** 进入跟踪：先走常规选中链路（准星 + 轨道线 + 详情面板），成功后把镜头拉近到 TRACK_CAM_DIST。
  *  载荷 / 碎片 / 箭体 / 未知统一走点云拾取，四类目标行为一致。 */
-function startTargetTracking(gi: number, pt: ConstellationPoint) {
+function startTargetTracking(gi: number, pt: ConstellationPoint, freeView = false) {
   selectSatellite(pt).then(() => {
     if (!hasSel.value || sel.id !== pt.norad_id || !g.selAnchor) return
     const cam = g.camera, controls = g.controls
     if (!cam || !controls) return
-    trackGi = gi
+    // 自由视角（空间站「位置展示」）：落位后跟随该站保持居中，用户一动鼠标即解除（见 stationFollowGi）
+    if (!freeView) {
+      trackGi = gi
+    } else {
+      stationFollowGi = gi
+      // 重新点亮（换站 / 重开）：落位偏移需在飞行动画结束后按新机位重新捕获
+      followOffReady = false
+      // 独立 Mesh：固定 tiangong/iss glb，与「卫星」开关无关；点云同 NORAD 实例随后隐藏防双影
+      if (stationFocus.value === pt.norad_id) void ensureStationFocusMesh(Number(pt.norad_id))
+      // 轨道线：位置展示必须看见（不依赖类型勾选）
+      if (g.orbitLine) g.orbitLine.visible = orbitVisible.value
+    }
     _trackPrev.copy(g.selAnchor.position)
     // 机位沿用 flyToPoint 的「镜头—目标—地心」共线口径，只是距离从轨道半径拉近到 TRACK_CAM_DIST
     const off = clampPolarToLimit(_trackPrev.clone().normalize())
@@ -3002,6 +3153,7 @@ function startTargetTracking(gi: number, pt: ConstellationPoint) {
 /** 解除跟踪：镜头停在当前位置不再跟随（已选中的目标、轨道线与详情面板保持不变） */
 function stopTargetTracking() {
   trackGi = null
+  stationFollowGi = null
 }
 
 /** 智能体动作：按 NORAD 编号定位并选中卫星，走与列表点击完全相同的选中链路
@@ -3056,9 +3208,12 @@ function buildOrbit(data: SatTleItem) {
   }
   const line = new THREE.Line(
     new THREE.BufferGeometry().setFromPoints(pts),
-    // 选中卫星的独立轨道环统一用亮青（与星座点名成员高亮同色），一线即可从密集点云中辨识
-    new THREE.LineBasicMaterial({ color: CONS_HIGHLIGHT_COLOR })
+    // 选中卫星的独立轨道环统一用选中蓝（与星座点名成员高亮同色），一线即可从密集点云中辨识
+    new THREE.LineBasicMaterial({ color: SAT_SELECT_COLOR })
   )
+  line.frustumCulled = false
+  // 「位置展示」：轨道线不依赖「卫星」类型勾选（stationOrbitOn）；此处先亮起，随后 applyOrbitToggle 再收口
+  if (stationFocus.value != null && Number(data.norad_id) === stationFocus.value) line.visible = true
   g.orbitLine = line
   scene.add(line)
   // 选中卫星即重算星下点轨迹（与轨道环同一份 satrec，避免两处各推一次采样时刻口径）
@@ -3068,6 +3223,8 @@ function buildOrbit(data: SatTleItem) {
 function clearSelected() {
   // 双击跟踪随选中一并解除（换星 / 取消选中 / 还原等所有清选中路径通用）
   trackGi = null
+  // 「位置展示」自由跟随同样随选中解除：锚点已拆，跟随失去参照
+  stationFollowGi = null
   // 星历本星跟踪同样随选中解除（选中编目卫星时不能再被本星拽着镜头）
   stopEphemTracking()
   if (g.selAnchor) {
@@ -3169,8 +3326,8 @@ async function highlightConstSat(norad: number) {
   // 镜头先飞到该星当前位置（与「选中单星」同一套落位算法，落位后环绕焦点切到该星）
   const pv = propagate(rec, new Date(g.simTimeMs))
   if (pv?.position) flyToPoint(eciToScene(pv.position.x, pv.position.y, pv.position.z), 'point')
-  // 再把该星轨道线那一段的颜色替换成亮青（见 paintConsOrbit）
-  paintConsOrbit(gi, CONS_HIGHLIGHT_COLOR)
+  // 再把该星轨道线那一段的颜色替换成选中蓝（见 paintConsOrbit）
+  paintConsOrbit(gi, SAT_SELECT_COLOR)
 }
 
 function updateReticle() {
@@ -3202,6 +3359,8 @@ function updateReticle() {
 /** 取消选中卫星。resetCam=false 时不复位镜头：热力模式在「卫星详情 ↔ 事件详情」间切换时用它保留观察机位。 */
 function resetSelected(resetCam = true) {
   clearSelected()
+  // 取消选中时收起位置展示独立 Mesh（toggleStationShow 点暗会先清 stationFocus；此处兜底防残留）
+  if (stationFocus.value == null) clearStationFocusMesh()
   hasSel.value = false
   selDetail.value = null
   detailOpen.value = true
@@ -3233,7 +3392,9 @@ function restoreSatVisible() {
   const hideCloud = (heatMode.value || passMode.value) && !satSetActive.value
   for (const model of modelKeys()) {
     const im = g.modelMeshes[model]
-    if (im) im.visible = cloudGate() && (hideCloud ? false : true)
+    // 「位置展示」被点亮单站走 stationBypass 旁路：不随揭示门控被整体隐藏
+    // （否则开关任意面板触发 resetToInitial → 本函数时，天宫/ISS 模型会无故消失）
+    if (im) im.visible = !hideCloud && (cloudGate() || stationBypass(model))
   }
   if (!list.length) return
   rewriteInstanceMatrices((gi) => !!list[gi])
@@ -3291,8 +3452,8 @@ function pickNearestAt(px: number, py: number): number | null {
   const renderer = g.renderer, cam = g.camera
   if (!renderer || !cam || !g.scenePos.length) return null
   // 首页「无目标」门控：点云未揭示时卫星不可见也不可交互——hover 预览轨道线 / 点击选中一并禁用
-  // （本函数是屏幕空间投影拾取，不感知 mesh.visible，必须在此收口）
-  if (!cloudGate()) return null
+  // （本函数是屏幕空间投影拾取，不感知 mesh.visible，必须在此收口）。空间站「位置展示」单独放行。
+  if (!cloudGate() && stationFocus.value == null) return null
   const rect = renderer.domElement.getBoundingClientRect()
   // 屏幕空间最近投影点拾取（PICK_TOLERANCE_PX 内吸附）：直接遍历 scenePos 做投影+遮挡判定。
   // 不再用 raycaster.intersectObjects(InstancedMesh)：three 对实例化网格是「逐实例包围球+三角形求交」，
@@ -3308,7 +3469,9 @@ function pickNearestAt(px: number, py: number): number | null {
     //   星座展示仍会渲染载荷点云，这些点必须保持可拾取（与 consMeshBypass 的显隐口径一致）。
     const info = g.instOf[i]
     const coarse = info?.coarse
-    if (coarse && visible[coarse] === false && !(info && consMeshBypass(info.model))) continue
+    // 「位置展示」强制隐藏的实例（卫星总开关关闭时的其它载荷）不可拾取
+    if (stationSoloBlocked(i)) continue
+    if (coarse && visible[coarse] === false && !(info && (consMeshBypass(info.model) || isStationFocus(i)))) continue
     if (isOccludedByEarth(cam.position, g.scenePos[i])) continue
     proj.copy(g.scenePos[i]).project(cam)
     if (proj.z > 1 || proj.z < -1) continue
@@ -3322,8 +3485,8 @@ function pickNearestAt(px: number, py: number): number | null {
   return bestGi
 }
 
-const CLICK_MS = 300
-const CLICK_PX = 6
+const CLICK_MS = 450
+const CLICK_PX = 14
 let pressDown = false
 let pressX = 0
 let pressY = 0
@@ -3404,6 +3567,8 @@ function onContextMenu(ev: MouseEvent) {
 function onPointerDown(ev: PointerEvent) {
   if (ev.button === 2) { focusOrbitOnSel(); return }
   if (ev.button !== 0) return
+  // 用户一按画布（开始拖拽地球 / 点选）即解除「位置展示」自由跟随：之后镜头交给用户
+  stationFollowGi = null
   pressDown = true
   pressX = ev.clientX
   pressY = ev.clientY
@@ -3640,11 +3805,11 @@ function downsampleHeat(evs: CdmHeatEvent[], max = HEAT_MAX_EVENTS): CdmHeatEven
 }
 
 /** 依据当前热力过滤列表重建事件标记，全量替换。
- *  三个来源走两套渲染逻辑，视觉上必须能区分：
- *   · CDM 热力（spacetrack）：逐事件柔光云（加法混合）——事件量小，叠加体现单次交会强弱；
- *   · 交会热力（local）/ 交会分析热力（cri）：宏观聚合热力斑（普通混合）——本地事件上万条，先按立方网格聚合再着色。
- *  三者共用「点选事件后用 buildHeatSelOrbits 展示两颗卫星完整轨道」的交互。
- *  着色 / 风险权重由后端按来源口径下发（事件自带 color / risk），三个口径各自忠实、不互相冒充。 */
+ *  按等级区分云形态（文档 14 §4）：
+ *   · 高危 / 警告：逐事件柔光云（加法混合）——单次交会强弱可辨、每个事件都可点选；
+ *   · 关注 / 数据不足：立方网格聚合热力斑——数量大，宏观体现分布即可。
+ *  两者共用「点选事件后用 buildHeatSelOrbits 展示两颗卫星完整轨道」的交互。
+ *  着色 / 风险权重统一按 Pc 分档（heatColorOf），不互相冒充。 */
 function buildHeatMarkers() {
   const scene = g.scene
   if (!scene) return
@@ -3653,25 +3818,28 @@ function buildHeatMarkers() {
   // 注意：时间为空 / 事件被筛选掉时不清理 heatSel —— 右侧事件列表的选中与热力窗口彼此独立，
   // 清掉会导致「切回有数据的时间窗后选中态与同簇高亮丢失、必须重新点一次」（列表行仍高亮）。
   if (!evs.length) return
-  // 官方 CDM / 星历热力逐事件出点：事件量小（≤300），按格边抽稀只用于 CDM
-  const eventBased = heatSource.value === 'spacetrack' || heatSource.value === 'eph-aoe'
-  const renderEvs = heatSource.value === 'spacetrack' ? downsampleHeat(evs) : evs
+  const hot: CdmHeatEvent[] = []
+  const rest: CdmHeatEvent[] = []
+  for (const e of evs) {
+    const lv = levelOfPc(e.collision_probability, e.pc_max)
+    if (lv === 'red' || lv === 'orange') hot.push(e)
+    else rest.push(e)
+  }
   const group = new THREE.Group()
-  if (eventBased) buildEventHeat(group, renderEvs)
-  else buildAggregatedHeat(group, renderEvs)
+  if (hot.length) buildEventHeat(group, downsampleHeat(hot))
+  if (rest.length) buildAggregatedHeat(group, rest)
 
   g.heatGroup = group
   group.visible = heatMode.value
   scene.add(group)
-
-  // 重建后重新套用「同簇高亮」（过滤/格边变化后标记是新几何，旧的淡出状态需重算）
-  applyHeatDim()
 }
 
-/** CDM 热力（官方 CDM，事件量小）：逐事件一簇柔光云（加法混合）。
- *  去除两端 A→B 短线（省去杂乱），改为点选事件后用 buildHeatSelOrbits 展示两颗卫星的完整轨道。 */
+/** 高危 / 警告（单次交会强度需要可辨）：逐事件一簇柔光云（加法混合）。
+ *  去除两端 A→B 短线（省去杂乱），改为点选事件后用 buildHeatSelOrbits 展示两颗卫星的完整轨道。
+ *  左签（TLE 初筛）σ 更大、云略散；右签（星历增强）更紧更亮（文档 14 §4）。 */
 function buildEventHeat(group: THREE.Group, evs: CdmHeatEvent[]) {
   const c = new THREE.Color()
+  const tleSide = heatSource.value === 'tle-threat'
 
   // ① 事件中点核心光斑（billboard 柔光点，逐事件一顶点，颜色按碰撞概率，作为可拾取锚点）
   //   size 略大于云粒子，中心清晰可点选；用柔边 shader 而非实心点，避免突兀的硬圆点
@@ -3689,10 +3857,10 @@ function buildEventHeat(group: THREE.Group, evs: CdmHeatEvent[]) {
   pgeom.setAttribute('position', new THREE.BufferAttribute(pos, 3).setUsage(THREE.DynamicDrawUsage))
   pgeom.setAttribute('aColor', new THREE.BufferAttribute(col, 3))
   pgeom.setAttribute('aSize', new THREE.BufferAttribute(coreSize, 1))
-  // aAlpha：选中事件时「同簇高亮、其它淡出」（见 applyHeatDim）
+  // aAlpha：柔边光斑的逐顶点不透明度（shader 必需，本层恒为 1，不随选中变化）
   const coreAlpha = new Float32Array(evs.length).fill(1)
   pgeom.setAttribute('aAlpha', new THREE.BufferAttribute(coreAlpha, 1).setUsage(THREE.DynamicDrawUsage))
-  ;(pgeom.userData as { heatDim?: HeatDimMeta }).heatDim = { base: coreAlpha.slice(), ids: evs.map((e) => e.id) }
+  ;(pgeom.userData as { heatPick?: HeatPickMeta }).heatPick = { ids: evs.map((e) => e.id) }
   const pts = new THREE.Points(pgeom, makeHeatGlowMaterial())
   pts.frustumCulled = false
   group.add(pts)
@@ -3702,7 +3870,7 @@ function buildEventHeat(group: THREE.Group, evs: CdmHeatEvent[]) {
   //    颜色/半径按碰撞概率，多个事件重叠叠加形成红色/黄色热云，体现「区域内颜色/频率」。
   // 全量（含历史）时事件上千，适当降低每事件云粒子数，平衡渲染性能与热云观感
   const CLOUD_PER_EVENT = evs.length > 800 ? 8 : 14
-  const CLOUD_BASE_R = 0.022
+  const CLOUD_BASE_R = tleSide ? 0.026 : 0.020
   const total = evs.length * CLOUD_PER_EVENT
   const cpos = new Float32Array(total * 3)
   const ccol = new Float32Array(total * 3)
@@ -3735,11 +3903,16 @@ function buildEventHeat(group: THREE.Group, evs: CdmHeatEvent[]) {
   cgeom.setAttribute('aSize', new THREE.BufferAttribute(csize, 1))
   const cloudAlpha = new Float32Array(total).fill(1)
   cgeom.setAttribute('aAlpha', new THREE.BufferAttribute(cloudAlpha, 1).setUsage(THREE.DynamicDrawUsage))
-  ;(cgeom.userData as { heatDim?: HeatDimMeta }).heatDim = { base: cloudAlpha.slice(), ids: cids }
+  ;(cgeom.userData as { heatPick?: HeatPickMeta }).heatPick = { ids: cids }
   const clouds = new THREE.Points(cgeom, makeHeatGlowMaterial())
   clouds.frustumCulled = false
   group.add(clouds)
   g.heatClouds = clouds
+  ;(group.userData as { heatLayers?: THREE.Points[] }).heatLayers = [
+    ...((group.userData as { heatLayers?: THREE.Points[] }).heatLayers ?? []),
+    pts,
+    clouds
+  ]
 }
 
 /** 宏观聚合网格边长由 scene.ts 的 heatCell 提供（默认 0.15 ≈ 950km，面板可切 0.05/0.15/0.30）。
@@ -3748,12 +3921,10 @@ function buildEventHeat(group: THREE.Group, evs: CdmHeatEvent[]) {
  *  超级事件抽稀上限：超过该数量时按格边取「格内风险最高」的代表点，避免逐事件云把 GPU 压满。 */
 const HEAT_MAX_EVENTS = 2000
 
-/** 热力标记「同簇高亮」辅助数据（挂在 BufferGeometry.userData 上）：
- *  - base：逐顶点原始不透明度（聚合斑按格内事件数不同，淡出时按比例缩放，不能直接写常量）；
- *  - ids：逐顶点事件 id（逐事件模式，直接用 id 判断是否同簇）；
- *  - centers：逐顶点场景中点 xyz（网格聚合模式，一个斑代表一格，用距离判断是否同簇）。 */
-interface HeatDimMeta {
-  base: Float32Array
+/** 热力标记拾取辅助数据（挂在 BufferGeometry.userData 上）：
+ *  - ids：逐顶点事件 id（逐事件模式，命中后直接取该事件）；
+ *  - centers：逐顶点场景中点 xyz（网格聚合模式，一个斑代表一格，命中后取格内最危险事件）。 */
+interface HeatPickMeta {
   ids?: number[]
   centers?: Float32Array
 }
@@ -3770,12 +3941,18 @@ interface HeatCell {
   x: number
   y: number
   z: number
+  /** 格内 Pc 最高事件 id：聚合斑拾取时直接取 seed，避免仅靠 mid 空间容差 miss */
+  bestId: number
+  bestPc: number
+  bestPcMax: number
 }
 
-/** 交会热力（本地初筛）：立方网格聚合 → 每格一个热力斑（普通混合，颜色不预乘，叠加不会泛白）。
+/** 关注 / 数据不足（数量大）：立方网格聚合 → 每格一个热力斑（普通混合，颜色不预乘，叠加不会泛白）。
  *  斑心取格内中点均值；颜色按格内风险加权（警告橙 ↔ 高危红随风险占比自然过渡，与图例两端一致）；
  *  大小与不透明度按格内事件数对数增长（避免个别超密格吃掉整个视野）；再叠一层同色加法小核点出热点中心。 */
 function buildAggregatedHeat(group: THREE.Group, evs: CdmHeatEvent[]) {
+  const tleSide = heatSource.value === 'tle-threat'
+  const blobBase = tleSide ? HEAT_BLOB_BASE * 1.12 : HEAT_BLOB_BASE * 0.9
   const cells = new Map<string, HeatCell>()
   const inv = 1 / heatCell.value
   const tc = new THREE.Color()
@@ -3784,7 +3961,7 @@ function buildAggregatedHeat(group: THREE.Group, evs: CdmHeatEvent[]) {
     if (!Number.isFinite(mx) || !Number.isFinite(my) || !Number.isFinite(mz)) continue
     const key = `${Math.floor(mx * inv)},${Math.floor(my * inv)},${Math.floor(mz * inv)}`
     let cell = cells.get(key)
-    if (!cell) { cell = { n: 0, w: 0, r: 0, g: 0, b: 0, x: 0, y: 0, z: 0 }; cells.set(key, cell) }
+    if (!cell) { cell = { n: 0, w: 0, r: 0, g: 0, b: 0, x: 0, y: 0, z: 0, bestId: -1, bestPc: -1, bestPcMax: -1 }; cells.set(key, cell) }
     // 每事件至少给 0.15 基础权重，避免低风险事件的颜色与计数被同格高风险完全吞掉
     const w = 0.15 + (e.risk || 0)
     tc.set(heatColorOf(e))
@@ -3792,6 +3969,13 @@ function buildAggregatedHeat(group: THREE.Group, evs: CdmHeatEvent[]) {
     cell.w += w
     cell.r += tc.r * w; cell.g += tc.g * w; cell.b += tc.b * w
     cell.x += mx; cell.y += my; cell.z += mz
+    const pc = e.collision_probability ?? 0
+    const pcm = e.pc_max ?? 0
+    if (pc > cell.bestPc || (pc === cell.bestPc && pcm > cell.bestPcMax)) {
+      cell.bestPc = pc
+      cell.bestPcMax = pcm
+      cell.bestId = e.id
+    }
   }
   const total = cells.size
   if (!total) return
@@ -3803,16 +3987,18 @@ function buildAggregatedHeat(group: THREE.Group, evs: CdmHeatEvent[]) {
   const kpos = new Float32Array(total * 3)
   const kcol = new Float32Array(total * 3)
   const ksize = new Float32Array(total)
-  // 逐格场景中点：选中事件时按距离判断「同簇」，用于其它格淡出（见 applyHeatDim）
+  // 逐格场景中点：聚合斑的拾取锚点（斑画在网格中心，事件 mid 常偏离斑心）
   const centers = new Float32Array(total * 3)
+  const cellIds: number[] = new Array(total)
 
   let i = 0
   for (const cell of cells.values()) {
     const p = eciToScene(cell.x / cell.n, cell.y / cell.n, cell.z / cell.n)
     centers[i * 3] = p.x; centers[i * 3 + 1] = p.y; centers[i * 3 + 2] = p.z
+    cellIds[i] = cell.bestId
     const cc = tc.setRGB(cell.r / cell.w, cell.g / cell.w, cell.b / cell.w)
     const grow = Math.log2(1 + cell.n) // 0(1 条) → 6.6(100 条)
-    const R = Math.min(HEAT_BLOB_MAX, HEAT_BLOB_BASE * (1 + grow))
+    const R = Math.min(HEAT_BLOB_MAX, blobBase * (1 + grow))
     bpos[i * 3] = p.x; bpos[i * 3 + 1] = p.y; bpos[i * 3 + 2] = p.z
     bcol[i * 3] = cc.r; bcol[i * 3 + 1] = cc.g; bcol[i * 3 + 2] = cc.b
     bsize[i] = R
@@ -3828,7 +4014,7 @@ function buildAggregatedHeat(group: THREE.Group, evs: CdmHeatEvent[]) {
   bgeom.setAttribute('aColor', new THREE.BufferAttribute(bcol, 3))
   bgeom.setAttribute('aSize', new THREE.BufferAttribute(bsize, 1))
   bgeom.setAttribute('aAlpha', new THREE.BufferAttribute(balpha, 1))
-  ;(bgeom.userData as { heatDim?: HeatDimMeta }).heatDim = { base: balpha.slice(), centers }
+  ;(bgeom.userData as { heatPick?: HeatPickMeta }).heatPick = { centers, ids: cellIds }
   const blobs = new THREE.Points(bgeom, makeHeatSoftMaterial())
   blobs.frustumCulled = false
   group.add(blobs)
@@ -3840,11 +4026,16 @@ function buildAggregatedHeat(group: THREE.Group, evs: CdmHeatEvent[]) {
   kgeom.setAttribute('aSize', new THREE.BufferAttribute(ksize, 1))
   const coreAlpha = new Float32Array(total).fill(1)
   kgeom.setAttribute('aAlpha', new THREE.BufferAttribute(coreAlpha, 1).setUsage(THREE.DynamicDrawUsage))
-  ;(kgeom.userData as { heatDim?: HeatDimMeta }).heatDim = { base: coreAlpha.slice(), centers }
+  ;(kgeom.userData as { heatPick?: HeatPickMeta }).heatPick = { centers, ids: cellIds }
   const cores = new THREE.Points(kgeom, makeHeatGlowMaterial())
   cores.frustumCulled = false
   group.add(cores)
   g.heatPoints = cores
+  ;(group.userData as { heatLayers?: THREE.Points[] }).heatLayers = [
+    ...((group.userData as { heatLayers?: THREE.Points[] }).heatLayers ?? []),
+    blobs,
+    cores
+  ]
 }
 
 /** 销毁全部热力标记（组 + 中点核心点 + 云 + 选中轨道组），回收 GPU 资源 */
@@ -3895,47 +4086,12 @@ const HEAT_CLUSTER_R = 0.07
 /** 依据被点击事件，聚合该「碰撞云」覆盖区域内的全部事件（中点距离 ≤ HEAT_CLUSTER_R），用于右侧整片云碰撞列表 */
 function clusterHeatEvents(base: CdmHeatEvent): CdmHeatEvent[] {
   const bm = heatMidPoint(base)
+  const r = Math.max(HEAT_CLUSTER_R, heatCell.value * 1.25)
   const res: CdmHeatEvent[] = []
   for (const e of heatFiltered.value) {
-    if (heatMidPoint(e).distanceTo(bm) <= HEAT_CLUSTER_R) res.push(e)
+    if (heatMidPoint(e).distanceTo(bm) <= r) res.push(e)
   }
   return res
-}
-
-/** 选中事件时的「同簇高亮」：同簇顶点保持原不透明度，其余淡出到 HEAT_DIM。
- *  逐事件模式按事件 id 命中；网格聚合模式按斑心到选中点距离 ≤ HEAT_CLUSTER_R 判定同簇。
- *  只改 aAlpha 属性，不重建几何 —— 选中/取消选中都不会让热力云随机粒子重排（无闪动）。 */
-const HEAT_DIM = 0.16
-function applyHeatDim() {
-  const sel = heatSelList.value
-  const has = sel.length > 0
-  const ids = has ? new Set(sel.map((e) => e.id)) : null
-  const mids = has ? sel.map((e) => heatMidPoint(e)) : []
-  const r2 = HEAT_CLUSTER_R * HEAT_CLUSTER_R
-  for (const pts of [g.heatPoints, g.heatClouds]) {
-    const geom = pts?.geometry
-    const meta = (geom?.userData as { heatDim?: HeatDimMeta } | undefined)?.heatDim
-    if (!geom || !meta) continue
-    const attr = geom.getAttribute('aAlpha') as THREE.BufferAttribute | undefined
-    if (!attr) continue
-    const arr = attr.array as Float32Array
-    if (!has) {
-      arr.set(meta.base)
-    } else if (meta.ids) {
-      for (let i = 0; i < arr.length; i++) arr[i] = meta.base[i] * (ids!.has(meta.ids[i]) ? 1 : HEAT_DIM)
-    } else if (meta.centers) {
-      for (let i = 0; i < arr.length; i++) {
-        const x = meta.centers[i * 3], y = meta.centers[i * 3 + 1], z = meta.centers[i * 3 + 2]
-        let keep = false
-        for (const m of mids) {
-          const dx = x - m.x, dy = y - m.y, dz = z - m.z
-          if (dx * dx + dy * dy + dz * dz <= r2) { keep = true; break }
-        }
-        arr[i] = meta.base[i] * (keep ? 1 : HEAT_DIM)
-      }
-    }
-    attr.needsUpdate = true
-  }
 }
 
 /** 目标模型（A/B 两星在 TCA 时刻的真实卫星模型）相对「卫星云模型」的放大倍数：
@@ -4110,22 +4266,23 @@ function applyHeatMode() {
   const hideCloud = (on || passMode.value) && !satSetActive.value
   for (const model of modelKeys()) {
     const im = g.modelMeshes[model]
-    if (im) im.visible = cloudGate() && (hideCloud ? false : modelVisible(model))
+    // 位置展示旁路：热力/过境隐藏点云时仍允许被点亮空间站 Mesh 通道（独立 Mesh 另见 stationFocusMesh）
+    if (im) im.visible = hideCloud ? stationBypass(model) : modelMeshVisible(model)
   }
   // 轨道线：热力/过境视图隐藏卫星云时一并隐藏，同时叠加图例的「轨道线」总开关
   const orbitOn = cloudGate() && !hideCloud && orbitVisible.value
   // 集合叠加层在过境视图下改由「目标明细过境轨道环」（passCityOrbitGroup）呈现，故隐藏批量过滤轨道线组，
   // 避免同一颗星出现两条轨道线；热力视图（on=false）仍保留过滤轨道线。
   if (g.filterOrbitGroup) g.filterOrbitGroup.visible = orbitOn && !(on && satSetActive.value)
-  if (g.orbitLine) g.orbitLine.visible = orbitOn
+  if (g.orbitLine) g.orbitLine.visible = stationOrbitOn() || orbitOn
   if (g.previewOrbitLine) g.previewOrbitLine.visible = orbitOn
-  if (g.selAnchor) g.selAnchor.visible = !hideCloud
+  if (g.selAnchor) g.selAnchor.visible = !hideCloud || stationSelOn()
+  if (stationFocusMesh) stationFocusMesh.visible = stationSelOn()
   if (g.passGroup) g.passGroup.visible = passMode.value
   if (g.heatGroup) g.heatGroup.visible = on
   if (g.heatSelOrbitGroup) g.heatSelOrbitGroup.visible = on
   if (on) {
-    // 进入热力：未加载则拉取，已加载则按需重建标记；local / cri 同时补拉各自的「数据批次」下拉列表
-    if (heatSource.value !== 'spacetrack' && heatSource.value !== 'eph-aoe' && !heatBatches.value.length) loadHeatBatches()
+    // 进入热力：未加载则拉取，已加载则按需重建标记
     if (!heatList.value.length && !heatLoading.value) loadHeat()
     else if (!g.heatGroup) buildHeatMarkers()
   } else {
@@ -4140,254 +4297,388 @@ function applyHeatMode() {
   }
 }
 
-/** 最近一次已加载的交会热力批次 id：loadHeat 把后端解析出的批次回填到 heatBatchRunId 时，
- *  用它让 watch(heatBatchRunId) 识别「这是回显而非用户切换」，避免多触发一次重载。 */
-let loadedHeatBatchId: number | null = null
-
-/** 热力数据内存缓存：键 = 来源|窗口天数|批次（未指定批次时为 'latest'）。
- *  同一来源 / 批次再次访问（含「切走再切回」）直接命中，不再请求后端、不显示任何加载提示；
- *  配合首屏后的静默预取，切换来源即可秒出。 */
+/** 热力数据内存缓存：键 = 来源|窗口天数。
+ *  同一标签 / 窗口再次访问（含「切走再切回」）直接命中，不再请求后端、不显示任何加载提示。 */
 const heatCache = new Map<string, HeatmapResult>()
-function heatCacheKey(src: string, days: number, runId: number | null): string {
-  return `${src}|${days}|${runId ?? 'latest'}`
+function heatCacheKey(src: string, days: number): string {
+  return `${src}|${days}`
 }
-/** 写入缓存：请求未指定批次时，把返回的实际批次 id 也建成别名（回填后按批次回看可直接命中）；
- *  同时落 IndexedDB：下次冷启动（含安卓重开 App）切到热力来源也是毫秒级直出。 */
-function cacheHeat(src: string, days: number, res: HeatmapResult, runId: number | null) {
-  heatCache.set(heatCacheKey(src, days, runId), res)
-  const rid = res?.run_id ?? null
-  if (runId == null && rid != null) heatCache.set(heatCacheKey(src, days, rid), res)
-  void cacheSet(heatPersistKey(src, days, runId), res)
-  if (runId == null && rid != null && rid !== runId) void cacheSet(heatPersistKey(src, days, rid), res)
+/** 写入缓存并落 IndexedDB：下次冷启动（含安卓重开 App）切到热力标签也是毫秒级直出 */
+function cacheHeat(src: string, days: number, res: HeatmapResult) {
+  heatCache.set(heatCacheKey(src, days), res)
+  void cacheSet(heatPersistKey(src, days), res)
 }
 
 /** 当前 heatList 所属的来源：与 heatSource 分开记录，用于判断「某来源的热力数据是否已真正加载」。
  *  切换来源时 heatList 仍是上一来源的旧数据（loadHeat 异步替换），故必须靠它区分「数据未到」与「数据到了但没有该事件」。 */
 let heatLoadedSrc: HeatSource | '' = ''
-/** 7 天窗口空结果的自动回落标记：进入热力默认 7 天，若本地批次偏旧导致 7 天内无事件，
- *  自动切回「全部」一次，避免首屏热力图为空。切到非 7 天窗口时复位，用户再次手动选 7 天仍会重新判断。 */
-let heatDaysFallbackDone = false
 /** 判断某来源的热力数据是否已落到当前状态（供 URL 预置的「事件拾取」判断可否立即选中） */
 function heatDataReady(src: HeatSource): boolean {
   return heatLoadedSrc === src
 }
 
-/** 把一份热力响应落到各状态并重建标记（缓存命中与网络返回共用，保证两条路径完全同口径） */
-function applyHeatPayload(res: HeatmapResult | undefined, batchBased: boolean, src: HeatSource) {
+/** 清空当前热力状态（03 §11.5）：切标签、请求失败、服务不可用时都必须清，
+ *  否则标题计数 / 按天柱 / 芯片计数会串用上一个标签的数据。 */
+function resetHeatState() {
+  heatList.value = []
+  heatLegend.value = []
+  heatDayGroups.value = []
+  heatDay.value = -1
+  heatSel.value = null
+  heatSelList.value = []
+  heatLoadedSrc = ''
+  buildHeatMarkers()
+}
+
+/* ---- sidecar 健康探测（缓存 30 s）：两个热力标签进入前先确认 /cgi2/health ---- */
+let sidecarHealthAt = 0
+let sidecarHealth: { ok: boolean; reason: HeatUnavailableReason } = { ok: false, reason: 'SIDECAR_DOWN' }
+async function checkSidecar(): Promise<{ ok: boolean; reason: HeatUnavailableReason }> {
+  if (Date.now() - sidecarHealthAt < 30_000) return sidecarHealth
+  try {
+    const h = await getHeat2Health()
+    const coreOk = h.core === 'ready'
+    const dbOk = h.db === 'up'
+    const reason: HeatUnavailableReason = !coreOk ? 'CORE_NOT_LOADED' : !dbOk ? 'DB_DOWN' : 'SIDECAR_DOWN'
+    sidecarHealth = { ok: coreOk && dbOk && h.status === 'up', reason: coreOk && dbOk ? '' : reason }
+  } catch {
+    sidecarHealth = { ok: false, reason: 'SIDECAR_DOWN' }
+  }
+  sidecarHealthAt = Date.now()
+  return sidecarHealth
+}
+/** 手动重试时清掉健康缓存，立即重新探测 */
+async function recheckSidecar() {
+  sidecarHealthAt = 0
+  await loadHeat()
+}
+
+/** 把一份热力响应落到各状态并重建标记（缓存命中与网络返回共用，保证两条路径完全同口径）。
+ *  D9：两个标签统一按 Pc 分级 —— risk（驱动热力云半径）由 Pc 重算，后端下发的 color/risk 一律覆盖。 */
+function applyHeatPayload(res: HeatmapResult | undefined, src: HeatSource) {
   heatLoadedSrc = src
-  heatList.value = res?.list || []
-  // 配色图例 / 指标名 / 按日切片分组均由后端按来源口径算好下发，前端只存不换算
-  heatLegend.value = res?.legend || []
-  heatMetricLabel.value = res?.metric_label || ''
+  heatList.value = (res?.list || []).map((e) => ({
+    ...e,
+    risk: riskOfPc(e.collision_probability),
+    color: colorOfLevel(levelOfPc(e.collision_probability, e.pc_max) ?? 'yellow')
+  }))
+  heatLegend.value = []
+  heatMetricLabel.value = '碰撞概率 Pc'
   heatDayGroups.value = res?.day_groups || []
   heatDay.value = -1
-  // 回填后端实际解析出的批次 id：未选批次时即为「总库」当前批次，供下拉回显
-  loadedHeatBatchId = batchBased ? (res?.run_id ?? null) : null
-  if (batchBased && res?.run_id) heatBatchRunId.value = res.run_id
-  heatError.value = ''
+  // 7 天为空就如实显示「未来 7 天无事件」，不再回落到「全部」（03 §11.3）
+  heatStatus[src] = heatList.value.length ? 'ready' : 'empty'
+  if (heatStatus[src] === 'ready') heatUnavailableReason.value = ''
   buildHeatMarkers()
-  // 进入热力默认 7 天窗口：若该窗口无事件（本地批次偏旧时常见），自动回落到「全部」一次，避免首屏空图。
-  if (heatDays.value !== 7) heatDaysFallbackDone = false
-  else if (!heatList.value.length && !heatDaysFallbackDone) {
-    heatDaysFallbackDone = true
-    heatDays.value = 0
-  }
 }
 
-/** 星历热力：ThreatEvent（本机联算）→ 热力面板事件结构（与后端 CdmHeatEvent 同构，
- *  使列表 / 详情 / 拾取 / 过滤沿用同一套前端逻辑）。a_* 为本星、b_* 为对方、mid_* 取两点中点。 */
-function aoeHeatToCdm(e: ThreatEvent, i: number): CdmHeatEvent {
-  const a = e.midEci
-  const b = e.otherEci || e.midEci
-  const mx = (a[0] + b[0]) / 2
-  const my = (a[1] + b[1]) / 2
-  const mz = (a[2] + b[2]) / 2
+/** 二标签统一取数（都走 heat-sidecar）：
+ *  - 'tle-threat' → /cgi2/heat/heatmap?kind=tle-threat（TLE×TLE 自算，quality=tle_only）；
+ *  - 'tle-eph'    → /cgi2/heat/heatmap?kind=tle（精密星历 × TLE）。 */
+async function fetchHeatmap(src: HeatSource, days: number): Promise<HeatmapResult> {
+  const p = heatPrimaryFilter.value
+  const r = await getHeat2Map({
+    kind: src === 'tle-threat' ? 'tle-threat' : 'tle',
+    days,
+    primary: src === 'tle-threat'
+      ? 'official'
+      : p.kind === 'uploaded' ? `ephem:${p.ephemId}` : 'official'
+  })
   return {
-    id: i + 1,
-    cdm_id: e.id,
-    tca: new Date(e.tca).toISOString(),
-    norad_a: e.selfNorad,
-    name_a: activeEphem.value?.name || '',
-    norad_b: e.otherNorad,
-    name_b: e.otherName,
-    miss_distance_km: e.missKm,
-    rel_speed_km_per_s: e.relSpeedKmS,
-    collision_probability: e.pc,
-    hard_body_radius_m: 10,
-    a_x: a[0], a_y: a[1], a_z: a[2],
-    b_x: b[0], b_y: b[1], b_z: b[2],
-    mid_x: mx, mid_y: my, mid_z: mz,
-    color: heatBandColor(e.risk),
-    risk: e.risk,
-    dens_boost: 1,
-    metric_text: `${e.missKm.toFixed(2)} km`,
-    day: 0,
-    level: e.level,
-    altitude: Math.hypot(mx, my, mz) - 6371
+    list: r.list || [],
+    total: r.total ?? (r.list?.length || 0),
+    days: r.days ?? days,
+    run_id: r.run_id ?? null,
+    legend: [],
+    day_groups: r.day_groups || [],
+    metric_label: '碰撞概率 Pc',
+    metric: 'pc',
+    ready: r.ready,
+    reason: r.reason ?? null,
+    primary_scope: r.primary_scope,
+    ephem_id: r.ephem_id ?? null
   }
 }
 
-/** 星历热力加载：AOE 点云粗筛 + 候选 TLE/SGP4 精算，本机联算、不落后端表也不进热力缓存。
- *  切来源与改时间窗可能在同一 tick 各触发一次 loadHeat，这里按窗口合并，避免并发跑两遍全量联算。 */
-let ephHeatRun: { key: string; seq: number; p: Promise<void> } | null = null
-/** 联算序号：结束后只有最新一轮能清除 ephHeatRun */
-let ephHeatSeq = 0
-function loadEphHeat(): Promise<void> {
-  const windowH = heatDays.value >= 3 ? 72 : 24
-  const setId = activeEphem.value?.id || ''
-  const key = `${setId}|${windowH}`
-  if (ephHeatRun && ephHeatRun.key === key) return ephHeatRun.p
-  const seq = ++ephHeatSeq
-  const p = (async () => {
-    heatLoading.value = true
-    heatError.value = ''
-    heatSel.value = null
-    heatSelList.value = []
-    try {
-      const events = await runAoeHeat(windowH)
-      // 联算期间换了星历：结果作废（由 activeEphem watcher 触发的新一轮负责）
-      if (heatSource.value !== 'eph-aoe' || (activeEphem.value?.id || '') !== setId) return
-      heatLoadedSrc = 'eph-aoe'
-      heatList.value = events.map((e, i) => aoeHeatToCdm(e, i))
-      heatLegend.value = HEAT_RISK_BANDS.map((b) => ({ color: b.color, label: b.label, thresh: b.thresh }))
-      heatMetricLabel.value = '最近距离'
-      heatDayGroups.value = []
-      heatDay.value = -1
-      loadedHeatBatchId = null
-      buildHeatMarkers()
-    } catch (e) {
-      if (heatSource.value !== 'eph-aoe') return
-      heatError.value = (e as Error)?.message || '星历热力计算失败'
-    } finally {
-      if (heatSource.value === 'eph-aoe') heatLoading.value = false
-      if (ephHeatRun && ephHeatRun.seq === seq) ephHeatRun = null
-    }
-  })()
-  ephHeatRun = { key, seq, p }
-  return p
-}
-
-/** 拉取未来 heatDays 窗口的碰撞事件并重建标记。
- *  按 heatSource 分派数据源：'local' 走本项目 SGP4 初筛（/cgi/sat_conj/heatmap），
- *  'spacetrack' 走官方 CDM（/cgi/sat_cdm/heatmap），'cri' 走交会分析（/cgi/sat_cri/heatmap）；
- *  三者坐标口径一致，仅事件集与着色口径不同。local / cri 均为批次口径（可回看历史全量批次）。
+/** 拉取未来 heatDays 窗口的碰撞事件并重建标记（二标签统一走 fetchHeatmap）。
  *  命中热力缓存时同步落状态（不置 heatLoading，不出现加载提示）。 */
 async function loadHeat() {
   const src = heatSource.value
-  // 星历热力是本机联算（AOE 点云粗筛 + 候选 TLE/SGP4 精算），既不落后端表也没有批次 / 持久缓存
-  if (src === 'eph-aoe') {
-    await loadEphHeat()
+  // 两个标签都依赖 heat-sidecar + 核心：先确认健康状态；不可用时直接进入空状态，不使用任何旧数据（03 §11.5）
+  const health = await checkSidecar()
+  if (src !== heatSource.value) return
+  if (!health.ok) {
+    resetHeatState()
+    heatStatus[src] = 'unavailable'
+    heatUnavailableReason.value = health.reason
+    heatLoading.value = false
     return
   }
-  // local / cri 走各自「总库」口径：默认最近一次全体 × 全体全量批次，
-  // 若面板「数据批次」下拉选了历史批次则按 run_id 回看；CDM 热力无批次概念，不传。
-  const batchBased = src !== 'spacetrack'
-  const runId = batchBased ? (heatBatchRunId.value || null) : null
-  const cached = heatCache.get(heatCacheKey(src, heatDays.value, runId))
-  if (cached) { applyHeatPayload(cached, batchBased, src); return }
+  const cached = heatCache.get(heatCacheKey(src, heatDays.value))
+  if (cached) { applyHeatPayload(cached, src); return }
   // 内存未命中：取本地持久缓存先出图（毫秒级），随即后台静默拉最新并回写缓存。
   // 首次安装 / 缓存被清时无持久缓存，自动落到下面的网络路径。
-  const persisted = await cacheGet<HeatmapResult>(heatPersistKey(src, heatDays.value, runId))
+  const persisted = await cacheGet<HeatmapResult>(heatPersistKey(src, heatDays.value))
   if (persisted) {
     if (src !== heatSource.value) return
-    cacheHeat(src, heatDays.value, persisted, runId)
-    applyHeatPayload(persisted, batchBased, src)
-    void refreshHeatInBackground(src, batchBased, runId)
+    cacheHeat(src, heatDays.value, persisted)
+    applyHeatPayload(persisted, src)
+    void refreshHeatInBackground(src)
     return
   }
   heatLoading.value = true
-  heatError.value = ''
+  heatStatus[src] = 'loading'
   try {
-    const fetchHeat = src === 'local' ? getConjHeatmap : src === 'cri' ? getCriHeatmap : getCdmHeatmap
-    const params = batchBased
-      ? { days: heatDays.value, run_id: runId || undefined }
-      : { days: heatDays.value }
-    const res = await fetchHeat(params)
+    const res = await fetchHeatmap(src, heatDays.value)
     // 若 await 期间来源已被切换，丢弃这批数据，避免把旧来源的事件画成新来源的配色
     if (src !== heatSource.value) return
-    cacheHeat(src, heatDays.value, res, runId)
-    applyHeatPayload(res, batchBased, src)
+    // 核心未就绪（stub）时 sidecar 返回 ready:false：进入空状态，不显示旧轮次数据
+    if (res.ready === false) {
+      resetHeatState()
+      heatStatus[src] = 'unavailable'
+      heatUnavailableReason.value = 'CORE_NOT_LOADED'
+      return
+    }
+    cacheHeat(src, heatDays.value, res)
+    applyHeatPayload(res, src)
   } catch {
     if (src !== heatSource.value) return
-    heatError.value = src === 'local' ? '交会热力数据加载失败' : src === 'cri' ? '交会分析热力数据加载失败' : 'CDM 热力数据加载失败'
+    resetHeatState()
+    heatStatus[src] = 'unavailable'
+    heatUnavailableReason.value = 'SIDECAR_DOWN'
   } finally {
     if (src === heatSource.value) heatLoading.value = false
   }
 }
 
 /** 后台静默刷新热力：不置 heatLoading、失败静默（本地持久缓存画面仍可看）。
- *  仅在「批次或事件数量变化」时才重绘标记 —— 数据没变时不重建，避免无谓闪动。 */
-async function refreshHeatInBackground(src: typeof heatSource.value, batchBased: boolean, runId: number | null) {
+ *  仅在事件数量变化时才重绘标记 —— 数据没变时不重建，避免无谓闪动。 */
+async function refreshHeatInBackground(src: typeof heatSource.value) {
   const days = heatDays.value
   try {
-    const fetchHeat = src === 'local' ? getConjHeatmap : src === 'cri' ? getCriHeatmap : getCdmHeatmap
-    const params = batchBased ? { days, run_id: runId || undefined } : { days }
-    const res = await fetchHeat(params)
+    const res = await fetchHeatmap(src, days)
     if (disposed || src !== heatSource.value || days !== heatDays.value) return
-    cacheHeat(src, days, res, runId)
-    const sameBatch = (res?.run_id ?? null) === loadedHeatBatchId
-    if (sameBatch && (res?.list?.length ?? 0) === heatList.value.length) return
-    applyHeatPayload(res, batchBased, src)
+    cacheHeat(src, days, res)
+    if ((res?.list?.length ?? 0) === heatList.value.length) return
+    applyHeatPayload(res, src)
   } catch { /* 静默 */ }
 }
 
-/** 静默预取某来源的热力数据（只写缓存，不改动当前状态、不建标记）：用户切到该来源时秒出。
+/** 静默预取某标签的热力数据（只写缓存，不改动当前状态、不建标记）：用户切到该标签时秒出。
  *  失败静默——真正切换时 loadHeat 会再请求一次并给出错误提示。 */
 async function prefetchHeat(src: typeof heatSource.value) {
-  const key = heatCacheKey(src, heatDays.value, null)
-  if (heatCache.has(key)) return
+  if (heatCache.has(heatCacheKey(src, heatDays.value))) return
   try {
-    const res = src === 'cri' ? await getCriHeatmap({ days: heatDays.value })
-      : src === 'spacetrack' ? await getCdmHeatmap({ days: heatDays.value })
-        : await getConjHeatmap({ days: heatDays.value })
-    cacheHeat(src, heatDays.value, res, null)
+    const res = await fetchHeatmap(src, heatDays.value)
+    cacheHeat(src, heatDays.value, res)
   } catch { /* 预取失败静默，不影响任何交互 */ }
 }
 
-/** 加载当前来源的批次列表（最近 N 个全体 × 全体全量批次），供面板「数据批次」下拉回看历史扫描。
- *  local / cri 各有独立批次表（sat_conj_run / sat_cri_run）；CDM 热力无批次概念，直接跳过。
- *  失败静默（下拉为空即退化为只看当前批次）。 */
-async function loadHeatBatches() {
-  const src = heatSource.value
-  if (src === 'spacetrack' || src === 'eph-aoe') return
-  // 本地持久缓存直出（下拉立即可用），再静默拉最新替换
-  const persisted = await cacheGet<{ list?: typeof heatBatches.value }>(heatBatchesKey(src))
-  if (persisted?.list?.length && src === heatSource.value && !heatBatches.value.length) {
-    heatBatches.value = persisted.list
-  }
-  try {
-    const res = src === 'cri' ? await getCriBatches(12) : await getConjBatches(12)
-    // 若 await 期间来源已切换，丢弃结果，避免把旧来源批次列表填进新来源下拉
-    if (src !== heatSource.value) return
-    heatBatches.value = res?.list || []
-    void cacheSet(heatBatchesKey(src), res)
-  } catch {
-    if (src === heatSource.value && !heatBatches.value.length) heatBatches.value = []
-  }
+/** 热力柔光点是否可见：与 shader 的 earthOcc() 同口径（相机→该点线段到地心的最小距离），
+ *  球缘 0.96~1.02 是淡出带，取 0.97 作为「还能看见/可点」的下限。 */
+const HEAT_VISIBLE_R = 0.97
+/** Soft pick threshold: shader still draws limb glow ~0.96-1.02; 0.97 hard-cut misses visible edges. */
+const HEAT_PICKABLE_R = 0.93
+function heatPointOccRadius(camPos: THREE.Vector3, p: THREE.Vector3): number {
+  _dirS.copy(p).sub(camPos)
+  const len2 = _dirS.lengthSq()
+  if (len2 <= 1e-9) return 1
+  _ocS.copy(camPos).negate()
+  const t = Math.max(0, Math.min(1, _ocS.dot(_dirS) / len2))
+  const mx = _ocS.x + _dirS.x * t
+  const my = _ocS.y + _dirS.y * t
+  const mz = _ocS.z + _dirS.z * t
+  return Math.hypot(mx, my, mz)
+}
+function heatPointVisible(camPos: THREE.Vector3, p: THREE.Vector3): boolean {
+  return heatPointOccRadius(camPos, p) >= HEAT_VISIBLE_R
+}
+/** Picking only: allow soft limb glow to count as hittable. */
+function heatPointPickable(camPos: THREE.Vector3, p: THREE.Vector3): boolean {
+  return heatPointOccRadius(camPos, p) >= HEAT_PICKABLE_R
 }
 
-/** 热力模式下拾取最近的事件（屏幕投影距离），返回事件下标与距离平方。
- *  同时给出距离是为了与「已选中云的 A/B 端点标记」做就近比较（见 onCanvasClick）：两者常常重叠在一处。 */
-function pickNearestHeat(px: number, py: number): { idx: number; d2: number } | null {
+/** 热力云拾取（视觉优先）：用与 shader 相同的公式 gl_PointSize = aSize·uScale/d 估出每个柔光点的
+ *  屏幕半径，点击落在斑面内即命中。聚合斑直径可达 300px，固定 40px 容差会表现为「点了没反应」；
+ *  命中优劣按「离斑心的相对距离」比较，避免大斑把小斑抢走。
+ *  命中后：逐事件层直接给出该顶点事件；聚合层给出斑心，由 seedFromHeatCell 取格内最危险事件。 */
+function eventCloudPickRadius(e: CdmHeatEvent): number {
+  // 与 buildEventHeat 里弥散云半径同构；*1.6 + dens 让稀疏粒子合成的「视觉云」缝隙也能点中
+  const tleSide = heatSource.value === 'tle-threat'
+  const base = tleSide ? 0.026 : 0.020
+  const dens = Math.max(1, Number(e.dens_boost) || 1)
+  return base * (0.6 + (e.risk || 0) * 1.9) * dens * 1.6
+}
+
+/** 任意等级事件的 mid 拾取半径（场景单位）。
+ *  红/橙：事件弥散云半径；黄/不足：按聚合格邻域给足半径，让相邻黄斑的拾取盘在默认地球视角下重叠。 */
+function eventPickRadius(e: CdmHeatEvent): number {
+  const lv = levelOfPc(e.collision_probability, e.pc_max)
+  if (lv === 'red' || lv === 'orange') return eventCloudPickRadius(e)
+  // yellow / insufficient / null → 聚合斑尺度
+  return Math.max(heatCell.value * 0.85, HEAT_BLOB_BASE * 2.8, 0.12)
+}
+
+/** 热力云拾取：与 shader 相同公式把每点屏幕半径算出；
+ *  全等级事件按 mid + eventPickRadius 拾取（黄斑不再只靠聚合层格心）；
+ *  聚合层半宽放宽到 ~0.62 + 额外 padding，软光晕边缘可点；
+ *  返回 inside=true 表示落在渲染半径内，onCanvasClick 据此优先于 A/B 端点。 */
+function pickHeatCloud(px: number, py: number): { d2: number; event: CdmHeatEvent | null; pos: THREE.Vector3 | null; inside: boolean } | null {
   const cam = g.camera, renderer = g.renderer
   if (!cam || !renderer) return null
-  const evs = heatFiltered.value
-  if (!evs.length) return null
+  const layers = (((g.heatGroup?.userData as { heatLayers?: THREE.Points[] } | undefined)?.heatLayers) ?? [])
+    .filter((p): p is THREE.Points => !!p)
+  // 无图层时仍允许全等级 mid 拾取（黄斑不依赖层命中）
+  if (!layers.length && !heatFiltered.value.length) return null
   const rect = renderer.domElement.getBoundingClientRect()
-  const tolerance2 = PICK_TOLERANCE_PX * PICK_TOLERANCE_PX
-  let best: number | null = null
-  let bestD2 = tolerance2
-  for (let i = 0; i < evs.length; i++) {
-    _proj.copy(heatMidPoint(evs[i])).project(cam)
+  const dpr = renderer.getPixelRatio() || 1
+  const uScale = heatPixelScale()
+  // 拾取时刷新材质 uScale，避免窗口缩放后视觉点径与拾取半径脱节
+  for (const pts of layers) {
+    const mat = pts.material as THREE.ShaderMaterial | undefined
+    if (mat?.uniforms?.uScale) mat.uniforms.uScale.value = uScale
+  }
+  const byId = new Map<number, CdmHeatEvent>()
+  for (const e of heatFiltered.value) byId.set(e.id, e)
+  const tol2 = PICK_TOLERANCE_PX * PICK_TOLERANCE_PX
+  let best: { d2: number; event: CdmHeatEvent | null; pos: THREE.Vector3 | null; score: number; inside: boolean } | null = null
+
+  const consider = (d2: number, rpx: number, event: CdmHeatEvent | null, pos: THREE.Vector3 | null) => {
+    const inside = d2 <= rpx * rpx
+    if (!inside && d2 > tol2) return
+    // 有绑定事件的命中优先于仅有格心的层命中（同 score 时）
+    const score = (inside ? d2 / Math.max(rpx * rpx, 1e-6) : 2 + d2 / tol2) - (event ? 0.05 : 0)
+    if (best && score >= best.score) return
+    best = { d2, event, pos, score, inside }
+  }
+
+  // ① 全等级事件 mid + 拾取半径（黄/不足也直接 mid 拾取，不再依赖聚合格心命中）
+  for (const e of heatFiltered.value) {
+    const mid = heatMidPoint(e)
+    if (!Number.isFinite(mid.x) || !Number.isFinite(mid.y) || !Number.isFinite(mid.z)) continue
+    if (!heatPointPickable(cam.position, mid)) continue
+    _pickV.copy(mid).applyMatrix4(cam.matrixWorldInverse)
+    const depth = Math.max(-_pickV.z, 0.001)
+    const R = eventPickRadius(e)
+    const rpx = Math.max(32, ((R * uScale) / depth) / dpr + 14)
+    _proj.copy(mid)
+    _proj.project(cam)
     if (_proj.z > 1 || _proj.z < -1) continue
     const sx = (_proj.x * 0.5 + 0.5) * rect.width
     const sy = (-_proj.y * 0.5 + 0.5) * rect.height
     const dx = sx - px
     const dy = sy - py
-    const d2 = dx * dx + dy * dy
-    if (d2 < bestD2) { bestD2 = d2; best = i }
+    consider(dx * dx + dy * dy, rpx, e, mid.clone())
   }
-  return best == null ? null : { idx: best, d2: bestD2 }
+
+  // ② 廉价射线–点世界距离：应对边缘透视压缩时屏幕盘过扁
+  {
+    const ndcX = ((px / rect.width) * 2) - 1
+    const ndcY = -((py / rect.height) * 2) + 1
+    _pickV.set(ndcX, ndcY, 0.5).unproject(cam)
+    const rayOrigin = cam.position
+    const rayDir = _pickV.sub(cam.position).normalize()
+    for (const e of heatFiltered.value) {
+      const mid = heatMidPoint(e)
+      if (!Number.isFinite(mid.x) || !Number.isFinite(mid.y) || !Number.isFinite(mid.z)) continue
+      if (!heatPointPickable(cam.position, mid)) continue
+      // 点到射线距离
+      const ox = mid.x - rayOrigin.x, oy = mid.y - rayOrigin.y, oz = mid.z - rayOrigin.z
+      const t = ox * rayDir.x + oy * rayDir.y + oz * rayDir.z
+      if (t < 0.001) continue
+      const cx = rayOrigin.x + rayDir.x * t
+      const cy = rayOrigin.y + rayDir.y * t
+      const cz = rayOrigin.z + rayDir.z * t
+      const dist = Math.hypot(mid.x - cx, mid.y - cy, mid.z - cz)
+      const R = eventPickRadius(e)
+      if (dist > R) continue
+      // 映射成屏幕距离分（归一化到半径内）供 consider 比较
+      _proj.copy(mid).project(cam)
+      if (_proj.z > 1 || _proj.z < -1) continue
+      const sx = (_proj.x * 0.5 + 0.5) * rect.width
+      const sy = (-_proj.y * 0.5 + 0.5) * rect.height
+      const dx = sx - px
+      const dy = sy - py
+      const depth = Math.max(t, 0.001)
+      const rpx = Math.max(32, ((R * uScale) / depth) / dpr + 14)
+      consider(dx * dx + dy * dy, rpx, e, mid.clone())
+    }
+  }
+
+  // ③ 粒子 / 聚合斑层（黄斑 centers+ids）
+  for (const pts of layers) {
+    const geom = pts.geometry
+    const meta = (geom.userData as { heatPick?: HeatPickMeta }).heatPick
+    const posAttr = geom.getAttribute('position') as THREE.BufferAttribute | undefined
+    if (!meta || !posAttr) continue
+    const sizes = (geom.getAttribute('aSize') as THREE.BufferAttribute | undefined)?.array as Float32Array | undefined
+    const arr = posAttr.array as Float32Array
+    for (let i = 0; i < posAttr.count; i++) {
+      _proj.set(arr[i * 3], arr[i * 3 + 1], arr[i * 3 + 2])
+      if (!heatPointPickable(cam.position, _proj)) continue
+      _pickV.copy(_proj).applyMatrix4(cam.matrixWorldInverse)
+      const d = Math.max(-_pickV.z, 0.001)
+      const size = sizes ? sizes[i] : 0.05
+      // 半宽 0.62 + 12px，让软光晕边缘也算「云内」；地板抬到 20px
+      const rpx = Math.max(32, (Math.min(320, (size * uScale) / d) * 0.62) / dpr + 14)
+      _proj.project(cam)
+      if (_proj.z > 1 || _proj.z < -1) continue
+      const sx = (_proj.x * 0.5 + 0.5) * rect.width
+      const sy = (-_proj.y * 0.5 + 0.5) * rect.height
+      const dx = sx - px
+      const dy = sy - py
+      const ev = meta.ids ? (byId.get(meta.ids[i]) ?? null) : null
+      const pos = meta.centers
+        ? new THREE.Vector3(arr[i * 3], arr[i * 3 + 1], arr[i * 3 + 2])
+        : (ev ? heatMidPoint(ev) : null)
+      consider(dx * dx + dy * dy, rpx, ev, pos)
+    }
+  }
+  // best 可能在 consider 闭包内赋值；TS 控制流难追踪闭包写入，此处断言以保留返回类型
+  let hit = best as { d2: number; event: CdmHeatEvent | null; pos: THREE.Vector3 | null; score: number; inside: boolean } | null
+  // Fallback: if still no inside hit, nearest mid within 96 CSS px counts as inside
+  if (!hit || !hit.inside) {
+    const NEAR_PX = 96
+    const near2 = NEAR_PX * NEAR_PX
+    let nearest: { d2: number; event: CdmHeatEvent; pos: THREE.Vector3 } | null = null
+    for (const e of heatFiltered.value) {
+      const mid = heatMidPoint(e)
+      if (!Number.isFinite(mid.x) || !Number.isFinite(mid.y) || !Number.isFinite(mid.z)) continue
+      if (!heatPointPickable(cam.position, mid)) continue
+      _proj.copy(mid).project(cam)
+      if (_proj.z > 1 || _proj.z < -1) continue
+      const sx = (_proj.x * 0.5 + 0.5) * rect.width
+      const sy = (-_proj.y * 0.5 + 0.5) * rect.height
+      const dx = sx - px
+      const dy = sy - py
+      const d2 = dx * dx + dy * dy
+      if (d2 > near2) continue
+      if (!nearest || d2 < nearest.d2) nearest = { d2, event: e, pos: mid.clone() }
+    }
+    if (nearest) {
+      hit = { d2: nearest.d2, event: nearest.event, pos: nearest.pos, score: nearest.d2 / near2, inside: true }
+    }
+  }
+  return hit ? { d2: hit.d2, event: hit.event, pos: hit.pos, inside: hit.inside } : null
+}
+
+/** 聚合斑命中后，取该格内 Pc 最高（Pc 相同取 PcMax 更高）的事件作为聚类种子 */
+function seedFromHeatCell(pos: THREE.Vector3): CdmHeatEvent | null {
+  // 聚合斑可点区域离 mid 可达约 heatCell·3/2，且斑半径可达 HEAT_BLOB_MAX；再放大到 0.7 倍减少 seed 失败
+  const r = Math.max(HEAT_CLUSTER_R, heatCell.value * 1.5, HEAT_BLOB_MAX * 0.7)
+  const r2 = r * r
+  let best: CdmHeatEvent | null = null
+  for (const e of heatFiltered.value) {
+    const m = heatMidPoint(e)
+    const dx = m.x - pos.x, dy = m.y - pos.y, dz = m.z - pos.z
+    if (dx * dx + dy * dy + dz * dz > r2) continue
+    if (!best
+      || e.collision_probability > best.collision_probability
+      || (e.collision_probability === best.collision_probability && (e.pc_max ?? 0) > (best.pc_max ?? 0))) {
+      best = e
+    }
+  }
+  return best
 }
 
 /** 热力模式下拾取已选中「碰撞云」内的目标端点（屏幕投影距离），
@@ -4441,14 +4732,17 @@ function onCanvasClick(ev: MouseEvent) {
     // 落位后屏幕上相距只有几 px），故取**就近者**：点在端点标记上仍看该卫星详情（保留热力云与两星轨道），
     // 点在事件点上则按「云团列表第一条」选中整片云。若一律端点优先，选中一次之后就再也点不到云团了。
     const tgt = pickNearestHeatTarget(px, py)
-    const hit = pickNearestHeat(px, py)
-    if (tgt && (!hit || tgt.d2 <= hit.d2)) {
-      if (hasSel.value && sel.id === tgt.norad) resetSelected(false)
-      else selectHeatTarget(tgt)
+    const cloud = pickHeatCloud(px, py)
+    // 点在云团渲染半径内时优先开威胁窗；仅当未点中云团时才把点击让给已选事件的 A/B 端点
+    const preferTarget = !!tgt && (!cloud || (!cloud.inside && tgt.d2 <= cloud.d2))
+    if (preferTarget) {
+      if (hasSel.value && sel.id === tgt!.norad) resetSelected(false)
+      else selectHeatTarget(tgt!)
       return
     }
-    if (!hit) return
-    const seed = heatFiltered.value[hit.idx]
+    // 逐事件层命中 → 该顶点事件；聚合层命中 → 斑心，取格内最危险事件作种子
+    if (!cloud) return
+    const seed = cloud.event ?? (cloud.pos ? seedFromHeatCell(cloud.pos) : null)
     if (!seed) return
     // 点中的事件只作为「这一片云团」的聚合种子，真正聚焦的不是它 ——
     // 同一片云团里事件密集，点哪个像素都可能落在不同事件上，若按「屏幕上离点击最近的事件」聚焦，
@@ -4456,11 +4750,20 @@ function onCanvasClick(ev: MouseEvent) {
     const cluster = clusterHeatEvents(seed)
     // 再次点击同一片云团（点在已选云团的任意一个事件上）→ 取消选中
     if (heatSel.value && cluster.some((e) => e.id === heatSel.value!.id)) {
-      heatSel.value = null
-      heatSelList.value = []
-      heatOpen.value = false
-      // 焦点从交会点切回地心（见 resetOrbitFocusToEarth），别把焦点留在天上
-      resetOrbitFocusToEarth()
+      // List-select may leave heatOpen=false; clicking same cloud should re-open, not feel like no-op.
+      // Only deselect when detail is already open (explicit dismiss).
+      if (heatOpen.value) {
+        heatSel.value = null
+        heatSelList.value = []
+        heatOpen.value = false
+        resetOrbitFocusToEarth()
+        return
+      }
+      heatSelList.value = cluster
+      const refocus = cluster[0] ?? seed
+      heatSel.value = refocus
+      heatOpen.value = true
+      flyToPoint(heatMidPoint(refocus), 'point')
       return
     }
     heatSelList.value = cluster
@@ -7535,14 +7838,15 @@ function applyPassMode() {
   const hideCloud = (on || heatMode.value) && !satSetActive.value
   for (const model of modelKeys()) {
     const im = g.modelMeshes[model]
-    if (im) im.visible = cloudGate() && (hideCloud ? false : modelVisible(model))
+    if (im) im.visible = hideCloud ? stationBypass(model) : modelMeshVisible(model)
   }
   // 轨道线：热力/过境视图隐藏卫星云时一并隐藏，同时叠加图例的「轨道线」总开关
   const orbitOn = cloudGate() && !hideCloud && orbitVisible.value
   if (g.filterOrbitGroup) g.filterOrbitGroup.visible = orbitOn
-  if (g.orbitLine) g.orbitLine.visible = orbitOn
+  if (g.orbitLine) g.orbitLine.visible = stationOrbitOn() || orbitOn
   if (g.previewOrbitLine) g.previewOrbitLine.visible = orbitOn
-  if (g.selAnchor) g.selAnchor.visible = !hideCloud
+  if (g.selAnchor) g.selAnchor.visible = !hideCloud || stationSelOn()
+  if (stationFocusMesh) stationFocusMesh.visible = stationSelOn()
   if (g.passGroup) g.passGroup.visible = on
   if (g.regionPassGroup) g.regionPassGroup.visible = on
   if (g.multiPassGroup) g.multiPassGroup.visible = on
@@ -7685,6 +7989,11 @@ let userEphemOtherMarker: THREE.Object3D | null = null
 let userEphemEventSeq = 0
 let userEphemLink: THREE.Mesh | null = null
 let userEphemEvent: { tca: number; r: V3; v: V3 } | null = null
+/** 对方星 TLE 的 SGP4 记录（有则整圈/局部弧/模型位置统一走 SGP4，与热力链路同口径） */
+let userEphemOtherSatrec: ReturnType<typeof twoline2satrec> | null = null
+/** 对方星当前时刻附近的红色局部亮弧（±30 分钟），近距机位下靠它看清对方轨道 */
+let userEphemOtherArc: THREE.Line | null = null
+let userEphemOtherArcMs = -Infinity
 /** 机动仿真：机动后轨迹（橙色实线）+ 机动时刻标记；原方案在对比模式下改画虚线 */
 let userEphemManeuverLine: THREE.Line | null = null
 let userEphemManeuverMarker: THREE.Mesh | null = null
@@ -7754,6 +8063,8 @@ function keplerPropagate(r: V3, v: V3, dtSec: number): V3 | null {
 function clearUserEphem() {
   // 星历图层没了，本星跟踪与准星一并解除（避免准星停在一个已不存在的位置）
   stopEphemTracking()
+  // 星历本星不再由星历模型接管：恢复点云里同一 NORAD 的编目实例
+  setEphemHiddenNorad(null)
   userEphemModelSeq++
   userEphemModel = null
   if (userEphemGroup) {
@@ -7769,6 +8080,9 @@ function clearUserEphem() {
   userEphemOtherMarker = null
   userEphemLink = null
   userEphemEvent = null
+  userEphemOtherSatrec = null
+  userEphemOtherArc = null
+  userEphemOtherArcMs = -Infinity
   userEphemGapLabel = null
   userEphemThreatSeq++
   userEphemThreatGroup = null
@@ -7798,6 +8112,9 @@ function setUserEphem(set: EphemSet | null) {
   userEphemOtherMarker = null
   userEphemLink = null
   userEphemEvent = null
+  userEphemOtherSatrec = null
+  userEphemOtherArc = null
+  userEphemOtherArcMs = -Infinity
   userEphemGapLabel = null
   // 威胁标记随 userEphemGroup 一起释放，这里只清引用并让异步加载结果失效
   userEphemThreatSeq++
@@ -7812,6 +8129,9 @@ function setUserEphem(set: EphemSet | null) {
   userEphemSolidMat = null
   userEphemDashMat = null
   userEphemSet = set
+  // 星历本星由星历模型接管：隐藏点云里同一 NORAD 的编目实例（星历与 TLE 位置不同，
+  // 两者同时显示会被看成同一目标的两份不同颜色副本）；clearUserEphem 会恢复
+  setEphemHiddenNorad(set?.norad ?? null)
   if (!set || !g.scene || !set.states.length) return
 
   const group = new THREE.Group()
@@ -7850,7 +8170,7 @@ function setUserEphem(set: EphemSet | null) {
   const marker = new THREE.Group()
   const dot = new THREE.Mesh(
     new THREE.SphereGeometry(0.0055, 12, 12),
-    new THREE.MeshBasicMaterial({ color: 0x9df0ff })
+    new THREE.MeshBasicMaterial({ color: SAT_SELECT_COLOR })
   )
   marker.add(dot)
   userEphemMarker = marker
@@ -7862,12 +8182,14 @@ function setUserEphem(set: EphemSet | null) {
     if (!gm || modelSeq !== userEphemModelSeq || !userEphemMarker) return
     const mesh = new THREE.Mesh(
       gm.geom.clone(),
+      // 配色口径与点云里的「选中卫星」一致（平时绿 → 选中蓝）：漫反射 / 自发光都乘同一个选中蓝，
+      // 参数与 loadModelGeom 的实例材质对齐，保证同一型号在点云与星历两处观感一致
       new THREE.MeshStandardMaterial({
-        color: 0x9df0ff,
-        metalness: 0.4,
-        roughness: 0.3,
-        emissive: 0x2f8fb0,
-        emissiveIntensity: 0.8
+        color: SAT_SELECT_COLOR,
+        metalness: 0.45,
+        roughness: 0.32,
+        emissive: SAT_SELECT_COLOR,
+        emissiveIntensity: 0.55
       })
     )
     // 与卫星云里的模型同一尺寸（几何已按 MODEL_MAX_DIM 归一化），不再额外放大：
@@ -7902,7 +8224,12 @@ const userEphemThreatMeshes = new Map<string, THREE.Object3D>()
 let userEphemSelectedEventId: string | null = null
 
 /** 威胁等级配色（与事件列表 / 详情卡同一口径） */
-const THREAT_LEVEL_HEX: Record<ThreatEvent['level'], number> = { high: 0xff6b6b, medium: 0xffb454, low: 0x5aa9ff }
+const THREAT_LEVEL_HEX: Record<ThreatEvent['level'], number> = {
+  red: 0xff6b6b,
+  orange: 0xffb454,
+  yellow: 0x5aa9ff,
+  insufficient: 0x93a4bd
+}
 
 /** 威胁事件目标模型相对「卫星云模型」的放大倍数（1 = 与星历本星模型同一尺寸，靠镜头拉近观察） */
 const THREAT_MODEL_SCALE = 1
@@ -8000,7 +8327,6 @@ function setUserEphemThreats(list: ThreatEvent[]) {
   const group = new THREE.Group()
   for (const ev of list) {
     const p = eciToScene(ev.midEci[0], ev.midEci[1], ev.midEci[2])
-    const color = THREAT_LEVEL_HEX[ev.level]
     // 只给当前选中事件挂「名称 · 时间」标签：其余事件只留三维模型，
     // 否则画面上会出现一串与「双方目标」无关的其他卫星名称，容易被误读
     if (ev.id === userEphemSelectedEventId) {
@@ -8018,10 +8344,12 @@ function setUserEphemThreats(list: ThreatEvent[]) {
       // 加载期间列表已重建 / 星历已切换：丢弃结果
       if (!gm || seq !== userEphemThreatSeq) return
       const mesh = new THREE.Mesh(gm.geom.clone(), new THREE.MeshStandardMaterial({
-        color: 0xdfe9f5,
-        metalness: 0.4,
-        roughness: 0.35,
-        emissive: color,
+        // 对方威胁目标统一橙色（风险等级只体现在标签 / 列表上，三维模型不按等级改色，
+        // 否则同一批威胁目标会呈现多种颜色，与「平时绿 / 选中蓝 / 威胁橙」的口径不一致）
+        color: SAT_THREAT_COLOR,
+        metalness: 0.45,
+        roughness: 0.32,
+        emissive: SAT_THREAT_COLOR,
         emissiveIntensity: 0.55
       }))
       mesh.position.copy(mp)
@@ -8055,6 +8383,9 @@ function setUserEphemEvent(ev: ThreatEvent | null) {
   userEphemOtherMarker = null
   userEphemLink = null
   userEphemEvent = null
+  userEphemOtherSatrec = null
+  userEphemOtherArc = null
+  userEphemOtherArcMs = -Infinity
   userEphemGapLabel = null
   if (!ev || !userEphemGroup || !ev.otherEci || !ev.otherVel) return
   // 选中事件的静态模型让位给下面按仿真时刻推进的「对方模型」，避免两个模型完全重合闪烁
@@ -8065,22 +8396,52 @@ function setUserEphemEvent(ev: ThreatEvent | null) {
   setUserEphemThreats(lastUserThreats)
 
   const group = new THREE.Group()
-  // 对方轨道环：以 TCA 状态做开普勒解析推进，采样一整圈
+  // 对方整圈轨道环：有 TLE 走 SGP4（与热力链路同口径），否则退回开普勒解析推进。
+  // 周期必须用 |v|² 而非 |r|²（原实现误用位置平方和，导致 a 恒为负、周期被钉死 5400 s）。
+  const MU = 398600.4418
   const rn = Math.hypot(ev.otherEci[0], ev.otherEci[1], ev.otherEci[2])
-  const vn2 = ev.otherEci[0] ** 2 + ev.otherEci[1] ** 2 + ev.otherEci[2] ** 2
-  const a = 1 / (2 / rn - vn2 / 398600.4418)
-  const periodSec = a > 0 ? 2 * Math.PI * Math.sqrt((a * a * a) / 398600.4418) : 5400
-  const steps = 240
+  const vn2 = ev.otherVel[0] ** 2 + ev.otherVel[1] ** 2 + ev.otherVel[2] ** 2
+  const a = 1 / (2 / rn - vn2 / MU)
+  let periodSec = a > 0 && Number.isFinite(a) ? 2 * Math.PI * Math.sqrt((a * a * a) / MU) : 5400
+  let otherSatrec: ReturnType<typeof twoline2satrec> | null = null
+  if (ev.otherTle) {
+    try { otherSatrec = twoline2satrec(ev.otherTle.l1, ev.otherTle.l2) } catch { otherSatrec = null }
+  }
+  // satellite.js 的 no 单位是 rad/min
+  if (otherSatrec?.no) periodSec = ((Math.PI * 2) / otherSatrec.no) * 60
+  const steps = 384
   const ring: THREE.Vector3[] = []
   for (let i = 0; i <= steps; i++) {
-    const p = keplerPropagate(ev.otherEci, ev.otherVel, (i / steps) * periodSec)
-    if (!p) break
-    ring.push(eciToScene(p[0], p[1], p[2]))
+    // 以 TCA 为中心采样一整圈：TCA 时刻的对方模型必落在该环上
+    const dtSec = -periodSec / 2 + (i / steps) * periodSec
+    if (otherSatrec) {
+      const pv = propagate(otherSatrec, new Date(ev.tca + dtSec * 1000))
+      const pos = pv?.position
+      if (!pos || typeof pos === 'boolean') continue
+      ring.push(eciToScene(pos.x, pos.y, pos.z))
+    } else {
+      const p = keplerPropagate(ev.otherEci, ev.otherVel, dtSec)
+      if (!p) continue
+      ring.push(eciToScene(p[0], p[1], p[2]))
+    }
   }
   if (ring.length > 1) {
+    // 整圈环只作背景参考：近距交会机位下整圈几乎全部出画，压到低透明度避免挡住局部弧
     const geo = new THREE.BufferGeometry().setFromPoints(ring)
-    group.add(new THREE.Line(geo, new THREE.LineBasicMaterial({ color: 0xff6b6b, transparent: true, opacity: 0.95 })))
+    group.add(new THREE.Line(geo, new THREE.LineBasicMaterial({ color: 0xff6b6b, transparent: true, opacity: 0.28 })))
   }
+  // 对方局部亮弧：当前仿真时刻前后各 30 分钟，近距下与「本星青弧」对等，保证对方轨道可见
+  const otherArcGeo = new THREE.BufferGeometry()
+  otherArcGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(EPHEM_ARC_N * 3), 3).setUsage(THREE.DynamicDrawUsage))
+  otherArcGeo.setDrawRange(0, 0)
+  const otherArc = new THREE.Line(
+    otherArcGeo,
+    new THREE.LineBasicMaterial({ color: 0xff4d4d, transparent: true, opacity: 0.95 })
+  )
+  otherArc.frustumCulled = false
+  userEphemOtherArc = otherArc
+  userEphemOtherSatrec = otherSatrec
+  group.add(otherArc)
   // 对方标记：一颗对方卫星的 3D 模型（随后逐帧按 g.simTimeMs 沿轨道推进，位置即 TCA 位置）
   const other = new THREE.Group()
   other.position.copy(eciToScene(ev.otherEci[0], ev.otherEci[1], ev.otherEci[2]))
@@ -8091,11 +8452,12 @@ function setUserEphemEvent(ev: ThreatEvent | null) {
   void loadGeom(modelUrlOf(otherKey, 'high'), MODEL_COARSE[otherKey] || 'UNKNOWN', otherKey).then((gm) => {
     if (!gm || evSeq !== userEphemEventSeq) return
     const mesh = new THREE.Mesh(gm.geom.clone(), new THREE.MeshStandardMaterial({
-      color: 0xdfe9f5,
-      metalness: 0.4,
-      roughness: 0.35,
-      emissive: 0xff9a6b,
-      emissiveIntensity: 0.5
+      // 与静态威胁模型同一口径：对方威胁目标统一橙色
+      color: SAT_THREAT_COLOR,
+      metalness: 0.45,
+      roughness: 0.32,
+      emissive: SAT_THREAT_COLOR,
+      emissiveIntensity: 0.55
     }))
     mesh.scale.setScalar(THREAT_MODEL_SCALE)
     other.add(mesh)
@@ -8154,7 +8516,10 @@ function updateUserEphem() {
   const group = userEphemGroup
   if (!group) return
   group.visible = dockActive.value === 'eph'
-  if (!group.visible || !userEphemSet) return
+  // 星历图层不可见（切到其它面板 / 未选中星历）时恢复编目实例；可见时由星历模型接管本星
+  if (!group.visible || !userEphemSet) { setEphemHiddenNorad(null); return }
+  // 点云重建 / 数据源切换后全局索引会变：按 NORAD 重定位被接管的编目实例（O(1) 校验，未变化即返回）
+  refreshEphemHidden()
   // 标签按当前相机距离缩放并贴到模型外侧：拉近观察事件点时文字不会被放大成整屏
   for (const sp of userEphemThreatLabels) scaleEphemLabel(sp, -1)
   scaleEphemLabel(userEphemGapLabel, 1)
@@ -8210,17 +8575,55 @@ function updateUserEphem() {
     attr.needsUpdate = true
     userEphemArc.geometry.setDrawRange(0, cnt)
   }
+  // 对方红色局部弧：与上方亮弧同样 1 秒节流，跟随仿真时刻重建
+  if (userEphemOtherArc && userEphemEvent && Math.abs(g.simTimeMs - userEphemOtherArcMs) >= 1000) {
+    userEphemOtherArcMs = g.simTimeMs
+    const attr = userEphemOtherArc.geometry.getAttribute('position') as THREE.BufferAttribute
+    const arr = attr.array as Float32Array
+    let out = 0
+    for (let i = 0; i < EPHEM_ARC_N; i++) {
+      const t = g.simTimeMs - EPHEM_ARC_HALF_MS + (i / (EPHEM_ARC_N - 1)) * 2 * EPHEM_ARC_HALF_MS
+      let p: V3 | null = null
+      if (userEphemOtherSatrec) {
+        const pv = propagate(userEphemOtherSatrec, new Date(t))
+        const pos = pv?.position
+        if (pos && typeof pos !== 'boolean') p = [pos.x, pos.y, pos.z]
+      } else {
+        p = keplerPropagate(userEphemEvent.r, userEphemEvent.v, (t - userEphemEvent.tca) / 1000)
+      }
+      if (!p) continue
+      const v = eciToScene(p[0], p[1], p[2])
+      arr[out * 3] = v.x
+      arr[out * 3 + 1] = v.y
+      arr[out * 3 + 2] = v.z
+      out++
+    }
+    attr.needsUpdate = true
+    userEphemOtherArc.geometry.setDrawRange(0, out)
+  }
   if (userEphemEvent && userEphemOtherMarker) {
-    const dtSec = (g.simTimeMs - userEphemEvent.tca) / 1000
-    const p = keplerPropagate(userEphemEvent.r, userEphemEvent.v, dtSec)
-    if (p) {
+    let pos: THREE.Vector3 | null = null
+    let nextPos: THREE.Vector3 | null = null
+    if (userEphemOtherSatrec) {
+      const pv = propagate(userEphemOtherSatrec, new Date(g.simTimeMs))
+      const pvn = propagate(userEphemOtherSatrec, new Date(g.simTimeMs + 1000))
+      const p0 = pv?.position
+      const p1 = pvn?.position
+      if (p0 && typeof p0 !== 'boolean') pos = eciToScene(p0.x, p0.y, p0.z)
+      if (p1 && typeof p1 !== 'boolean') nextPos = eciToScene(p1.x, p1.y, p1.z)
+    } else {
+      const dtSec = (g.simTimeMs - userEphemEvent.tca) / 1000
+      const p = keplerPropagate(userEphemEvent.r, userEphemEvent.v, dtSec)
+      const pNext = keplerPropagate(userEphemEvent.r, userEphemEvent.v, dtSec + 1)
+      if (p) pos = eciToScene(p[0], p[1], p[2])
+      if (pNext) nextPos = eciToScene(pNext[0], pNext[1], pNext[2])
+    }
+    if (pos) {
       userEphemOtherMarker.visible = true
-      const pos = eciToScene(p[0], p[1], p[2])
       userEphemOtherMarker.position.copy(pos)
       // 模型定姿：用 1 秒后位置差分出速度方向（与卫星云 / 本星模型同一口径）
-      const pNext = keplerPropagate(userEphemEvent.r, userEphemEvent.v, dtSec + 1)
-      if (pNext) {
-        _ephVel.subVectors(eciToScene(pNext[0], pNext[1], pNext[2]), pos)
+      if (nextPos) {
+        _ephVel.subVectors(nextPos, pos)
         orbitAttitude(pos, _ephVel, userEphemOtherMarker.quaternion)
       }
     } else {
@@ -8298,22 +8701,137 @@ function trackUserEphem() {
   beginCamFly(pos.clone().addScaledVector(off, TRACK_CAM_DIST), pos.clone(), 'sel')
 }
 
+/** 顶部轻提示（自动消失；与选中失败的常驻 notice 共用同一容器，按文案校验避免互相覆盖） */
+function showTimedNotice(text: string, ms = 4000) {
+  notice.value = text
+  window.setTimeout(() => {
+    if (notice.value === text) notice.value = ''
+  }, ms)
+}
+
 /** 定位到某条威胁事件：时间对齐到 TCA + 镜头飞到两目标中点 */
 function focusUserEphemEvent(ev: ThreatEvent | null) {
   // 事件定位与「本星跟踪」互斥，否则镜头会被本星逐帧拽回
   stopEphemTracking()
+  // TCA 非法（解析失败 / 缺字段）时不驱动虚拟时钟：NaN 会污染插值与渲染，表现为画面卡死
+  if (ev && !Number.isFinite(ev.tca)) {
+    setUserEphemEvent(null)
+    showTimedNotice('该事件交会时刻无效，已跳过定位')
+    return
+  }
   setUserEphemEvent(ev)
   if (!ev) return
   // 近距离机位下 1 倍速的位移几秒内就会飞出视野：定位事件时暂停仿真，保持 TCA 定格观察
   simPlaying.value = false
+  showTimedNotice('已定位到交会时刻，仿真已暂停')
   g.simTimeMs = ev.tca
+  // TCA 可能落在当前星历数据范围之外，夹紧到有效区间，否则本星插值为空、画面不再更新
+  clampEphemTime()
+  simTimeMs.value = g.simTimeMs
   updateUserEphem()
-  const mid = new THREE.Vector3()
-    .add(eciToScene(ev.midEci[0], ev.midEci[1], ev.midEci[2]))
-    .add(eciToScene(ev.otherEci![0], ev.otherEci![1], ev.otherEci![2]))
-    .multiplyScalar(0.5)
+  const mid = eciToScene(ev.midEci[0], ev.midEci[1], ev.midEci[2])
+  // 副星信息缺失（缺 TLE / 官方事件无对方星历）时只定位本星，不解引用 otherEci
+  if (ev.otherEci) {
+    mid.add(eciToScene(ev.otherEci[0], ev.otherEci[1], ev.otherEci[2])).multiplyScalar(0.5)
+  }
   // 交会事件用近距离机位：1 倍模型在地球尺度下只有几个像素，必须拉近才能看清两颗卫星
   flyToPoint(mid, 'point', THREAT_CAM_DIST)
+}
+
+/** TCA → 后端口径 UTC 字符串 'YYYY-MM-DD HH:mm:ss' */
+function utcText(ms: number): string {
+  const d = new Date(ms)
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())} `
+    + `${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())}`
+}
+
+/** 某颗星在给定时刻的 TLE 外推状态（失败返回 null） */
+function tleStateAt(det: { tle_line1?: string; tle_line2?: string } | null, ms: number): { r: V3; v: V3 } | null {
+  if (!det?.tle_line1 || !det?.tle_line2) return null
+  try {
+    const rec = twoline2satrec(det.tle_line1, det.tle_line2)
+    const pv = propagate(rec, new Date(ms))
+    const pos = pv?.position
+    const vel = pv?.velocity
+    if (!pos || typeof pos === 'boolean' || !vel || typeof vel === 'boolean') return null
+    return { r: [pos.x, pos.y, pos.z], v: [vel.x, vel.y, vel.z] }
+  } catch {
+    return null
+  }
+}
+
+/** 当前主星已载入星历且覆盖 TCA 时，直接用星历插值（与热力计算同源） */
+function ephemStateAt(set: EphemSet | null, ms: number): { r: V3; v: V3 } | null {
+  if (!set?.states.length) return null
+  const s = interpolateAt(set.states, ms)
+  if (!s) return null
+  return { r: [s.r[0], s.r[1], s.r[2]], v: [s.v[0], s.v[1], s.v[2]] }
+}
+
+/** 威胁事件联动定位（03 §15.5）
+ *  - 主星有已载入星历 → 星历插值 + 副星 TLE 外推，构造 ThreatEvent 走星历事件图层（含主/副轨迹 + TCA 点）；
+ *  - 主星无星历 → 退回热力面板的「两星轨道 + TCA 模型」链路（selectHeatPair）。 */
+let threatPairSeq = 0
+
+async function showThreatPair(f: ThreatFocus | null) {
+  const seq = ++threatPairSeq
+  if (!f) {
+    focusUserEphemEvent(null)
+    return
+  }
+  // TCA 非法时任何定位链路都无意义（会写出 NaN 时刻），直接提示并清空事件
+  if (!Number.isFinite(f.tcaMs)) {
+    focusUserEphemEvent(null)
+    showTimedNotice('该事件交会时刻无效，已跳过定位')
+    return
+  }
+  const primary = ephemStateAt(userEphemSet, f.tcaMs)
+  // 没有本星星历（或插值失败）：交给热力链路，避免画出一颗不在轨迹上的「主星」
+  if (!primary || !userEphemGroup) {
+    if (hasSel.value) resetSelected(false)
+    void selectHeatPair({ norad_a: f.primaryNorad, norad_b: f.secondaryNorad, tca: utcText(f.tcaMs) })
+    return
+  }
+  const sd = await getSatDetailPublic(f.secondaryNorad)
+  if (seq !== threatPairSeq) return
+  const other = tleStateAt(sd, f.tcaMs)
+  if (!other) {
+    // 对方缺 TLE：只能定位本星，给出事件自身坐标（副星与主星重合，不绘制副星轨道）
+    focusUserEphemEvent({
+      id: String(f.eventId),
+      selfNorad: f.primaryNorad,
+      otherNorad: f.secondaryNorad,
+      otherName: f.secondaryName || `NORAD ${f.secondaryNorad}`,
+      tca: f.tcaMs,
+      missKm: 0,
+      relSpeedKmS: 0,
+      pc: 0,
+      risk: 0,
+      level: normalizeLevel(f.level) ?? 'yellow',
+      midEci: primary.r
+    })
+    showTimedNotice('对方编目缺少 TLE，无法绘制其轨道')
+    return
+  }
+  const missKm = Math.hypot(primary.r[0] - other.r[0], primary.r[1] - other.r[1], primary.r[2] - other.r[2])
+  const relSpeedKmS = Math.hypot(primary.v[0] - other.v[0], primary.v[1] - other.v[1], primary.v[2] - other.v[2])
+  focusUserEphemEvent({
+    id: String(f.eventId),
+    selfNorad: f.primaryNorad,
+    otherNorad: f.secondaryNorad,
+    otherName: f.secondaryName || `NORAD ${f.secondaryNorad}`,
+    tca: f.tcaMs,
+    missKm,
+    relSpeedKmS,
+    pc: 0,
+    risk: 0,
+    level: normalizeLevel(f.level) ?? 'yellow',
+    midEci: primary.r,
+    otherEci: other.r,
+    otherVel: other.v,
+    otherTle: { l1: sd.tle_line1, l2: sd.tle_line2 }
+  })
 }
 
 /** 把 ECI 坐标投影为视口像素（右侧事件详情卡跟随交会点定位用）；
@@ -8523,14 +9041,52 @@ function startAnimation() {
       const pv = propagate(g.satrec, new Date(g.simTimeMs))
       if (pv?.position) {
         _selNext.copy(eciToScene(pv.position.x, pv.position.y, pv.position.z))
-        // 双击跟踪：镜头与环绕焦点逐帧随目标平移同一位移（保持落位时的相对机位），目标恒居中；
-        // 用户仍可拖动旋转 / 滚轮缩放（围绕跟踪目标），单击画布任意位置解除跟踪
-        if (trackGi != null) {
+        // 双击跟踪 / 空间站「位置展示」跟随：镜头与环绕焦点逐帧随目标平移同一位移
+        // （保持落位时的相对机位，目标恒居中）；用户仍可滚轮缩放，画布按下鼠标即解除跟随
+        if (trackGi != null || stationFollowGi != null) {
+          // 点云刷新会整体重排下标：按 NORAD 重新对位（对不上 = 该站已不在点云里，解除跟随）
+          if (stationFollowGi != null && Number(g.cloudList[stationFollowGi]?.norad_id) !== stationFocus.value) {
+            const gi2 = g.cloudList.findIndex((p) => Number(p.norad_id) === stationFocus.value)
+            stationFollowGi = gi2 >= 0 ? gi2 : null
+            followOffReady = false
+          }
           const cam = g.camera, controls = g.controls
           if (cam && controls) {
-            _trackDelta.subVectors(_selNext, _trackPrev)
-            cam.position.add(_trackDelta)
-            controls.target.add(_trackDelta)
+            if (stationFollowGi != null && !camFly.active) {
+              // 「位置展示」绝对跟随：以「落位机位偏移」为基准，每帧把相机重新锚定到本站。
+              // 增量平移式跟随会把 Cesium↔Three 相机互同步的微小冲刷逐帧累积（60x 快进约 1 分钟
+              // 就能让朝向漂出画面，表现为模型「无故消失」）；绝对重锚定让任何冲刷在下一帧被修正。
+              // 外部输入（滚轮缩放）不丢：实际机位 - 期望机位 的差值被折叠回偏移量。
+              if (!followOffReady) {
+                _followOff.copy(cam.position).sub(_selNext)
+                followOffReady = true
+              } else {
+                _followOff.add(_followTmp.copy(cam.position).sub(_followLast))
+              }
+              _followLast.copy(_selNext).add(_followOff)
+              cam.position.copy(_followLast)
+              controls.target.copy(_selNext)
+              // 实例位置对齐 SGP4 真值：点云实例平时走二体外推（60x 下每分钟可累积数百公里误差），
+              // 锚点/准星/镜头却钉在 satrec 精确值上 —— 分岔后模型漂出准星，看起来就是「无故消失」。
+              // 被点亮单站只有一颗，每帧直接校准位置 + 速度 + 姿态矩阵，开销可忽略。
+              const sp = g.scenePos[stationFollowGi]
+              const sv = g.sceneVel[stationFollowGi]
+              if (sp && sv) {
+                sp.copy(_selNext)
+                if (pv.velocity) sv.set(pv.velocity.x * KM_TO_SCENE, pv.velocity.z * KM_TO_SCENE, -pv.velocity.y * KM_TO_SCENE)
+                const info = g.instOf[stationFollowGi]
+                const im = info ? g.modelMeshes[info.model] : undefined
+                const local = g.localOf[stationFollowGi]
+                if (im && local >= 0) {
+                  writeInstanceUpright(im, local, stationFollowGi)
+                  im.instanceMatrix.needsUpdate = true
+                }
+              }
+            } else {
+              _trackDelta.subVectors(_selNext, _trackPrev)
+              cam.position.add(_trackDelta)
+              controls.target.add(_trackDelta)
+            }
           }
           _trackPrev.copy(_selNext)
         }
@@ -8538,8 +9094,12 @@ function startAnimation() {
         // 保持在落位时刻不动，不再逐帧跟随卫星：否则虚拟时间推进时相机被卫星拖着跑，画面持续狂摆。
         // 这里只同步锚点坐标，屏幕准星（updateReticle 按 anchor.position 投影）随之移动。
         g.selAnchor.position.copy(_selNext)
+        // 位置展示独立 Mesh：与准星同一 SGP4 真值（即使用户已解除 stationFollowGi，也不再靠外推漂走）
+        updateStationFocusMesh()
       }
       if (now - g.lastLive > 250) { g.lastLive = now; updateLiveData() }
+    } else if (stationFocusMesh) {
+      updateStationFocusMesh()
     }
     updateReticle()
 
@@ -8573,7 +9133,7 @@ function startAnimation() {
         // Cesium 底座模式（每帧时序见 cesiumEarth.ts 头注释）：
         // 飞行期间把 updateCameraFly 的缓动结果（已写入 g.camera）转递给 Cesium 相机；
         // 非飞行期间 Cesium 的 ScreenSpaceCameraController 自主驱动相机（滚轮/拖拽/惯性）。
-        if (flying || trackGi != null || trackEphem) {
+        if (flying || trackGi != null || stationFollowGi != null || trackEphem) {
           g.camera.getWorldDirection(_cesiumFlyDir)
           setCameraFromScene(g.camera.position, _cesiumFlyDir, g.camera.up, g.simTimeMs)
         }
@@ -8583,6 +9143,25 @@ function startAnimation() {
         // syncCameraToThree 用「静止的 Cesium 相机」冲掉，表现为目标逐渐漂出画面中心（跟踪名存实亡）
         renderCesium(g.simTimeMs)
         if (!flying) syncCameraToThree(g.camera, g.simTimeMs)
+        /* TEMP-DEBUG：60x 跟随漂移诊断（验收后删除）——必须在 sync 之后读数才有意义 */
+        if (stationFollowGi != null && now - stFollowAt > 2000) {
+          stFollowAt = now
+          g.camera.getWorldDirection(_dbgDir)
+          _dbgTo.copy(_selNext).sub(g.camera.position).normalize()
+          console.log('[stFollow]', JSON.stringify({
+            t: new Date(g.simTimeMs).toISOString().slice(11, 19),
+            gi: stationFollowGi, fly: camFly.active,
+            cam: g.camera.position.toArray().map((v) => +v.toFixed(4)),
+            next: _selNext.toArray().map((v) => +v.toFixed(4)),
+            off: _followOff.toArray().map((v) => +v.toFixed(4)),
+            // aim = 相机朝向与「相机→目标」夹角（度）：0 = 正对目标；增长 = 朝向在漂
+            aim: +(Math.acos(THREE.MathUtils.clamp(_dbgDir.dot(_dbgTo), -1, 1)) * 180 / Math.PI).toFixed(2),
+            // dErr = 本帧推入 Cesium 的方向与 sync 回读方向的夹角（度）：非 0 = 帧内往返有损
+            dErr: +(Math.acos(THREE.MathUtils.clamp(_cesiumFlyDir.dot(_dbgDir), -1, 1)) * 180 / Math.PI).toFixed(4),
+            ready: followOffReady, interact: g.userInteracting, warp: !!warpRes,
+            step: +simStepSec.toFixed(3)
+          }))
+        }
       } else {
         // 降级模式（Cesium 初始化失败）：原 OrbitControls + 每帧地心外推兜底
         if (!flying) g.controls.update()
@@ -8610,6 +9189,15 @@ function startAnimation() {
  *  - 选中单星轨道线（g.orbitLine）：类型勾选 visible + 总开关
  *  - hover 预览轨道线（g.previewOrbitLine）：只受总开关控制
  *  热力 / 过境视图有各自的轨道显隐口径（applyHeatMode / applyPassMode，其中已叠加本开关），此处不介入。 */
+/** 「位置展示」选中态是否生效：被点亮空间站且当前选中就是它（模型 / 轨道 / 跟随的旁路判据） */
+function stationSelOn(): boolean {
+  return stationFocus.value != null && sel.id === stationFocus.value
+}
+/** 「位置展示」单站选中轨道线是否应显示：不依赖「卫星」类型勾选与揭示门控，
+ *  只受图例「轨道线」总开关约束（点击「位置展示」必须能看到该站轨道）。 */
+function stationOrbitOn(): boolean {
+  return stationSelOn() && orbitVisible.value
+}
 function applyOrbitToggle() {
   // 例外 = NORAD 集合展示态（satSetActive）：叠加层下轨道线在热力 / 过境视图也应受图例开关控制
   if ((heatMode.value || passMode.value) && !satSetActive.value) return
@@ -8625,7 +9213,9 @@ function applyOrbitToggle() {
     }
   }
   if (g.orbitLine) {
-    g.orbitLine.visible = on && (!sel.type || !TYPE_KEYS.includes(sel.type) ? true : (!!filterConst.value || !!visible[sel.type]))
+    // 「位置展示」被点亮单站：轨道线只看总开关（旁路类型勾选，否则「卫星」关时天宫轨道跟着消失）
+    g.orbitLine.visible = stationOrbitOn() ||
+      (on && (!sel.type || !TYPE_KEYS.includes(sel.type) ? true : (!!filterConst.value || !!visible[sel.type])))
   }
   if (g.previewOrbitLine) g.previewOrbitLine.visible = on
 }
@@ -8637,6 +9227,24 @@ watch(colorMode, () => applyPointColors())
 // 首页「无目标」门控：揭示由用户主动入口触发（index.vue 的 openSatPanel / chooseSatView / toggleSatDock
 // 与 URL 深链预置选中），不能 watch dockMode —— restoreDock 静默恢复也会把 dockMode 置 'sat'
 watch(cloudRevealed, () => applyCloudGateVisible())
+// 空间站「位置展示」：只改载荷 Mesh 的可见性与被点亮那一颗的实例矩阵，
+// 不写过滤掩码、不触碰其它目标（碎片 / 残骸 / 未知与其它卫星的显隐完全不变）
+watch(stationFocus, (norad) => {
+  if (norad == null) {
+    clearStationFocusMesh()
+  } else if (hasSel.value && sel.id === norad) {
+    void ensureStationFocusMesh(norad)
+    if (g.orbitLine) g.orbitLine.visible = orbitVisible.value
+  }
+  if (!g.cloudList.length) return
+  for (const model of modelKeys()) {
+    const im = g.modelMeshes[model]
+    if (im) im.visible = modelMeshVisible(model)
+  }
+  // 过滤条件下重算掩码（让点亮的空间站不被检索 / 星座 / 高度条件剔除），否则按现掩码重写矩阵
+  if (filterActive.value) refreshFilter()
+  else rewriteInstanceMatrices((gi) => g.filterMask[gi] === 1)
+})
 // 拾取状态依赖「选中目标所属类型」的图例可见性：隐藏该类型（含「全部物体」总开关一次性关掉 4 类）即取消选中，
 // 与「环境图层隐藏也取消选中」同一口径（见下方 skyLayers.groundTrack 的 watch）。
 watch(hasSel, () => applyOrbitPolarLimits())
@@ -8646,9 +9254,7 @@ watch(
     // 点云按「型号」分 Mesh，图例按「粗类型」勾选 → 用 modelVisible 换算（型号 -> 粗类型见 MODEL_COARSE）
     for (const model of modelKeys()) {
       const im = g.modelMeshes[model]
-      // 与 buildModelInstances 同口径：热力 / 过境视图整片隐藏卫星云，但集合叠加层（satSetActive）
-      // 与星座卡片载荷通道（consMeshBypass，仅载荷）例外；叠加首页「无目标」门控（cloudGate）
-      if (im) im.visible = cloudGate() && (satSetActive.value || !!filterConst.value || (!heatMode.value && !passMode.value)) && (satSetActive.value || consMeshBypass(model) || modelVisible(model))
+      if (im) im.visible = modelMeshVisible(model)
     }
     const grp = g.filterOrbitGroup
     if (grp) {
@@ -8660,11 +9266,18 @@ watch(
         if (t && TYPE_KEYS.includes(t)) line.visible = orbOk && (!!filterConst.value || !!visible[t])
       }
     }
-    if (g.orbitLine && sel.type && TYPE_KEYS.includes(sel.type)) {
-      g.orbitLine.visible = filterConst.value ? true : !!visible[sel.type]
+    if (g.orbitLine) {
+      if (stationOrbitOn()) {
+        // 「位置展示」被点亮单站：轨道线只看总开关（旁路类型勾选，否则「卫星」关时天宫轨道跟着消失）
+        g.orbitLine.visible = true
+      } else if (sel.type && TYPE_KEYS.includes(sel.type)) {
+        g.orbitLine.visible = filterConst.value ? true : !!visible[sel.type]
+      }
     }
-    // 选中目标所属类型被隐藏 → 拾取状态一并消失（resetCam=false：保留当前机位，不硬跳）
-    if (hasSel.value && sel.type && TYPE_KEYS.includes(sel.type) && visible[sel.type] === false) {
+    // 选中目标所属类型被隐藏 → 拾取状态一并消失（resetCam=false：保留当前机位，不硬跳）。
+    // 例外 = 「位置展示」被点亮单站：它的选中态独立于类型开关，不能被 resetSelected 拆掉
+    // （否则「卫星」关一下，天宫/ISS 的轨道环、跟随与选中蓝全没了）
+    if (hasSel.value && sel.type && TYPE_KEYS.includes(sel.type) && visible[sel.type] === false && !stationSelOn()) {
       resetSelected(false)
     }
   },
@@ -8769,47 +9382,20 @@ watch(passBatchRunId, async (v) => {
 watch(heatDay, () => { if (g.heatGroup || heatMode.value) buildHeatMarkers() })
 // 图例勾选显隐：档位增删后 heatFiltered 变化，需重建热力标记（隐藏的档位不再参与渲染、也不可拾取）
 watch(() => heatHiddenColors.size, () => { if (g.heatGroup || heatMode.value) buildHeatMarkers() })
-// P3 高度层 / 指标阈值：同样只影响 heatFiltered，实时重建热力标记
-watch([heatAltBand, heatMetric, heatRiskFloor, heatPcFloor, heatMissCeil], () => {
-  if (g.heatGroup || heatMode.value) buildHeatMarkers()
-})
-// P3 聚合格边：格边只影响聚合/抽稀粒度，无需重新请求后端，直接重建热力标记
+// 聚合格边：只影响聚合/抽稀粒度，无需重新请求后端，直接重建热力标记
 watch(heatCell, () => { if (g.heatGroup || heatMode.value) buildHeatMarkers() })
 watch(heatDays, () => { if (heatMode.value || heatList.value.length) loadHeat() })
-// 切换热力来源（dock 弹出的来源菜单）：清掉当前选中事件，按新来源重载列表并重绘热力云；
-// 若当前正有选中的卫星（右侧碰撞列表），一并按新来源重载，避免两个口径混在同一屏
+// 切换热力标签（dock 弹出的来源菜单）：先清空本来源状态，再按新标签重载。
+// heatList 此刻仍是上一标签的旧数据，必须清掉，否则计数 / 柱状图 / 芯片会串用（03 §11.5）。
 watch(heatSource, () => {
-  heatSel.value = null
-  heatSelList.value = []
-  // 批次 id / 列表按来源隔离：三个来源的 run_id 分属不同表（sat_conj_run / sat_cri_run），互不通用，
-  // 切换来源时必须先清空，否则会把上一来源的批次 id 当作本来源的「回看批次」请求出去。
-  loadedHeatBatchId = null
-  heatBatchRunId.value = null
-  heatBatches.value = []
-  // heatList 此刻仍是上一来源的旧数据（loadHeat 异步替换）：先把来源标记清空，
-  // 使 URL 预置的「事件拾取」不会误把旧来源事件当成本来源的（见 heatDataReady）
-  heatLoadedSrc = ''
-  if (heatSource.value !== 'spacetrack' && heatSource.value !== 'eph-aoe') loadHeatBatches()
+  resetHeatState()
   if (heatMode.value || heatList.value.length) loadHeat()
 })
-// 星历热力挂在「我的星历」当前激活项上：换星历 / 取消激活后需清空并按新星历重算
-watch(activeEphem, () => {
-  if (heatSource.value !== 'eph-aoe') return
-  heatList.value = []
-  heatSel.value = null
-  heatSelList.value = []
-  heatLoadedSrc = ''
-  clearHeatMarkers()
-  if (heatMode.value) loadHeat()
-})
-// 切换「数据批次」（交会热力面板下拉回看历史全量批次）→ 重载热力云
-// 忽略 loadHeat 回填批次 id 造成的变更（loadedHeatBatchId 已同步，非用户切换）
-watch(heatBatchRunId, (v) => {
-  if ((v ?? null) === loadedHeatBatchId) return
-  heatSel.value = null
-  heatSelList.value = []
+// 主星筛选（官方星历 / 已上传星历）：重新拉取当前标签的热力
+watch(heatPrimaryFilter, () => {
+  resetHeatState()
   if (heatMode.value || heatList.value.length) loadHeat()
-})
+}, { deep: true })
 // 选中事件变化 → 构建/清除其 A/B 两星轨道线与 TCA 时刻的两颗目标模型（均由 buildHeatSelOrbits 一并处理）
 watch(heatSel, (v) => {
   if (v) {
@@ -8819,14 +9405,13 @@ watch(heatSel, (v) => {
     heatSelList.value = []
   }
 })
-// 同簇列表变化（点选事件 / 取消高亮）→ 仅调整热力标记不透明度，不重建几何
-watch(heatSelList, () => applyHeatDim())
+// 选中/取消某片云只影响右侧事件详情与两星轨道，热力云本身保持原样，不做整体淡出
 
 /* ============================================================
  * 生命周期
  * ============================================================ */
 /** 首屏之后的后台预热：把「用户接下来大概率会点」的数据提前静默拉好，
- *  使卫星列表、画轨道线、星座下拉、热力三个来源、过境底图都是「点了就有」。
+ *  使卫星列表、画轨道线、星座下拉、热力两个标签、过境底图都是「点了就有」。
  *  全部不写任何 loading 状态、失败不提示；排在首帧渲染之后，避免与首屏抢主线程 / 带宽。 */
 function scheduleIdleWarmup() {
   /** 延后 delay 毫秒，并在浏览器空闲时执行（无 requestIdleCallback 的老 WebView 直接执行） */
@@ -8841,10 +9426,9 @@ function scheduleIdleWarmup() {
   // 卫星列表索引（同步一次 ~3.5 万遍历，毫秒级且纯本地）、TLE（画轨道线 / 过境标记 / 逐帧校准用）、星座下拉：
   // 数据已在内存，直接建好，避免首个点击时现算或多等一次往返
   idle(() => { void ensurePersistent(); rebuildSatIndex(); void ensureSatrecs(); void loadFilterConstellations() })
-  // 热力三来源与过境底图错峰发起，避免首屏刚结束就挤占带宽
-  idle(() => void prefetchHeat('local'), 600)
-  idle(() => void prefetchHeat('cri'), 1400)
-  idle(() => void prefetchHeat('spacetrack'), 2200)
+  // 热力两个标签与过境底图错峰发起，避免首屏刚结束就挤占带宽
+  idle(() => void prefetchHeat('tle-threat'), 600)
+  idle(() => void prefetchHeat('tle-eph'), 1400)
   idle(() => void prefetchPass(), 3000)
 }
 
@@ -8942,6 +9526,9 @@ onBeforeUnmount(() => {
   clearUserEphem()
   clearRegionPass()
   clearMultiRegionPass()
+  window.clearTimeout(modelRetryTimer)
+  modelRetryTimer = 0
+  clearStationFocusMesh()
   disposeGeomCache()
   clearPassLayers()
   hoverGi = null
@@ -9053,6 +9640,10 @@ defineExpose({
   trackUserEphem,
   /** 星历分析：定位到某条威胁事件（null = 只清除事件图层） */
   focusUserEphemEvent,
+  /** 星历分析 × 安全热力：按联动焦点定位同一事件（主星轨迹 + 副星轨道 + TCA 点） */
+  showThreatPair,
+  /** 安全热力：清掉 sidecar 健康缓存并重新探测（面板「重试」） */
+  recheckSidecar,
   /** 星历分析：设置机动后的星历并绘制「原方案虚线 + 机动后实线」双轨迹（null = 清除） */
   setUserEphemManeuver
 })
@@ -9065,6 +9656,7 @@ const _quat = new THREE.Quaternion()
 const _scale = new THREE.Vector3(1, 1, 1)
 const _ocS = new THREE.Vector3()
 const _dirS = new THREE.Vector3()
+const _pickV = new THREE.Vector3()
 const _off = new THREE.Vector3()
 /** 目标面拾取（Raycaster）复用对象 */
 const _raycaster = new THREE.Raycaster()

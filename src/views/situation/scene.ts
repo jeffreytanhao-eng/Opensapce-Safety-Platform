@@ -14,12 +14,12 @@ import { computed, reactive, ref, shallowRef, watch } from 'vue'
 import * as THREE from 'three'
 import type { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import type { ConstellationPoint, SatTleItem, ConstellationItem } from '@/api/satTypes'
-import type { CdmHeatEvent, ConjBatchItem, HeatDayGroup, HeatLegendItem, SatOfConstellation, SatSource } from '@/api/sat_public'
+import type { CdmHeatEvent, HeatDayGroup, HeatLegendItem, SatOfConstellation, SatSource } from '@/api/sat_public'
 import type { LaunchSiteItem, LaunchUpcomingItem, LaunchRecordItem } from '@/api/launch_public'
 import type { SpaceWeatherResult } from '@/api/space_weather_public'
-import type { ConjEllipsoidResult } from '@/api/sat_public'
 import type { PassBatchItem, PassBorderItem, PassCityDetail, PassCityItem, PassDistrictItem, PassTargetItem } from '@/api/pass_public'
 import { twoline2satrec } from 'satellite.js'
+import { colorOfLevel, levelOfPc } from './heat/riskLevels'
 
 /* ============================================================
  * 常量 / 坐标换算
@@ -90,8 +90,8 @@ export const TYPE_LABEL: Record<string, string> = {
 }
 export const TYPE_MODEL: Record<string, string> = {
   PAYLOAD: `${BASE}map/type/satellite.gltf`,
-  DEBRIS: `${BASE}map/type/gltf/debris_low.gltf`,
-  'ROCKET BODY': `${BASE}map/type/gltf/rocket_body_low.gltf`,
+  DEBRIS: `${BASE}map/type/gltf/osp_debris_low.gltf`,
+  'ROCKET BODY': `${BASE}map/type/gltf/osp_rbody_low.gltf`,
   UNKNOWN: `${BASE}map/type/unknow.glb`
 }
 /** 图例：类型 -> 颜色 + 标题 + 亮色（右下角） */
@@ -122,7 +122,7 @@ export const SHADOW_LABEL: Record<string, string> = {
  *  - 需要数据才有内容的图层（极光椭圆环、太阳风、误差椭球、星下点轨迹）：
  *    数据/选中未就绪时该图层不绘制，开关状态保持用户的选择
  * ============================================================ */
-export type SkyLayerKey = 'sun' | 'moon' | 'stars' | 'mansion' | 'constellation' | 'aurora' | 'solarWind' | 'dipole' | 'groundTrack' | 'ellipsoid'
+export type SkyLayerKey = 'sun' | 'moon' | 'stars' | 'mansion' | 'constellation' | 'aurora' | 'solarWind' | 'dipole' | 'groundTrack'
 /** 图层默认开关：太阳 / 月亮 / 背景星空 默认开启；
  *  三垣二十八宿、西方 88 星座、极光椭圆环、地磁偶极磁力线、星下点轨迹、误差椭球、太阳风粒子流默认关闭
  *  （三垣二十八宿 / 西方 88 星座是「认识星空」的观感层，但星点多、连线密，两套又互为不同体系，易混淆，故默认关闭）；
@@ -130,7 +130,7 @@ export type SkyLayerKey = 'sun' | 'moon' | 'stars' | 'mansion' | 'constellation'
  *  ——都可在图例里手动打开。 */
 export const skyLayers = reactive<Record<SkyLayerKey, boolean>>({
   sun: true, moon: true, stars: true, mansion: false, constellation: false,
-  aurora: false, dipole: false, groundTrack: false, ellipsoid: false, solarWind: false
+  aurora: false, dipole: false, groundTrack: false, solarWind: false
 })
 
 /** 当前画质档（由 BaseScene 运行时同步：静态硬件探测 + 帧率自适应降档后的真实档位）。 */
@@ -153,28 +153,8 @@ export const SKY_LAYER_ITEMS: { key: SkyLayerKey; label: string; desc: string; d
   { key: 'aurora', label: '极光椭圆环', desc: '按 Kp', dotClass: 'lg-aurora', modes: ALL_VIEW_MODES },
   { key: 'dipole', label: '地磁偶极磁力线', desc: 'IGRF 偶极 · 按 Kp', dotClass: 'lg-dipole', modes: ALL_VIEW_MODES },
   { key: 'groundTrack', label: '星下点轨迹', desc: '选中卫星', dotClass: 'lg-track', modes: ['normal'] },
-  { key: 'ellipsoid', label: '误差椭球', desc: '经验 σ', dotClass: 'lg-ellip', modes: ['heat'] },
   { key: 'solarWind', label: '太阳风粒子流', desc: '速度 / Bz', dotClass: 'lg-wind', modes: ALL_VIEW_MODES }
 ]
-
-/** 误差椭球的最小可见尺寸（场景单位，1 单位 = 6371 km）：
- *  真实 σ 在 LEO 常见量级只有 10~100 km ≈ 0.002~0.016 单位，真按实际比例画在默认机位下完全看不见。
- *  故三维里统一放大到「最大轴不小于该值」再显示，并在界面标注放大倍数（真实 σ 数值见右侧面板）。
- *  口径只在本处定义，三维绘制与面板文案共用（见 covDisplayScale）。 */
-export const COV_MIN_AXIS_SCENE = 0.06
-
-/** 由三轴 σ（km）算三维显示所需的放大倍数（≥1；1 表示按真实比例） */
-export function covDisplayScale(sigmasKm: number[]): number {
-  const maxKm = Math.max(0, ...sigmasKm.filter((v) => Number.isFinite(v)))
-  const maxScene = maxKm / EARTH_RADIUS_KM
-  if (!(maxScene > 0)) return 1
-  return Math.max(1, COV_MIN_AXIS_SCENE / maxScene)
-}
-
-/** 当前选中交会事件两端的经验误差椭球（三维绘制 + 详情面板展示共用；null = 未选中/无数据） */
-export const conjEllipsoid = shallowRef<ConjEllipsoidResult | null>(null)
-export const conjEllipsoidError = ref('')
-export const conjEllipsoidLoading = ref(false)
 
 /* ============================================================
  * 空间环境数据（/cgi/space_weather 定时拉取）
@@ -193,7 +173,7 @@ export const TYPE_HEX: Record<string, string> = {
 
 /* ============================================================
  * 卫星型号库：把「卫星管理」里的 gltf 素材关联到点云
- *  - 星座名 / object_name 关键词 → 型号（如 星链 → starlink、Iridium 100+ → iridium_next）
+ *  - 星座名 / object_name 关键词 → 型号（如 星链 → osp_flat、Iridium 100+ → osp_tri2）
  *  - 每个型号在 src/assets/map/type/gltf 下按 LOD 分档（low/med/high，三角形数递增）
  *  - 由 BaseScene 按「画质档位 + 相机距地距离 + 可见卫星数」决定当前使用哪一档，
  *    实现「先粗后精」：首屏/远景统一 low 快速出图，拉近且数量可控时逐级升到 med/high
@@ -206,39 +186,51 @@ export const MODEL_LOD_ORDER: ModelLod[] = ['low', 'med', 'high']
 /** 三档齐全的型号（占绝大多数） */
 const LOD_FULL: ModelLod[] = ['low', 'med', 'high']
 /** 型号 -> 可用档位（升序）。素材缺档时 modelUrlOf 回退到最接近的可用档
- *  （spacebee 无 low 档 → 低档回退 med），保证任意档位都能取到模型。 */
+ *  （07 清单后全部型号三档齐备，含 osp_pico 的 low 档）。 */
 export const MODEL_LODS: Record<string, ModelLod[]> = {
-  starlink: LOD_FULL, oneweb: LOD_FULL, iridium: LOD_FULL, iridium_next: LOD_FULL,
-  orbcomm1: LOD_FULL, orbcomm2: LOD_FULL, flock: LOD_FULL, lemur1: LOD_FULL,
-  lemur2: LOD_FULL, worldview1: LOD_FULL, worldview23: LOD_FULL, satellite: LOD_FULL,
-  rocket_body: LOD_FULL, debris: LOD_FULL,
-  fengyun: LOD_FULL, kuiper: LOD_FULL, meteor: LOD_FULL, qianfan: LOD_FULL,
-  yaogan: LOD_FULL, guowang: LOD_FULL, intelsat: LOD_FULL, glonass: LOD_FULL,
-  globalstar: LOD_FULL, gps: LOD_FULL, beidou: LOD_FULL, geely: LOD_FULL,
-  spacebee: ['med', 'high']
+  osp_flat: LOD_FULL, osp_boxwing: LOD_FULL, osp_tri: LOD_FULL, osp_tri2: LOD_FULL,
+  osp_comm_a: LOD_FULL, osp_comm_b: LOD_FULL, osp_cube_d: LOD_FULL, osp_lem_a: LOD_FULL,
+  osp_lem_b: LOD_FULL, osp_opt_a: LOD_FULL, osp_opt_b: LOD_FULL, osp_sat: LOD_FULL,
+  osp_rbody: LOD_FULL, osp_debris: LOD_FULL,
+  // 碎片多面体变体：同一粗类型下挑不同外形，避免所有碎片长得一模一样（见 DEBRIS_MODELS）
+  osp_debris_b: LOD_FULL, osp_debris_c: LOD_FULL, osp_debris_d: LOD_FULL,
+  osp_fy: LOD_FULL, osp_kp: LOD_FULL, osp_met: LOD_FULL, osp_qf: LOD_FULL,
+  osp_yg: LOD_FULL, osp_gw: LOD_FULL, osp_is: LOD_FULL, osp_glo: LOD_FULL,
+  osp_gs: LOD_FULL, osp_gps: LOD_FULL, osp_bds: LOD_FULL, osp_jl: LOD_FULL,
+  osp_pico: LOD_FULL
 }
 /** 型号 -> 粗类型（4 分类）：图例显隐 / 轨道线配色 / 热力·过境显隐仍按粗类型走 */
 export const MODEL_COARSE: Record<string, string> = {
-  starlink: 'PAYLOAD', oneweb: 'PAYLOAD', iridium: 'PAYLOAD', iridium_next: 'PAYLOAD',
-  orbcomm1: 'PAYLOAD', orbcomm2: 'PAYLOAD', flock: 'PAYLOAD', lemur1: 'PAYLOAD',
-  lemur2: 'PAYLOAD', spacebee: 'PAYLOAD', worldview1: 'PAYLOAD', worldview23: 'PAYLOAD',
-  satellite: 'PAYLOAD',
-  fengyun: 'PAYLOAD', kuiper: 'PAYLOAD', meteor: 'PAYLOAD', qianfan: 'PAYLOAD',
-  yaogan: 'PAYLOAD', guowang: 'PAYLOAD', intelsat: 'PAYLOAD', glonass: 'PAYLOAD',
-  globalstar: 'PAYLOAD', gps: 'PAYLOAD', beidou: 'PAYLOAD', geely: 'PAYLOAD',
-  debris: 'DEBRIS', rocket_body: 'ROCKET BODY', unknow: 'UNKNOWN'
+  osp_flat: 'PAYLOAD', osp_boxwing: 'PAYLOAD', osp_tri: 'PAYLOAD', osp_tri2: 'PAYLOAD',
+  osp_comm_a: 'PAYLOAD', osp_comm_b: 'PAYLOAD', osp_cube_d: 'PAYLOAD', osp_lem_a: 'PAYLOAD',
+  osp_lem_b: 'PAYLOAD', osp_pico: 'PAYLOAD', osp_opt_a: 'PAYLOAD', osp_opt_b: 'PAYLOAD',
+  osp_sat: 'PAYLOAD', osp_css: 'PAYLOAD', osp_iss: 'PAYLOAD',
+  osp_fy: 'PAYLOAD', osp_kp: 'PAYLOAD', osp_met: 'PAYLOAD', osp_qf: 'PAYLOAD',
+  osp_yg: 'PAYLOAD', osp_gw: 'PAYLOAD', osp_is: 'PAYLOAD', osp_glo: 'PAYLOAD',
+  osp_gs: 'PAYLOAD', osp_gps: 'PAYLOAD', osp_bds: 'PAYLOAD', osp_jl: 'PAYLOAD',
+  osp_debris: 'DEBRIS', osp_debris_b: 'DEBRIS', osp_debris_c: 'DEBRIS', osp_debris_d: 'DEBRIS',
+  osp_rbody: 'ROCKET BODY', unknow: 'UNKNOWN'
 }
-/** 粗类型 -> 型号键：碎片 / 箭体 / 载荷均走分档素材（debris_* / rocket_body_* / 各星座型号_*），
+/** 粗类型 -> 型号键：碎片 / 箭体 / 载荷均走分档素材（osp_debris_* / osp_rbody_* / 各星座型号_*），
  *  统一由 modelUrlOf 按档位拼 URL；只有未知物体仍沿用原有单文件模型 unknow.glb。
- *  未被识别出具体型号的载荷回退到通用卫星模型 satellite。 */
+ *  未被识别出具体型号的载荷回退到通用卫星模型 osp_sat。 */
 export const COARSE_MODEL: Record<string, string> = {
-  PAYLOAD: 'satellite', DEBRIS: 'debris', 'ROCKET BODY': 'rocket_body', UNKNOWN: 'unknow'
+  PAYLOAD: 'osp_sat', DEBRIS: 'osp_debris', 'ROCKET BODY': 'osp_rbody', UNKNOWN: 'unknow'
+}
+/** 型号 -> 固定模型文件（不走 LOD 分档）：星链统一单文件 glb；两个空间站用精细 glb */
+const MODEL_FILE_OVERRIDE: Record<string, string> = {
+  osp_flat: `${BASE}map/type/gltf/starlink-flat-wing.glb`,
+  osp_css: `${BASE}map/type/gltf/tiangong.glb`,
+  osp_iss: `${BASE}map/type/gltf/iss-detailed.glb`
 }
 /** 型号 + 档位 -> 模型 URL。gltf 素材由 vite 原样复制到 public/map（见 vite.config.ts 的
  *  copyMapAssets），故与 satellite.gltf 一样可直接按 URL 加载，无需 import。 */
 export function modelUrlOf(model: string, lod: ModelLod): string {
   // 未知物体：无 LOD 分档，沿用原有单文件模型
   if (model === 'unknow') return TYPE_MODEL.UNKNOWN
+  // 定版模型（单文件，无 LOD 分档）
+  const fixed = MODEL_FILE_OVERRIDE[model]
+  if (fixed) return fixed
   const lods = MODEL_LODS[model] || LOD_FULL
   let use = lod
   if (!lods.includes(lod)) {
@@ -254,71 +246,93 @@ export function modelUrlOf(model: string, lod: ModelLod): string {
  *  其余型号（全部卫星型号 + 通用卫星模型 satellite）统一绕本地 Y 轴翻转 180°：
  *  这些素材的机身头部朝向本地 -Z，与「本地 +Z 对齐天顶、背离地球」的姿态约定相反，
  *  翻转后头部朝 +Z，与约定一致（本地 +Y 仍对齐飞行方向，故飞行方向不受影响）。 */
-export const MODEL_NO_FLIP_Y: ReadonlySet<string> = new Set(['debris', 'rocket_body', 'unknow'])
+export const MODEL_NO_FLIP_Y: ReadonlySet<string> = new Set([
+  'osp_debris', 'osp_debris_b', 'osp_debris_c', 'osp_debris_d', 'osp_rbody', 'unknow'
+])
+/** 碎片多面体型号池：按目标名散列挑选，让同一片空域里的碎片不会全是同一个形状。
+ *  四个变体（主块 + 附加碎屑）包络一致、棱角分明，均走 low/med/high 分档。 */
+export const DEBRIS_MODELS = ['osp_debris', 'osp_debris_b', 'osp_debris_c', 'osp_debris_d'] as const
+/** 目标名 -> 稳定散列（FNV-1a，同一颗碎片每次刷新 / 换数据源都得到同一个变体） */
+function debrisVariantOf(name: string): string {
+  let h = 2166136261
+  for (let i = 0; i < name.length; i++) {
+    h ^= name.charCodeAt(i)
+    h = Math.imul(h, 16777619)
+  }
+  return DEBRIS_MODELS[(h >>> 0) % DEBRIS_MODELS.length]
+}
 /** Iridium 一/二代：Space-Track 里 NEXT 编号 ≥ 100（如 IRIDIUM 133），第一代编号 < 100（如 IRIDIUM 33） */
 function iridiumGen(name: string): string {
   const m = /IRIDIUM[ -]?(\d+)/.exec(name)
-  return m && Number(m[1]) >= 100 ? 'iridium_next' : 'iridium'
+  return m && Number(m[1]) >= 100 ? 'osp_tri2' : 'osp_tri'
 }
 /** Orbcomm 一/二代：FM101+ / OG2 为第二代，FM1~FM43 为第一代 */
 function orbcommGen(name: string): string {
-  if (name.includes('OG2')) return 'orbcomm2'
+  if (name.includes('OG2')) return 'osp_comm_b'
   const m = /ORBCOMM[ -]*(?:FM[ -]*)?(\d+)/.exec(name)
-  return m && Number(m[1]) >= 100 ? 'orbcomm2' : 'orbcomm1'
+  return m && Number(m[1]) >= 100 ? 'osp_comm_b' : 'osp_comm_a'
 }
 /** 卫星 -> 型号键（决定用哪套模型）。
  *  优先级：星座名（后端下发的中文名，归属准确）→ object_name 关键词兜底
  *  （覆盖星座种子表未收录的 Spire Lemur / SpaceBee / DigitalGlobe WorldView）。
  *  粗类型非 PAYLOAD 的按 COARSE_MODEL 取型号键：碎片 / 箭体走分档素材，
  *  未知物体沿用单文件 unknow.glb。 */
-export function resolveModelKey(p: { object_type?: string; object_name?: string; cons?: string[] }): string {
+export function resolveModelKey(p: { object_type?: string; object_name?: string; cons?: string[]; norad_id?: number | string }): string {
   const ot = p.object_type || ''
   // 与旧口径一致：仅 PAYLOAD / DEBRIS / ROCKET BODY / UNKNOWN 四个粗类型有效，其余归为 UNKNOWN
   const coarse = TYPE_MODEL[ot] ? ot : 'UNKNOWN'
+  // 空间站核心舱：NORAD 优先，名称兜底。不依赖 object_type——类型误标成 UNKNOWN 时仍必须用精细 glb
+  // （25544 = ISS (ZARYA) → iss-detailed.glb；48274 = CSS (TIANHE-1) → tiangong.glb）
+  const norad = Number(p.norad_id)
+  const nameEarly = (p.object_name || '').toUpperCase()
+  if (norad === 25544 || nameEarly.includes('ISS (ZARYA)')) return 'osp_iss'
+  if (norad === 48274 || nameEarly.includes('TIANHE')) return 'osp_css'
+  // 碎片：按目标名散列到多个不规则多面体变体（同一粗类型 DEBRIS，配色与显隐口径不变）
+  if (coarse === 'DEBRIS') return debrisVariantOf(p.object_name || '')
   if (coarse !== 'PAYLOAD') return COARSE_MODEL[coarse]
-  const name = (p.object_name || '').toUpperCase()
+  const name = nameEarly
   const cons = p.cons || []
   const has = (s: string) => cons.includes(s)
-  if (has('星链')) return 'starlink'
-  if (has('OneWeb')) return 'oneweb'
+  if (has('星链')) return 'osp_flat'
+  if (has('OneWeb')) return 'osp_boxwing'
   if (has('Iridium')) return iridiumGen(name)
   if (has('Orbcomm')) return orbcommGen(name)
-  if (has('Flock')) return 'flock'
+  if (has('Flock')) return 'osp_cube_d'
   // 规模较大的星座（数量从多到少）—— 各自生成专属模型，避免统一回退到通用卫星模型
-  if (has('风云星座')) return 'fengyun'
-  if (has('Kuiper')) return 'kuiper'
-  if (has('METEOR')) return 'meteor'
-  if (has('千帆星座')) return 'qianfan'
-  if (has('遥感星座')) return 'yaogan'
-  if (has('国网星座')) return 'guowang'
-  if (has('Intelsat')) return 'intelsat'
-  if (has('Glonass')) return 'glonass'
-  if (has('Globalstar')) return 'globalstar'
-  if (has('GPS')) return 'gps'
-  if (has('北斗导航星座')) return 'beidou'
-  if (has('吉利未来星座')) return 'geely'
-  if (name.includes('STARLINK')) return 'starlink'
-  if (name.includes('ONEWEB') || name.includes('ONE WEB')) return 'oneweb'
+  if (has('风云星座')) return 'osp_fy'
+  if (has('Kuiper')) return 'osp_kp'
+  if (has('METEOR')) return 'osp_met'
+  if (has('千帆星座')) return 'osp_qf'
+  if (has('遥感星座')) return 'osp_yg'
+  if (has('国网星座')) return 'osp_gw'
+  if (has('Intelsat')) return 'osp_is'
+  if (has('Glonass')) return 'osp_glo'
+  if (has('Globalstar')) return 'osp_gs'
+  if (has('GPS')) return 'osp_gps'
+  if (has('北斗导航星座')) return 'osp_bds'
+  if (has('吉利未来星座')) return 'osp_jl'
+  if (name.includes('STARLINK')) return 'osp_flat'
+  if (name.includes('ONEWEB') || name.includes('ONE WEB')) return 'osp_boxwing'
   if (name.includes('IRIDIUM')) return iridiumGen(name)
   if (name.includes('ORBCOMM')) return orbcommGen(name)
-  if (name.includes('FLOCK')) return 'flock'
-  if (name.includes('SPACEBEE') || name.includes('SPACE BEE')) return 'spacebee'
-  if (name.includes('WORLDVIEW')) return /WORLDVIEW[ -]?[23]/.test(name) ? 'worldview23' : 'worldview1'
-  if (name.includes('LEMUR')) return /LEMUR[ -]?2/.test(name) ? 'lemur2' : 'lemur1'
+  if (name.includes('FLOCK')) return 'osp_cube_d'
+  if (name.includes('SPACEBEE') || name.includes('SPACE BEE')) return 'osp_pico'
+  if (name.includes('WORLDVIEW')) return /WORLDVIEW[ -]?[23]/.test(name) ? 'osp_opt_b' : 'osp_opt_a'
+  if (name.includes('LEMUR')) return /LEMUR[ -]?2/.test(name) ? 'osp_lem_b' : 'osp_lem_a'
   // 星座种子表未收录时的关键词兜底（均取识别度高的关键词，避免误匹配）
-  if (name.includes('FENGYUN') || /^FY[ -]?\d/.test(name)) return 'fengyun'
-  if (name.includes('KUIPER')) return 'kuiper'
-  if (name.includes('METEOR')) return 'meteor'
-  if (name.includes('QIANFAN')) return 'qianfan'
-  if (name.includes('YAOGAN')) return 'yaogan'
-  if (name.includes('GUOWANG')) return 'guowang'
-  if (name.includes('INTELSAT')) return 'intelsat'
-  if (name.includes('GLONASS')) return 'glonass'
-  if (name.includes('GLOBALSTAR')) return 'globalstar'
-  if (name.includes('NAVSTAR')) return 'gps'
-  if (name.includes('BEIDOU') || name.includes('COMPASS')) return 'beidou'
-  if (name.includes('GEESAT')) return 'geely'
-  return 'satellite'
+  if (name.includes('FENGYUN') || /^FY[ -]?\d/.test(name)) return 'osp_fy'
+  if (name.includes('KUIPER')) return 'osp_kp'
+  if (name.includes('METEOR')) return 'osp_met'
+  if (name.includes('QIANFAN')) return 'osp_qf'
+  if (name.includes('YAOGAN')) return 'osp_yg'
+  if (name.includes('GUOWANG')) return 'osp_gw'
+  if (name.includes('INTELSAT')) return 'osp_is'
+  if (name.includes('GLONASS')) return 'osp_glo'
+  if (name.includes('GLOBALSTAR')) return 'osp_gs'
+  if (name.includes('NAVSTAR')) return 'osp_gps'
+  if (name.includes('BEIDOU') || name.includes('COMPASS')) return 'osp_bds'
+  if (name.includes('GEESAT')) return 'osp_jl'
+  return 'osp_sat'
 }
 
 /** 画质档位：high=正常机器原画质；mid=老机降一档；low=老年机/低端核显兜底。
@@ -721,6 +735,11 @@ export const altMax = ref<number | undefined>(undefined) // 轨道高度上限(k
  *  注意两个定位来源在各自入口互清：showSatelliteSet() 会先清 kw/星座/高度，pickConstellation() 会清空本集合。 */
 export const filterNorads = ref<number[] | null>(null)
 
+/** 空间站「位置展示」：当前单独点亮的核心舱 NORAD（25544 = ISS，48274 = CSS；null = 未点亮）。
+ *  与 filterNorads（NORAD 集合过滤）完全独立：不参与过滤掩码、不改类型开关，
+ *  只让被点亮的那一颗在「卫星」总开关关闭时也能单独出现（逐实例放行见 BaseScene 的 stationSoloBlocked）。 */
+export const stationFocus = ref<number | null>(null)
+
 /** 多星座对比：参与对比的星座（名称 + 分配给它的颜色，顺序即对比顺序 / 图例顺序）。
  *  [] = 未启用对比；与 filterNorads 是两种定位来源，入口处互清。
  *  启用时 filterActive 为真（画轨道线），并由调用方把 colorMode 置 'compare'（点云按星座着色）。 */
@@ -745,10 +764,16 @@ export const consSatPanel = reactive({
 })
 
 /** 星座视图中被高亮轨道线的卫星 NORAD（0 = 未高亮）；由右侧成员列表点击设置。
- *  高亮方式 = 直接替换该星在过滤轨道线里那一段的顶点色（载荷红 → 亮青），而非额外叠加一条线。 */
+ *  高亮方式 = 直接替换该星在过滤轨道线里那一段的顶点色（载荷绿 → 选中蓝），而非额外叠加一条线。 */
 export const consHighlightNorad = ref(0)
-/** 高亮配色：星座成员轨道线是载荷红，用亮青色拉开对比（见 BaseScene 的 paintConsOrbit） */
-export const CONS_HIGHLIGHT_COLOR = 0x00e5ff
+/* ---------- 卫星 3D 状态配色（全站唯一口径）----------
+ *  平时 = 绿（TYPE_COLOR.PAYLOAD，点云按类型着色时的默认色）
+ *  选中 = 蓝（点云焦点光点 / 星历本星模型 / 星座点名高亮轨道线共用）
+ *  星历对方威胁目标 = 橙（威胁事件里的对方卫星模型，不再按风险等级改色） */
+/** 选中 / 焦点高亮色（星座成员轨道线是载荷绿，用蓝色拉开对比，见 BaseScene 的 paintConsOrbit） */
+export const SAT_SELECT_COLOR = 0x2f8fff
+/** 星历「对方威胁目标」模型色：所有风险等级统一橙色 */
+export const SAT_THREAT_COLOR = 0xff9800
 
 /** 重建星座视图的成员列表（filterConst 指定星座下只认载荷，与 refreshFilter 的过滤口径一致）。
  *  点云未就绪 / 未选星座时置空；由 BaseScene 在每次重建过滤时同步刷新。 */
@@ -780,6 +805,14 @@ export const loadProgress = ref(0)
 export const orbitBuilding = ref(false)
 /** 过滤轨道线绘制进度（0-100，命中多时给出可视进度） */
 export const orbitProgress = ref(0)
+/** 本次过滤轨道线实际要绘制的卫星数：已收口到绑定星座（星座卡片「轨道展示」时只算该星座成员），
+ *  与 visibleCount（点云可见总数，主开关 + 卡片并集口径）不是一回事 —— loading 提示必须用这个数，
+ *  否则会显示成「整屏可见物体数」，与用户理解的「星链有多少颗」对不上。 */
+export const orbitDrawCount = ref(0)
+/** 点云代次：applyCloud / applyCloudCoords 每次改写 g.cloudList 后自增。
+ *  g 是普通对象（非响应式），仅依赖 g.cloudList 的 computed（如星座卡片「在轨」统计）
+ *  在数据源切换后不会失效 → 必须额外读取本值才能重算。 */
+export const cloudRev = ref(0)
 export const filterActive = computed(() =>
   !!filterKw.value.trim() || !!filterConst.value || altMin.value != null || altMax.value != null
     || (filterNorads.value?.length ?? 0) > 0
@@ -1133,13 +1166,11 @@ TYPE_KEYS.forEach((k) => {
 })
 
 /* ============================================================
- * 碰撞热力（三个数据源，同一坐标口径）
- *  - 'local'       本项目 SGP4 初筛：/cgi/sat_conj/heatmap（sat_conjunction + 现行 TLE 在 TCA 传播）
- *  - 'spacetrack'  Space-Track 官方 CDM：/cgi/sat_cdm/heatmap（sat_cdm 预计算坐标，缺坐标回退 SGP4）
- *  - 'cri'         本项目交会分析：/cgi/sat_cri/heatmap（sat_cri_conjunction + 现行 TLE 在 TCA 传播，
- *                  CRI/CRP 风险指数模型，与初筛完全隔离的两套表，仅着色 / 指标口径不同）
- * 三者都由后端在 TCA 时刻传播出两端点与中点 ECI 坐标；前端共用同一套拾取/交互逻辑，
- * 但渲染按来源区分：本地两类事件量大 → 立方网格宏观聚合热力斑；CDM 事件量小 → 逐事件柔光云。
+ * 卫星轨道威胁事件热力（二标签，同一 Pc 分级口径）
+ *  - 'tle-threat'  TLE×TLE 自算（heat-sidecar /cgi2/heat/heatmap?kind=tle-threat）；
+ *  - 'tle-eph'     精密星历 × TLE（heat-sidecar /cgi2/heat/heatmap?kind=tle）。
+ * 两者的事件都带 TCA 两端 / 中点 ECI 坐标，前端共用同一套拾取与交互逻辑；
+ * 渲染按等级区分形态：高危 / 警告逐事件柔光云（可点），关注 / 数据不足可聚合。
  * 本 store 集中持有：热力模式开关、数据来源、事件列表、按日切片时间轴、选中事件、配色。
  * ============================================================ */
 /** 一条碰撞热力事件（后端以 TLE+SGP4 在 TCA 时刻传播得到的 ECI 坐标，
@@ -1147,45 +1178,30 @@ TYPE_KEYS.forEach((k) => {
  *  类型定义与 /cgi 接口共用（见 @/api/sat_public），避免前后端字段口径漂移。 */
 export type { CdmHeatEvent }
 
-/** 热力数据来源：'local' = 本项目 SGP4 初筛（sat_conjunction，默认）；'spacetrack' = Space-Track 官方 CDM；
- *  'cri' = 本项目交会分析（sat_cri_conjunction，CRI/CRP 风险指数模型，与初筛完全隔离的另一套表与口径）；
- *  'eph-aoe' = 星历热力（AOE 编目点云粗筛 + 候选 TLE/SGP4 精算，本机联算、不落后端表） */
-export type HeatSource = 'local' | 'spacetrack' | 'cri' | 'eph-aoe'
-/** 当前热力来源（默认「交会热力」，见底部 dock 弹出的来源菜单） */
-export const heatSource = ref<HeatSource>('local')
-/** 来源菜单项（dock「碰撞热力」按钮点击后向上弹出，顺序即展示顺序） */
+/** 热力数据来源（二标签）：
+ *  'tle-threat' = TLE×TLE 自算（Foster 2D Pc，双侧 TLE 龄期 σ）；
+ *  'tle-eph'    = 精密星历 × TLE（同一算法，星历协方差更紧）。 */
+export type HeatSource = 'tle-threat' | 'tle-eph'
+/** 当前热力来源（默认「卫星轨道威胁事件」TLE×TLE 自算） */
+export const heatSource = ref<HeatSource>('tle-threat')
+/** 来源标签（dock 面包屑与面板标签共用，顺序即展示顺序） */
 export const HEAT_SOURCES: { key: HeatSource; label: string; desc: string }[] = [
-  { key: 'local', label: '交会热力', desc: 'SGP4 初筛 · 风险等级' },
-  { key: 'spacetrack', label: 'CDM 热力', desc: 'Space-Track 官方 · 碰撞概率 Pc' },
-  { key: 'cri', label: '交会分析热力', desc: 'CRI/CRP 模型 · 交会风险概率' },
-  { key: 'eph-aoe', label: '星历热力', desc: 'AOE 编目 × 精密星历 · SGP4 精算' }
+  { key: 'tle-threat', label: '卫星轨道威胁事件', desc: 'TLE×TLE · Foster 2D Pc · 初筛云图' },
+  { key: 'tle-eph', label: '卫星轨道威胁事件（星历增强）', desc: '精密星历×TLE · 同算法 · 协方差更紧' }
 ]
-/** 星历热力当前使用的星历 id（与「我的星历」激活项联动；空 = 未激活） */
-export const heatEphSetId = ref<string | null>(null)
-/** 星历热力计算状态：idle/running/done/error + 进度 0..1 + 文案（面板与场景共享） */
-export const heatEphStatus = ref<{ state: 'idle' | 'running' | 'done' | 'error'; p: number; text: string }>({
-  state: 'idle', p: 0, text: ''
-})
 
 /** 热力视图开关：进入后隐藏卫星云与轨道线，只显示碰撞事件标记；
  *  与「碰撞热力」面板显隐解耦（由 index.vue 的 toggleDock 编排）：
  *  展开面板开启热力视图；折叠面板只隐藏面板、保留热力云以便继续观察与拾取；
  *  只有还原初始 / 点 dock × / 切到卫星·星座列表 才退出热力视图。 */
 export const heatMode = ref(false)
-/** 时间窗口（天）：>0 未来 N 天；0 表示「全部」（含历史事件，展示全量高危，默认）。
- *  默认取全部以匹配后台高危事件全量口径，避免只看未来窗口的少数几条；3/5/7 天为警戒窗口快捷档。 */
-export const heatDays = ref(0)
+/** 时间窗口（天）：只允许 1 / 3 / 7（与 /cgi2/heat/heatmap 的口径一致），默认 7 天。
+ *  星历只覆盖约 3–7 天、CDM 也只覆盖近期，因此不再提供「全部 / 30d」档。 */
+export const heatDays = ref(7)
 /** 当前按日切片选中的日期（1..heatDays），-1 = 全部（总览） */
 export const heatDay = ref(-1)
 
-/** 总交会库（仅「交会热力」来源使用）：
- *  后台「主从计算 / 配对标注」会产生 scope 更窄的批次，但前台只认「全体 × 全体」全量批次，
- *  即「总交会库」= 最近一次 mode='all' 的成功批次；下方批次下拉可回看历史全量批次。
- *  heatBatchRunId：null = 不指定，由后端解析最近全量批次；>0 = 回看指定批次。
- *  heatBatches：可选批次列表（最近 N 个全量批次，含扫描时间与事件数）。 */
-export const heatBatchRunId = ref<number | null>(null)
-export const heatBatches = ref<ConjBatchItem[]>([])
-/** 智能体联动：本次打开碰撞热力面板要聚焦的目标卫星 NORAD（null = 不过滤）。
+/** 智能体联动：本次打开安全热力面板要聚焦的目标卫星 NORAD（null = 不过滤）。
  *  由 index.vue 在 open_panel(heat, selectFirst) 时写入（动作显式 norad 优先，否则取当前三维已选中的那颗星 ——
  *  「先问某星位置、再问它的交会」时，会话上下文里的选中星就是目标）；
  *  CdmHeatmap 在面板打开 / 触发自动选中时**读取并消费**（置回 null），据此把列表关键词检索设为该 NORAD，
@@ -1217,85 +1233,38 @@ export const heatSelList = ref<CdmHeatEvent[]>([])
 /** 事件详情面板开关（热力模式点事件后打开，可收起保留选中） */
 export const heatOpen = ref(true)
 
-/* ---- P3 热力筛选（面板顶部筛选条，全部在前端对 heatList 生效，不额外请求后端） ---- */
-/** 高度层：all=全部 / leo=<2000km / meo=2000~30000km / geo=>30000km（含 HEO）。
- *  高度取自事件 altitude（本地初筛 / 交会分析来源有；官方 CDM 无该字段 → 选择高度层时这些事件不参与） */
-export type HeatAltBand = 'all' | 'leo' | 'meo' | 'geo'
-export const heatAltBand = ref<HeatAltBand>('all')
-/** 阈值指标：risk=综合风险(0~1) / pc=碰撞概率 / miss=最近距离(km，取「不超过」) */
-export type HeatMetric = 'risk' | 'pc' | 'miss'
-export const heatMetric = ref<HeatMetric>('risk')
-/** 综合风险阈值（0~1，低于该值的事件不参与三维渲染） */
-export const heatRiskFloor = ref(0)
-/** 碰撞概率阈值（低于该值不参与；对数刻度滑杆 1e-8~1e-2） */
-export const heatPcFloor = ref(0)
-/** 最近距离上限（km，大于该值不参与；滑杆 0~100） */
-export const heatMissCeil = ref(100)
-/** 切换来源时复位高度层（各来源字段口径不同，避免残留 0 事件） */
-watch(heatSource, () => { heatAltBand.value = 'all' })
+/* ---- 热力来源状态机（03 §11.5） ---- */
+/** 每个来源独立的加载状态：ready 之外的任何状态都不显示计数，避免两个标签串用旧数字 */
+export type HeatStatus = 'idle' | 'loading' | 'ready' | 'empty' | 'unavailable'
+/** 不可用原因：服务未连接 / 核心未加载 / 数据库不可用（文案见 CdmHeatmap 空状态卡） */
+export type HeatUnavailableReason = '' | 'SIDECAR_DOWN' | 'CORE_NOT_LOADED' | 'DB_DOWN'
+export const heatStatus = reactive<Record<HeatSource, HeatStatus>>({
+  'tle-threat': 'idle',
+  'tle-eph': 'idle'
+})
+/** 当前来源不可用的原因（仅 unavailable 时有效） */
+export const heatUnavailableReason = ref<HeatUnavailableReason>('')
+/** 主星筛选：官方星历（默认）/ 某份已上传星历（03 §15.5） */
+export type HeatPrimaryFilter = { kind: 'official' } | { kind: 'uploaded'; ephemId: string }
+export const heatPrimaryFilter = ref<HeatPrimaryFilter>({ kind: 'official' })
 
-/* ---- P3 热力渲染口径：聚合格边 / 5 档风险色带 ---- */
-/** 热力聚合格边（场景单位，地球半径=1）：0.05 细 / 0.15 中 / 0.30 粗。
- *  写入 URL 的 ?cell=（由 index.vue 负责同步），刷新 / 分享链接后保持同一观察尺度。 */
-export const HEAT_CELL_OPTIONS: { v: number; label: string }[] = [
-  { v: 0.05, label: '细' },
-  { v: 0.15, label: '中' },
-  { v: 0.3, label: '粗' }
-]
+/* ---- 热力渲染口径：聚合格边（固定常量，仅 ?debug=heat 可调） ---- */
 export const heatCell = ref(0.15)
 
-/** 5 档风险色带：交会热力 / 交会分析热力按事件 risk(0~1) 分档着色，
- *  比后端原始「红黄」两档更细，便于区分事件烈度。官方 CDM 仍按后端 Pc 配色（heatLegend）。 */
-export interface HeatRiskBand { color: string; label: string; thresh: string }
-export const HEAT_RISK_BANDS: HeatRiskBand[] = [
-  { color: '#38b48b', label: '低风险', thresh: 'risk < 0.2' },
-  { color: '#9dc93b', label: '较低风险', thresh: '0.2 ≤ risk < 0.4' },
-  { color: '#f2c14e', label: '中风险', thresh: '0.4 ≤ risk < 0.6' },
-  { color: '#f08a3c', label: '高风险', thresh: '0.6 ≤ risk < 0.8' },
-  { color: '#e8453c', label: '严重风险', thresh: 'risk ≥ 0.8' }
-]
-
-/** 事件风险 → 色带配色 */
-export function heatBandColor(risk?: number): string {
-  const r = Number.isFinite(risk) ? (risk as number) : 0
-  if (r < 0.2) return HEAT_RISK_BANDS[0].color
-  if (r < 0.4) return HEAT_RISK_BANDS[1].color
-  if (r < 0.6) return HEAT_RISK_BANDS[2].color
-  if (r < 0.8) return HEAT_RISK_BANDS[3].color
-  return HEAT_RISK_BANDS[4].color
-}
-
-/** 事件最终渲染配色：官方 CDM 用后端下发的 Pc 配色，其余来源用前端 5 档风险色带。
+/** 事件最终渲染配色：三个来源统一按碰撞概率 Pc 分档（D9，不再使用后端 color/risk）。
  *  图例勾选过滤与三维着色共用这一口径，保证「勾掉的那一档」与「屏幕上消失的颜色」一致。 */
 export function heatColorOf(e: CdmHeatEvent): string {
-  return heatSource.value === 'spacetrack' ? e.color : heatBandColor(e.risk)
-}
-
-/** 事件高度层归属 */
-function altBandOf(alt?: number): Exclude<HeatAltBand, 'all'> | null {
-  if (alt == null || !Number.isFinite(alt)) return null
-  if (alt < 2000) return 'leo'
-  if (alt <= 30000) return 'meo'
-  return 'geo'
-}
-
-/** 按当前指标阈值判断事件是否保留 */
-function passThreshold(e: CdmHeatEvent) {
-  if (heatMetric.value === 'pc') return e.collision_probability >= heatPcFloor.value
-  if (heatMetric.value === 'miss') return e.miss_distance_km <= heatMissCeil.value
-  return (e.risk ?? 0) >= heatRiskFloor.value
+  return colorOfLevel(levelOfPc(e.collision_probability, e.pc_max) ?? 'yellow')
 }
 
 /** 当前按日切片过滤后的事件列表（heatDay === -1 时展示总览全部）。
  *  按日归属由后端在按日切片时写入事件字段 day（1..heatDays；不切日时为 0），前端只做等值筛选。
- *  再叠加「图例勾选」过滤：取消勾选的档位（按配色匹配）不参与热力渲染。
- *  P3：再叠加「高度层」与「指标阈值」筛选。 */
+ *  再叠加「等级芯片」过滤：取消勾选的档位（按配色匹配）不参与热力渲染。
+ *  miss 只作服务端次级过滤（MISS_MAX_KM），不参与前端筛选与分级。 */
 export const heatFiltered = computed(() => {
-  const band = heatAltBand.value
-  let base = heatDay.value < 1 ? heatList.value : heatList.value.filter((e) => e.day === heatDay.value)
-  if (band !== 'all') base = base.filter((e) => altBandOf(e.altitude) === band)
-  if (heatHiddenColors.size) base = base.filter((e) => !heatHiddenColors.has(heatColorOf(e)))
-  return base.filter(passThreshold)
+  const base = heatDay.value < 1 ? heatList.value : heatList.value.filter((e) => e.day === heatDay.value)
+  if (!heatHiddenColors.size) return base
+  return base.filter((e) => !heatHiddenColors.has(heatColorOf(e)))
 })
 
 /* ============================================================

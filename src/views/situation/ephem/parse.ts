@@ -29,8 +29,17 @@ export function extractNameFromFileName(fileName?: string): string | undefined {
 export function extractNoradFromFileName(fileName?: string): number | undefined {
   if (!fileName) return undefined
   const base = baseName(fileName)
-  // 注意：'_' 也是 \w，不能用 \b，这里用数字边界前后断言
-  const m = /(?<!\d)(\d{5})(?!\d)/.exec(base)
+  // Starlink ITC 文件名形如 MEME_100008_STARLINK-38124_...：MEME id 才是 NORAD，
+  // 后面的 38124 是生产编号（03 §15.11 第 6 条）。6 位编号同样适用。
+  const meme = /MEME[_-](\d{5,6})(?!\d)/i.exec(base)
+  if (meme) return Number(meme[1])
+  // 不再取文件名中的任意 5 位数（旧实现会把 38124 误读成 NORAD）
+  return undefined
+}
+
+/** 从 OEM / OCM 头部取 NORAD（OBJECT_ID = 100008 这类纯数字字段） */
+export function extractNoradFromText(text: string): number | undefined {
+  const m = /OBJECT_ID\s*=\s*(\d{5,6})(?!\d)/i.exec(text)
   return m ? Number(m[1]) : undefined
 }
 
@@ -64,7 +73,9 @@ export function parseEphemeris(
   }
 
   const nameHint = hint?.name?.trim() || extractNameFromFileName(hint?.fileName)
-  const noradHint = hint?.norad ?? extractNoradFromFileName(hint?.fileName)
+  const noradHint = hint?.norad
+    ?? extractNoradFromFileName(hint?.fileName)
+    ?? extractNoradFromText(text)
 
   let res: ParseResult
   if (fmt === 'itc') {

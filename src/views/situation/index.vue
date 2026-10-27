@@ -30,10 +30,10 @@ import SiteListPanel from './SiteListPanel.vue'
 import EphemPanel from './EphemPanel.vue'
 import AiChatDrawer from './AiChatDrawer.vue'
 import { buildAiTarget } from './aiTarget'
-import { activeEphem, activateEphem, threatEvents, threatSelected, selectThreat, maneuverStates, maneuverBurnMs } from './ephem/useUserEphemeris'
+import { activeEphem, activateEphem, threatSelected, selectThreat, maneuverStates, maneuverBurnMs, openOfficialByNorad } from './ephem/useUserEphemeris'
 import { interpolateAt } from './ephem/interp'
 import { eciToGeodetic, gstime } from 'satellite.js'
-import type { ThreatEvent } from './ephem/types'
+import { heatSourceOf, threatFocus } from './threatLink'
 import logoUrl from '@/assets/logo/openspace-logo.png'
 import type { AiAction } from '@/utils/aiStream'
 import {
@@ -42,19 +42,18 @@ import {
   compareConsts, compareActive, COMPARE_PALETTE,
   dockMode, dockActive, constPanel, consFiltered, constellations, filterConst, filterKw, g,
   simSpeed, simPlaying, simTimeMs,
-  consShowMap, consOverrideActive, consShowOf, consCardBound,
+  consShowMap, consOverrideActive, consShowOf, consCardBound, consOrbitOn,
   consSatPanel, consHighlightNorad,
-  loading, hasSel, filterActive, filterNorads, sel, selDetail, selConstellations, detailOpen, visible, orbitVisible,
+  loading, hasSel, filterActive, filterNorads, stationFocus, sel, selDetail, selConstellations, detailOpen, visible, orbitVisible,
   dataSource,
   heatMode, heatSel, heatSelList, heatOpen,
-  heatSource, HEAT_SOURCES, heatFocusNorad,
-  heatCell, HEAT_CELL_OPTIONS, heatDays, heatDay, heatDayGroups,
+  heatSource, HEAT_SOURCES, heatFocusNorad, heatPrimaryFilter,
+  heatDays, heatDay, heatDayGroups,
   passMode, passSelTarget, passDetail, passLoading, passError, passDetailOpen, passTargets, passProvinceTargets,
   regionPassSel, multiPassSel,
   passDistrictVisible, passBorderVisible, passCityVisible,
   skyLayers, SKY_LAYER_ITEMS, spaceWeather, spaceWeatherLoading, spaceWeatherError,
   sceneQualityTier,
-  conjEllipsoid, conjEllipsoidLoading, conjEllipsoidError, covDisplayScale,
   type SkyLayerKey, type SkyViewMode,
   PASS_SOURCES, SAT_SOURCES,
   launchSites, siteLoading, siteError, siteMarkersVisible,
@@ -63,16 +62,19 @@ import {
   cloudRevealed, ephOpen
 } from './scene'
 import type { CdmHeatEvent, ColorMode, HeatSource, PassSource, SatView } from './scene'
+import { levelOfPc, labelOfLevel } from './heat/riskLevels'
+import { colorForLevel, labelForLevel } from './heat/levels'
 import {
   listLaunchSitesPublic, listUpcomingBySitePublic, listLaunchRecordBySitePublic
 } from '@/api/launch_public'
 import {
   getSatCatalogOfSatellite,
-  type ConjEllipsoidSide, type SatSource, type SatCatalogPublic
+  type SatSource, type SatCatalogPublic
 } from '@/api/sat_public'
 import type { RegionAccessItem } from '@/api/pass_region_public'
 import type { MultiRegionAccessItem, CoverageGroup } from '@/api/pass_multi_region_public'
 import { getPassElevationProfile, type PassElevationResult } from '@/api/pass_public'
+import { getHeat2Event, type Heat2EventDetail } from '@/api/heat2'
 import { useDelayed } from '@/composables/useDelayed'
 import { uploadUrl, httpCgi } from '@/utils/request'
 import { purposeLabel } from '@/api/satTypes'
@@ -85,8 +87,10 @@ const { isMobile } = useDevice()
 const route = useRoute()
 const router = useRouter()
 /** 智能体浮层开关：与 dock 的场景视图无关（问答不改变三维现场），单独一份状态。
- *  默认收起：右缘留「太空安全专家」外拉 tag，点击 / 底部 dock 按钮展开（打开应用时不占屏） */
+ *  默认收起：右缘留「太空AI专家」外拉 tag，点击 / 底部 dock 按钮展开（打开应用时不占屏） */
 const aiOpen = ref(false)
+/** AI 卡片与「安全热力」面板同为底部居中同宽卡片：打开 AI 时把热力面板收起，避免两张卡片叠在一起 */
+watch(aiOpen, (v) => { if (v && dockMode.value === 'heat') closeHeatPanel() })
 /** 桌面端「太空安全目标列表」面板收起开关：默认收起，左缘留外拉 tag（点击 / 底部 dock 展开）。
  *  仅桌面端生效 —— 移动端面板是底部抽屉，保持原「进模块即弹出」行为 */
 const satPanelClosed = ref(true)
@@ -196,9 +200,13 @@ function simTogglePlay() {
   if (!simPlaying.value) {
     const set = activeEphem.value
     if (set) {
+      const start = set.states.length ? set.states[0].t : set.start
       const end = set.states.length ? set.states[set.states.length - 1].t : set.stop
-      if (g.simTimeMs >= end) {
-        const start = set.states.length ? set.states[0].t : set.start
+      // 虚拟时刻非法（事件 TCA 解析失败等）时先回到数据起点，避免 NaN 逐帧传播
+      if (!Number.isFinite(g.simTimeMs)) {
+        g.simTimeMs = start
+        simTimeMs.value = start
+      } else if (g.simTimeMs >= end) {
         g.simTimeMs = start
         simTimeMs.value = start
       }
@@ -340,23 +348,12 @@ function syncUrl(type: DockType) {
   router.replace({ name: 'situation', params: { type } })
 }
 
-/* 热力聚合格边：URL ?cell=0.05|0.15|0.3 持久化（P3）。
- * 首次进入按地址栏恢复；用户切换后写回地址栏，刷新 / 分享链接保持同一观察尺度。 */
-if (HEAT_CELL_OPTIONS.some((o) => o.v === Number(route.query.cell))) {
-  heatCell.value = Number(route.query.cell)
-}
-watch(heatCell, (v) => {
-  const s = String(v)
-  if (String(route.query.cell ?? '') === s) return
-  router.replace({ query: { ...route.query, cell: s } })
-})
-
-/* 热力时间窗 / 按天切片：URL ?days=&day= 持久化（P3）。
- * days 由面板时间窗按钮写入；day 仅在选中某一天时写，切回「全」即删除。
+/* 热力时间窗 / 按天切片：URL ?days=&day= 持久化。
+ * days 只允许 1 / 3 / 7（03 §11.3），其它值一律按默认 7 天处理，不再有「全部」。
  * 首次进入按地址栏恢复：day 要等后端按日分组返回后才知道该天是否存在，故延迟到 heatDayGroups 就绪。 */
 if (route.query.days != null) {
   const d = Number(route.query.days)
-  if (Number.isFinite(d) && d >= 0) heatDays.value = d
+  if (d === 1 || d === 3 || d === 7) heatDays.value = d
 }
 const urlDay = Number(route.query.day)
 let urlDayPending = Number.isFinite(urlDay) && urlDay >= 1
@@ -565,14 +562,9 @@ function openActivePanel() {
 function focusActiveEphem() {
   const set = activeEphem.value
   sceneRef.value?.setUserEphem(set)
-  sceneRef.value?.setUserEphemThreats(threatEvents.value)
+  sceneRef.value?.setUserEphemThreats([])
   sceneRef.value?.setUserEphemManeuver(maneuverStates.value, maneuverBurnMs.value)
   if (set) sceneRef.value?.trackUserEphem()
-}
-
-/** 面板里点选威胁事件：三维定位并高亮（null = 取消高亮） */
-function focusEphemEvent(ev: ThreatEvent | null) {
-  sceneRef.value?.focusUserEphemEvent(ev)
 }
 
 /** 选中威胁事件 → 右侧展示事件详情（与星历详情互斥，避免两张卡叠在同一位置） */
@@ -591,25 +583,10 @@ function openEphForEvent() {
   if (!ephOpen.value) toggleEphemDock()
 }
 
-/** 热力面板「我的星历」页签点选事件：先激活对应星历（恢复其持久化事件），再选中并三维定位 */
-async function onPickEphEvent(payload: { setId: string; event: ThreatEvent }) {
-  if (activeEphem.value?.id !== payload.setId) await activateEphem(payload.setId)
-  const ev = threatEvents.value.find((e) => e.id === payload.event.id) || payload.event
-  selectThreat(ev)
-  focusEphemEvent(ev)
-}
-
-/** 事件详情文案：等级 → 中文 + 配色 */
-const EPH_EV_LEVEL: Record<ThreatEvent['level'], { label: string; color: string }> = {
-  high: { label: '高危', color: '#ff6b6b' },
-  medium: { label: '警告', color: '#ffb454' },
-  low: { label: '关注', color: '#7fb0ff' }
-}
-
 /** 激活的星历变化（上传成功 / 切换 / 删除）：同步三维图层，并清掉上一份星历的机动双轨迹 */
 watch(activeEphem, (set) => {
   sceneRef.value?.setUserEphem(set)
-  sceneRef.value?.setUserEphemThreats(threatEvents.value)
+  sceneRef.value?.setUserEphemThreats([])
   sceneRef.value?.setUserEphemManeuver(null, null)
 })
 
@@ -618,9 +595,48 @@ watch([maneuverStates, maneuverBurnMs], ([states, burn]) => {
   sceneRef.value?.setUserEphemManeuver(states, burn)
 })
 
-/** 威胁筛选结果变化：同步三维威胁点云（按风险等级配色） */
-watch(threatEvents, (list) => {
-  sceneRef.value?.setUserEphemThreats(list)
+/* ---- 星历分析窗 × 安全热力 双向联动（03 §15.5） ---- */
+
+/** 星历窗「在安全热力图中查看」：切标签 + 主星筛选并展开热力面板 */
+function onShowInHeat(p: { kind: 'tle-threat' | 'tle'; scope: 'official' | 'uploaded'; ephemId?: string; norad: number }) {
+  heatSource.value = heatSourceOf(p.kind)
+  heatPrimaryFilter.value = p.scope === 'uploaded' && p.ephemId
+    ? { kind: 'uploaded', ephemId: p.ephemId }
+    : { kind: 'official' }
+  if (dockActive.value !== 'heat') applyDock('heat')
+  else dockMode.value = 'heat'
+}
+
+/** 热力列表「在星历窗中打开该主星」：展开星历窗并载入该星官方星历 */
+async function onOpenEphemFromHeat(p: { norad: number; name: string }) {
+  if (!ephOpen.value) ephOpen.value = true
+  if (await openOfficialByNorad(p.norad)) focusActiveEphem()
+}
+
+/** 热力面板「重试」：清 sidecar 健康缓存并重新探测 */
+function retryHeat() {
+  void sceneRef.value?.recheckSidecar()
+}
+
+/** 统一联动入口：事件焦点变化时驱动三维定位与面板切换（防环：按 from 分流，不回发） */
+watch(threatFocus, (f) => {
+  if (!f) return
+  if (f.from === 'ephem') {
+    heatSource.value = heatSourceOf(f.kind)
+    heatPrimaryFilter.value = f.primaryScope === 'uploaded' && f.ephemId
+      ? { kind: 'uploaded', ephemId: f.ephemId }
+      : { kind: 'official' }
+    if (hasSel.value) sceneRef.value?.resetSelected(false)
+    void sceneRef.value?.showThreatPair(f)
+    return
+  }
+  if (f.from === 'heat') {
+    // 热力侧已绘制两星轨道：这里只展开星历窗（面板自身激活星历并选中同名事件）
+    if (f.kind !== 'tle') return
+    if (!ephOpen.value) ephOpen.value = true
+    ephDetailOpen.value = false
+    ephEvOpen.value = false
+  }
 })
 
 /** 收起城市过境面板：仅收起面板，保留过境视图（国界/城市叠加仍可继续观察与拾取） */
@@ -926,22 +942,33 @@ function toggleSatDock() {
 }
 
 /* ============================================================
- * 「交会热力」入口（dock 按钮点击后直接弹出底部热力面板）
- * 固定以「交会分析热力」（cri 来源）打开，与旧版「碰撞热力 → 来源菜单 → 交会分析热力」等价一步到位。
+ * 「安全热力」入口（dock 按钮点击后直接弹出底部热力面板）
+ * 固定以「卫星轨道威胁事件」打开，两个标签在面板内切换。
  * ============================================================ */
 /** 来源菜单开关（旧版来源菜单已移除，保留该状态位供其它编排函数统一关闭菜单） */
 const heatMenuOpen = ref(false)
 
-/** 点击 dock「交会热力」：直接展开「交会分析热力」底部面板。
- *  - 面板已开且来源已是 cri：再点一次只收起面板，保留热力云与 dock 选中态；
- *  - 从其它模块切过来：先彻底还原初始状态，再切到 cri 来源并开启热力视图。 */
-function openCriHeatDock() {
+/** 点击 dock「安全热力」：直接展开底部热力面板。
+ *  - 面板已缩回但威胁红云仍在展示（dockActive 仍为 heat）：再点一次整体退出——红云消失、按钮取消高亮
+ *    （面板本来就已缩回，保持缩回）；
+ *  - 面板展开中：再点一次同样整体退出（红云消失 + 面板缩回 + 取消高亮）；
+ *  - 从其它模块切过来：先彻底还原初始状态，再以默认标签开启热力视图。 */
+function openHeatDock() {
   passMenuOpen.value = false
   satMenuOpen.value = false
   heatMenuOpen.value = false
-  if (dockMode.value === 'heat' && heatSource.value === 'cri') { dockMode.value = ''; return }
-  if (dockActive.value && dockActive.value !== 'heat') clearScene()
-  heatSource.value = 'cri'
+  // 与 AI 卡片互斥（同一位置的同宽底部卡片）：开热力就收起 AI
+  aiOpen.value = false
+  // 热力模块内（面板开着 / 面板已缩回但红云还在）：再点 dock 按钮 = 退出热力
+  if (dockActive.value === 'heat') {
+    clearScene()
+    heatMode.value = false
+    dockMode.value = ''
+    dockActive.value = ''
+    return
+  }
+  if (dockActive.value) clearScene()
+  heatSource.value = 'tle-threat'
   applyDock('heat')
 }
 
@@ -989,7 +1016,7 @@ const satMenuTitle = computed(() => {
   return `综合态势·${SAT_SOURCES.find((s) => s.key === cur)?.label || '太空安全目标列表'}`
 })
 const heatMenuTitle = computed(
-  () => `碰撞热力·${HEAT_SOURCES.find((s) => s.key === heatSource.value)?.label || '交会热力'}`
+  () => `安全热力·${HEAT_SOURCES.find((s) => s.key === heatSource.value)?.label || '卫星轨道威胁事件'}`
 )
 const passMenuTitle = computed(() => {
   const cur: PassSource = PASS_VIEWS.includes(dockActive.value) ? (dockActive.value as PassSource) : 'pass'
@@ -1025,8 +1052,12 @@ function onSituationPage() {
  *  两种情况都把 type 规范化写回地址栏（/situation/sat 等），保证刷新后不回退。 */
 function restoreDock() {
   const raw = String(route.params.type ?? '')
-  const type: DockType = (DOCK_TYPES as readonly string[]).includes(raw)
-    ? (raw as DockType)
+  // 「安全热力」不作为首屏/刷新/初始化窗口的恢复目标：无事件深链参数时一律回到卫星视图，
+  // 避免用户刷新后仍停在热力面板（dock 点击进入热力不受影响，dockActive 已置位）。
+  const hasHeatDeepLink = ['a', 'b', 'tca'].some((k) => route.query[k] != null)
+  const target = raw === 'heat' && !hasHeatDeepLink && !dockActive.value ? 'sat' : raw
+  const type: DockType = (DOCK_TYPES as readonly string[]).includes(target)
+    ? (target as DockType)
     : (dockActive.value || 'sat')
   if (raw !== type) syncUrl(type)
   if (dockActive.value === type) return
@@ -1079,13 +1110,12 @@ const swTitle = computed(() => {
   ].join('\n')
 })
 /** 图层当前是否有内容：无内容的行整行压暗（开关仍可勾选）。
- *  判定口径与三维侧的可见性一致（极光环/太阳风看数据，星下点轨迹看是否选中卫星，椭球看是否选中交会事件） */
+ *  判定口径与三维侧的可见性一致（极光环/太阳风看数据，星下点轨迹看是否选中卫星） */
 function skyLayerReady(key: SkyLayerKey): boolean {
   if (key === 'aurora') return swAuroraReady.value
   if (key === 'dipole') return swAuroraReady.value
   if (key === 'solarWind') return swWindReady.value
   if (key === 'groundTrack') return !!selDetail.value
-  if (key === 'ellipsoid') return !!(conjEllipsoid.value?.a || conjEllipsoid.value?.b)
   return true
 }
 /* ============================================================
@@ -1121,16 +1151,8 @@ function layerTitle(ly: { key: SkyLayerKey; label: string; desc: string }) {
   if (ly.key === 'dipole' && !swAuroraReady.value) return '地磁偶极磁力线：等待空间环境数据（定时拉取中）'
   if (ly.key === 'solarWind' && !swWindReady.value) return '太阳风粒子流：等待 NOAA 太阳风数据（定时拉取中）'
   if (ly.key === 'groundTrack' && !skyLayerReady('groundTrack')) return '星下点轨迹：先在左侧列表或地球上选中一颗卫星'
-  if (ly.key === 'ellipsoid' && !skyLayerReady('ellipsoid')) return '误差椭球：先在「碰撞热力」里点选一个交会事件'
   return `${ly.label}（${ly.desc}）`
 }
-
-/** 三维里椭球的显示放大倍数（与三维绘制共用 scene.ts 的 covDisplayScale，口径唯一） */
-const covMag = computed(() => {
-  const sides = [conjEllipsoid.value?.a, conjEllipsoid.value?.b].filter((s): s is ConjEllipsoidSide => !!s)
-  if (!sides.length) return 1
-  return covDisplayScale(sides.flatMap((s) => [s.sigma.sr, s.sigma.st, s.sigma.sn]))
-})
 
 /**
  * 右侧面板四态（同一位置切换）：
@@ -1166,7 +1188,7 @@ let ephEvRaf = 0
 /** 按交会点在屏幕上的位置重算卡片左上角：优先右下方，越界时翻到左侧 / 上方 */
 function updateEphEvPos() {
   const ev = threatSelected.value
-  const pt = ev ? sceneRef.value?.projectEciToViewport(ev.midEci) : null
+  const pt = ev && ev.midEci ? sceneRef.value?.projectEciToViewport(ev.midEci) : null
   if (!pt) return
   const w = detailAsideEl.value?.offsetWidth || 244
   const h = detailAsideEl.value?.offsetHeight || 240
@@ -1506,9 +1528,10 @@ interface ConjEventOne {
 
 /** 取交会事件的定位三要素（norad_a / norad_b / tca）：优先用事件卡已取到的数据，
  *  否则按事件 id 现场查 /cgi/event/one。查询失败 / 字段缺失一律返回 null（动作静默丢弃，不影响文字回答）。
- *  注意：卡片标记的 source 是 conj|cri（口径），而 heatSource 是 local|cri（视图来源），二者需在此映射。 */
+ *  注意：这里的 src 是事件口径（conj|cri），仅用于选择 /cgi/event/one 的查询库，
+ *  与左下「安全热力」的视图标签（tle-threat|tle-eph）无关。 */
 async function locateConjEvent(
-  src: 'local' | 'cri',
+  src: 'conj' | 'cri',
   a: { key?: string; data?: unknown }
 ): Promise<{ norad_a: number; norad_b: number; tca: string } | null> {
   const d = (a.data || {}) as ConjEventOne
@@ -1519,7 +1542,8 @@ async function locateConjEvent(
     const id = Number(a.key)
     if (!(id > 0)) return null
     try {
-      // heatSource: 'local'（本项目 SGP4 初筛）= /cgi 的 conj 库；'cri'（交会分析）= cri 库
+      // heatSource 已收敛为两个标签（tle-threat / tle-eph），对话事件卡不再切换来源，只做定位
+      // source: 'conj'（本项目 SGP4 初筛）= /cgi 的 conj 库；'cri'（交会分析）= cri 库
       const r = await httpCgi<ConjEventOne>({
         url: '/event/one',
         method: 'get',
@@ -1531,13 +1555,65 @@ async function locateConjEvent(
   return norad_a > 0 && norad_b > 0 && tca ? { norad_a, norad_b, tca } : null
 }
 
-/** 当前热力来源的指标是否为「等级文案」：交会热力（SGP4 初筛，风险等级）/ 交会分析（CRI/CRP，极高~极低）
- *  均无官方 Pc 协方差口径，不能当碰撞概率展示，故详情面板指标标题用「风险等级」；仅官方 CDM 展示碰撞概率 */
-const isLevelHeat = computed(() => heatSource.value !== 'spacetrack')
-
-/** 事件主指标短文案：由后端按来源口径算好下发（官方 CDM = 碰撞概率 Pc；本项目初筛 = 风险等级），前端零换算 */
+/** 事件主指标短文案：等级 + Pc（三个热力标签统一按碰撞概率分级，D9） */
 function heatMetricShort(e: CdmHeatEvent): string {
-  return e.metric_text || '—'
+  const pc = e.collision_probability
+  const pcText = pc > 0 ? pc.toExponential(2) : '0'
+  const lv = levelOfPc(pc, e.pc_max)
+  return lv ? `${labelOfLevel(lv)} · Pc ${pcText}` : `Pc ${pcText}`
+}
+
+/* ============================================================
+ * 事件详情（P4）：两个标签的事件都由 heat-sidecar 计算，
+ * 需按 id 再取详情（R/T/N 分量、PcMax、双方 σ、龄期）。
+ * 事件来源靠合成编号识别：sidecar 事件 cdm_id = HS-<run>-<id>。
+ * ============================================================ */
+const heatSelFromSidecar = computed(() => Boolean(heatSel.value?.cdm_id?.startsWith('HS-')))
+const heatEphDetail = ref<Heat2EventDetail | null>(null)
+const heatEphDetailLoading = ref(false)
+const heatEphDetailError = ref('')
+let heatEphDetailSeq = 0
+
+watch(
+  () => (heatSel.value ? `${heatSel.value.id}|${heatSel.value.cdm_id}` : ''),
+  async () => {
+    const seq = ++heatEphDetailSeq
+    heatEphDetail.value = null
+    heatEphDetailError.value = ''
+    const cur = heatSel.value
+    if (!cur || !heatSelFromSidecar.value) return
+    heatEphDetailLoading.value = true
+    try {
+      const d = await getHeat2Event(cur.id)
+      if (seq === heatEphDetailSeq) heatEphDetail.value = d
+    } catch {
+      if (seq === heatEphDetailSeq) heatEphDetailError.value = '详情加载失败（heat-sidecar 未就绪）'
+    } finally {
+      if (seq === heatEphDetailSeq) heatEphDetailLoading.value = false
+    }
+  },
+  { immediate: true }
+)
+
+/** 概率展示（空值保留占位） */
+function fmtSci(v?: number | null, digits = 2) {
+  return v != null && Number.isFinite(v) && v > 0 ? v.toExponential(digits) : '—'
+}
+/** 龄期展示（小时） */
+function fmtHours(v?: number | null) {
+  return v != null && Number.isFinite(v) ? `${v.toFixed(1)} h` : '—'
+}
+/** 距离展示（km） */
+function fmtKm(v?: number | null, digits = 3) {
+  return v != null && Number.isFinite(v) ? `${fmtNum(v, digits)} km` : '—'
+}
+/** 对方根数来源文案 */
+function sigmaSrcLabel(src?: string | null) {
+  if (src === 'eph') return '精密星历协方差'
+  if (src === 'tle') return 'Space-Track TLE'
+  if (src === 'aoe') return 'AOE 编目根数'
+  if (src === 'supgp') return 'SupGP 根数'
+  return '—'
 }
 
 /** 点击卫星列表项：在三维地球上拾取该卫星（准星 + 轨道线 + 右侧详情 + 镜头飞向）。
@@ -1605,6 +1681,126 @@ function pickConsSat(gi: number) {
   sceneRef.value?.trackSatelliteByIndex(gi)
 }
 
+/** 空间站卡片「位置展示」：同一颗再点即点暗。
+ *  点亮 = 只让该空间站单独出现在轨道上（独立通道，不参与过滤掩码、不影响其它目标的显示）+ 拉近并自由观察；
+ *  点暗 = 取消该站的单独展示与选中，镜头保持不动，其余目标状态不变。 */
+function toggleStationShow(norad: number) {
+  if (stationFocus.value === norad) {
+    stationFocus.value = null
+    sceneRef.value?.resetSelected(false)
+    return
+  }
+  const gi = g.cloudList.findIndex((p) => Number(p.norad_id) === norad)
+  if (gi < 0) return
+  stationFocus.value = norad
+  // freeView = true：落位后不进入逐帧跟踪，左键拖拽即可旋转背景地球（用户口径）
+  sceneRef.value?.trackSatelliteByIndex(gi, true)
+}
+
+/** AI / 对话里提到天宫、ISS 等空间站时，映射到专用 3D 模型 NORAD。 */
+const STATION_CSS_NORAD = 48274
+const STATION_ISS_NORAD = 25544
+function resolveStationNoradFromAi(norad?: number, name?: string, cnName?: string): number | null {
+  const n = Number(norad)
+  if (n === STATION_CSS_NORAD || n === STATION_ISS_NORAD) return n
+  const blob = `${name || ''} ${cnName || ''}`.toUpperCase()
+  if (!blob.trim()) return Number.isFinite(n) && n > 0 ? null : null
+  if (/天宫|中国空间站|TIANHE|CSS|TIANGONG/.test(`${name || ''}${cnName || ''}`) || /TIANHE|TIANGONG|\bCSS\b/.test(blob)) {
+    return STATION_CSS_NORAD
+  }
+  if (/国际空间站|ISS|ZARYA/.test(`${name || ''}${cnName || ''}`) || /\bISS\b|ZARYA/.test(blob)) {
+    return STATION_ISS_NORAD
+  }
+  return null
+}
+
+/** AI 提到空间站：等同卡片「位置展示」强制开启（不弹左侧目标列表）。 */
+function focusStationFromAi(norad: number) {
+  if (!aiRoundCleared && dockActive.value !== 'sat') clearScene()
+  aiDockPinned = true
+  aiStationPinnedThisRound = true
+  aiObjectPinnedThisRound = true
+  applyDock('sat') // 内部 heatMode=false
+  heatMode.value = false
+  stationFocus.value = norad
+  const gi = g.cloudList.findIndex((p) => Number(p.norad_id) === norad)
+  if (gi < 0) {
+    // 云列表尚未就绪时仍记下焦点，并尝试按 NORAD 选中，mesh watch 就绪后可出模型
+    sceneRef.value?.selectByNorad(norad)
+    dockMode.value = ''
+    return
+  }
+  sceneRef.value?.trackSatelliteByIndex(gi, true)
+  dockMode.value = ''
+}
+
+
+function resolveConstellationName(raw?: string): string | null {
+  const q = String(raw || '').trim()
+  if (!q) return null
+  const list = constellations.value || []
+  const lower = q.toLowerCase()
+  const exact = list.find((c) => c.name.toLowerCase() === lower)
+  if (exact) return exact.name
+  const aliases: Record<string, string[]> = {
+    gps: ['gps', 'navstar', 'navstar gps'],
+    beidou: ['beidou', '北斗', 'bds'],
+    glonass: ['glonass'],
+    galileo: ['galileo'],
+    starlink: ['starlink', '星链'],
+  }
+  // 国产/商业星座常见别名：查询串命中后从列表找包含该词的项
+  const zhHints: { hint: string; prefer: string[] }[] = [
+    { hint: '千帆', prefer: ['千帆', 'qianfan', 'galaxy'] },
+    { hint: '银河飞船', prefer: ['银河', 'galaxy'] },
+    { hint: '星网', prefer: ['星网', 'gw', 'guowang'] },
+    { hint: '一网', prefer: ['一网', 'oneweb'] },
+    { hint: 'kuiper', prefer: ['kuiper'] },
+    { hint: '星链', prefer: ['starlink', '星链'] },
+    { hint: 'starlink', prefer: ['starlink', '星链'] },
+  ]
+  for (const h of zhHints) {
+    if (!q.includes(h.hint) && lower !== h.hint.toLowerCase()) continue
+    const hit = list.find((c) => {
+      const n = c.name.toLowerCase()
+      return h.prefer.some((p) => n.includes(p.toLowerCase()) || c.name.includes(p))
+    })
+    if (hit) return hit.name
+  }
+  for (const c of list) {
+    const key = c.name.toLowerCase()
+    const al = aliases[key]
+    if (al && al.some((a) => a === lower || lower.includes(a))) return c.name
+    if (key.includes(lower) || lower.includes(key)) return c.name
+  }
+  // 列表尚未加载时，仍用规范名（GPS 大写）
+  if (lower === 'navstar' || lower === 'navstar gps') return 'GPS'
+  return q
+}
+
+/** AI 提到星座（如 GPS）：等同卡片「卫星展示」+「轨道展示」强制开启，不弹目标列表/成员侧栏。 */
+function focusConstellationFromAi(name?: string) {
+  const resolved = resolveConstellationName(name)
+  if (!resolved) return
+  if (!aiRoundCleared && dockActive.value !== 'cons' && dockActive.value !== 'sat') clearScene()
+  aiDockPinned = true
+  aiConstPinnedThisRound = true
+  aiObjectPinnedThisRound = true
+  applyDock('cons')
+  heatMode.value = false
+  filterNorads.value = null
+  compareConsts.value = []
+  filterKw.value = ''
+  consShowMap[resolved] = true
+  filterConst.value = resolved
+  consCardBound.value = true
+  cloudRevealed.value = true
+  consOrbitOn.value = true
+  consListOpen.value = false
+  dockMode.value = ''
+}
+
+
 /** 右侧星座成员列表：滚动到底部附近继续加载下一批 */
 function onConsSatScroll(ev: Event) {
   const el = ev.target as HTMLElement
@@ -1625,28 +1821,92 @@ function toggleConsHighlight(norad: number) {
  *  由 AiChatDrawer 的 round-start 事件在每轮提问开始时复位。 */
 let aiRoundCleared = false
 /** 「本轮提问是否已有动作钉住某个左侧面板」：show_satellites 默认切到卫星视图，
- *  但若同轮已打开过境 / 热力等面板，则不抢走它（集合轨道线在叠加层下于那些视图同样可见）。 */
+ *  若本轮已打开过境 / 发射站等模块，则后续画星集合的动作不再把那些视图同屏冲掉。 */
 let aiDockPinned = false
-/** 「上一轮由 AI 打开的图层」：新一轮提问开始时先关掉这一批（跨轮替换 —— 每次提问只保留本轮要求的图层）。
- *  只记 AI 打开过的，用户手动在右下角图例开的图层不受影响。 */
+/** 本轮已按「空间站位置展示」钉住：后续后端误发 open_panel heat / 碰撞动作一律跳过 */
+let aiStationPinnedThisRound = false
+/** 本轮已按「星座展示」钉住：同上，禁止误切威胁热力图 */
+let aiConstPinnedThisRound = false
+/** 本轮用户问的是具体目标/星座/空间站（非威胁类）—— 一律禁止默认打开热力图 */
+let aiObjectPinnedThisRound = false
+/** 「上一轮 AI 打开的图层」：下一轮提问开始时先关掉上一轮的（跨轮替换 → 每轮画面只保留本轮要的图层）。
+ *  只关 AI 打开过的；用户手动勾选的新建图层等图层不受影响。 */
 const aiOpenedLayers = new Set<SkyLayerKey>()
 
-/** 新一轮提问开始：复位本轮的「已清空 / 已钉面板」标志（保证下次效果前清空），
- *  并关掉上一轮 AI 打开的图层（跨轮替换：新一次提问只展示本轮要求的图层）。 */
-function onAiRoundStart() {
+const CSS_MODULE_NORADS = new Set([38761, 48274, 53239, 54216])
+
+/** 从用户原问句判断本轮展示意图：空间站 / 星座 / 一般目标；含威胁词则不钉展示（可开热力） */
+function detectAiDisplayIntent(q: string):
+  | { kind: 'station'; norad: number }
+  | { kind: 'constellation'; name: string }
+  | { kind: 'object' }
+  | null {
+  const raw = String(q || '').trim()
+  if (!raw) return null
+  const threat = /威胁|碰撞|交会|热力|conjunction|cdm|碰撞预警|碰撞风险/i.test(raw)
+  if (threat) return null
+  const lower = raw.toLowerCase()
+  // 空间站
+  if (/天宫|天和|中国空间站|tiangong|tianhe|\bcss\b/i.test(raw) || /tiangong|tianhe/.test(lower)) {
+    return { kind: 'station', norad: STATION_CSS_NORAD }
+  }
+  if (/国际空间站|\biss\b|zarya/i.test(raw) || /\biss\b|zarya/.test(lower)) {
+    return { kind: 'station', norad: STATION_ISS_NORAD }
+  }
+  if (/空间站/.test(raw)) {
+    return { kind: 'station', norad: STATION_CSS_NORAD }
+  }
+  // 常见星座关键词 → 解析到正式名
+  const constHints = [
+    'gps', 'navstar', '北斗', 'beidou', 'bds', 'glonass', 'galileo',
+    'starlink', '星链', '千帆', '银河飞船', '星网', '一网', 'kuiper', 'oneweb',
+  ]
+  for (const h of constHints) {
+    if (lower.includes(h.toLowerCase()) || raw.includes(h)) {
+      const name = resolveConstellationName(h) || resolveConstellationName(raw)
+      if (name) return { kind: 'constellation', name }
+    }
+  }
+  if (/卫星|星座/.test(raw)) return { kind: 'object' }
+  // 其它短目标名：钉住，避免后端乱开热力
+  if (raw.length <= 40 && !/你好|谢谢|帮助|怎么用|是什么意思/.test(raw)) {
+    return { kind: 'object' }
+  }
+  return null
+}
+
+/** 中国空间站 / 天宫 等名称应走空间站「位置展示」而非星座列表 */
+function isCssStationConstellationName(name?: string): boolean {
+  const s = String(name || '')
+  return /中国空间站|天宫|天和|tiangong|tianhe|\bcss\b/i.test(s)
+}
+function isIssStationConstellationName(name?: string): boolean {
+  const s = String(name || '')
+  return /国际空间站|\biss\b|zarya/i.test(s)
+}
+
+/** 每一轮提问开始：复位本轮标志；若问句明确是空间站/星座/目标展示，立刻钉住并禁止本轮开热力 */
+function onAiRoundStart(q?: string) {
   aiRoundCleared = false
   aiDockPinned = false
+  aiStationPinnedThisRound = false
+  aiConstPinnedThisRound = false
+  aiObjectPinnedThisRound = false
   if (aiOpenedLayers.size) {
     for (const k of aiOpenedLayers) skyLayers[k] = false
     aiOpenedLayers.clear()
   }
+  const intent = detectAiDisplayIntent(q || '')
+  if (!intent) return
+  aiObjectPinnedThisRound = true
+  if (intent.kind === 'station') {
+    focusStationFromAi(intent.norad)
+  } else if (intent.kind === 'constellation') {
+    focusConstellationFromAi(intent.name)
+  }
 }
 
-/** 切到「综合态势·卫星列表」并在其中定位选中某颗星（智能体拾取单星 / 图谱定位卫星共用）。
- *  用户可能在任意模块下发起（如 /situation/pass 里问某颗星）：必须把模块与地址栏一并落到 sat，
- *  口径与手动切菜单 chooseSatView 一致（先 clearScene 再 applyDock）—— 否则会停在旧模块、
- *  右侧卫星详情还会被旧模块详情（rightMode 优先级 pass > heat > site > sat）遮挡。
- *  最后收起左侧列表让位给右侧详情（与手动点列表项后的状态一致）。 */
+
 function focusSatelliteInSatView(norad: number) {
   if (!aiRoundCleared && dockActive.value !== 'sat') clearScene()
   aiDockPinned = true
@@ -1694,14 +1954,33 @@ const heatAutoSelectTick = ref(0)
  *  未知动作直接丢弃 —— 动作失败绝不能影响文字回答的呈现（两件事互不阻塞）。 */
 function onAiAction(a: AiAction) {
   switch (a.kind) {
-    case 'select_satellite':
-      // 定位并选中单星（准星 + 轨道线 + 右侧详情 + 镜头飞向），并把模块/地址栏切到 sat 视图
-      focusSatelliteInSatView(Number(a.norad))
+    case 'select_satellite': {
+      // 天宫/ISS → 空间站「位置展示」专用模型+跟随；其它 → 普通选星
+      const stationNorad = resolveStationNoradFromAi(Number(a.norad), a.name, a.cnName)
+      if (stationNorad != null) {
+        aiStationPinnedThisRound = true
+        aiObjectPinnedThisRound = true
+        focusStationFromAi(stationNorad)
+      } else {
+        aiObjectPinnedThisRound = true
+        focusSatelliteInSatView(Number(a.norad))
+      }
       break
-    case 'select_constellation':
-      // 打开星座列表并选中该星座（绘出全部成员的轨道线）；镜头按「手动进入星座模块」口径复位
-      focusConstellationInConsView(a.name)
+    }
+    case 'select_constellation': {
+      // 中国空间站/天宫 等后端常当成「星座」下发 → 改走空间站位置展示
+      if (isCssStationConstellationName(a.name)) {
+        focusStationFromAi(STATION_CSS_NORAD)
+        break
+      }
+      if (isIssStationConstellationName(a.name)) {
+        focusStationFromAi(STATION_ISS_NORAD)
+        break
+      }
+      // AI：全量星展示 + 轨道；不弹目标列表 / 成员抽屉
+      focusConstellationFromAi(a.name)
       break
+    }
     case 'compare_constellations':
       // 多星座对比：进星座列表页并按公用调色板给各星座分色（点云 + 轨道线同时着色）
       focusCompareInConsView(a.names)
@@ -1733,6 +2012,10 @@ function onAiAction(a: AiAction) {
     }
     case 'open_panel':
       if ((DOCK_TYPES as readonly string[]).includes(a.panel)) {
+        // 本轮已钉住空间站/星座/目标展示时，禁止后端误发的威胁热力图冲掉模型与轨道
+        if (a.panel === 'heat' && (aiStationPinnedThisRound || aiConstPinnedThisRound || aiObjectPinnedThisRound)) {
+          break
+        }
         aiDockPinned = true
         // 碰撞热力 + 自动选中：本次要「定位到目标卫星的交会」，不是列表里第一条别的卫星。
         // 目标 NORAD 优先取动作显式带的 norad；否则回落到当前三维场景里已选中的那颗星
@@ -1763,6 +2046,13 @@ function onAiAction(a: AiAction) {
       // 归一化在 BaseScene.showSatelliteSet 里统一做（正整数 / 去重 / MAX_SAT_SET 截断）。
       const arr = (a.norads || []).map((v) => Math.trunc(Number(v))).filter((v) => Number.isFinite(v) && v > 0)
       if (!arr.length) break
+      // 中国空间站四模块 → 走「位置展示」（专用 3D + 跟随 + 轨道），不画成散点集合
+      const cssHit = arr.filter((n) => CSS_MODULE_NORADS.has(n))
+      if (cssHit.length >= 1 && cssHit.length >= Math.ceil(arr.length * 0.5)) {
+        focusStationFromAi(STATION_CSS_NORAD)
+        break
+      }
+      aiObjectPinnedThisRound = true
       // 本轮首个展示型动作若未清空（极端情况：后端未补 clear_display），这里补一次
       if (!aiRoundCleared) { clearScene(); aiRoundCleared = true }
       // 切到卫星视图展示集合；但同轮已打开过境 / 热力等面板时不抢走它（叠加层下集合同样可见）
@@ -1771,21 +2061,24 @@ function onAiAction(a: AiAction) {
         dockMode.value = ''
       }
       // 集合与「多星座对比」是两种定位来源：互清（并让着色维度从 compare 回落，避免空图例）
+      heatMode.value = false
       compareConsts.value = []
       if (colorMode.value === 'compare') colorMode.value = 'type'
       sceneRef.value?.showSatelliteSet(arr)
       break
     }
     case 'select_conj_event': {
+      // 本轮已钉住目标/空间站/星座展示时，跳过误发的碰撞事件定位（避免切到热力图盖住模型）
+      if (aiStationPinnedThisRound || aiConstPinnedThisRound || aiObjectPinnedThisRound) break
       // 对话内事件卡 / 行内「定位」按钮 → 进碰撞热力面板、切到对应来源、直接定位该事件
       //（两端误差椭球 + 两星轨道线 + 镜头飞到交会点），随后收起面板让位给地球（与手动点列表项一致）。
       // 数据来源两条路都覆盖：卡片已取到 data 就直接用；行内按钮只带 source + key，由 locateConjEvent 现场查 /cgi/event/one。
-      const src = a.source === 'cri' ? 'cri' : 'local'
+      const src = a.source === 'cri' ? 'cri' : 'conj'
       void locateConjEvent(src, a).then((pair) => {
         if (!pair) return
+        if (aiStationPinnedThisRound || aiConstPinnedThisRound || aiObjectPinnedThisRound) return
         aiDockPinned = true
         applyDock('heat')
-        heatSource.value = src
         pickHeatPair(pair)
         dockMode.value = ''
       })
@@ -1799,10 +2092,13 @@ function onAiAction(a: AiAction) {
       // 前台详情面板已无「知识图谱关联」块：该动作退化为仅按 NORAD 定位选中该星（并切到 sat 视图）；
       // 其他类型前台没有通用图谱页，退化为按名称选中对应星座。
       if (a.kgType === 'satellite') {
-        focusSatelliteInSatView(Number(a.key))
+        const sn = resolveStationNoradFromAi(Number(a.key), String(a.key), String(a.key))
+        if (sn != null) focusStationFromAi(sn)
+        else { aiObjectPinnedThisRound = true; focusSatelliteInSatView(Number(a.key)) }
       } else if (a.kgType === 'constellation') {
-        // 与智能体 select_constellation 同一条链路（含镜头复位，口径同手动进入星座模块）
-        focusConstellationInConsView(a.key)
+        if (isCssStationConstellationName(a.key)) focusStationFromAi(STATION_CSS_NORAD)
+        else if (isIssStationConstellationName(a.key)) focusStationFromAi(STATION_ISS_NORAD)
+        else focusConstellationFromAi(a.key)
       }
       break
     case 'open_url':
@@ -1868,7 +2164,7 @@ const aiTarget = computed(() =>
 
     <!-- 左侧太空安全目标列表面板（dockMode==='sat' 时显示，自管过渡动画）；
          桌面端缺省收起（satPanelClosed），由左缘外拉 tag / 底部 dock 拉出 -->
-    <SatListPanel v-if="isMobile || !satPanelClosed" @pick="pickFromList" @close="closeSatPanel" @source="switchSource" @pick-sat="pickConsSat" @cons-show="toggleConsShow" @open-eph="onOpenEph" />
+    <SatListPanel v-if="isMobile || !satPanelClosed" @pick="pickFromList" @close="closeSatPanel" @source="switchSource" @pick-sat="pickConsSat" @cons-show="toggleConsShow" @station-show="toggleStationShow" @open-eph="onOpenEph" />
 
     <!-- 左侧发射站列表面板（dockMode==='site' 时显示，自管过渡动画） -->
     <SiteListPanel @pick="pickFromSiteList" @close="closeSitePanel" />
@@ -1877,7 +2173,8 @@ const aiTarget = computed(() =>
     <ConstellationPanel @pick="pickConstellation" @close="closeConsPanel" />
 
     <!-- 左侧碰撞热力面板（dockMode==='heat' 时显示，自管过渡动画） -->
-    <CdmHeatmap :auto-select-tick="heatAutoSelectTick" @close="closeHeatPanel" @select="pickHeatPair" @pick-ephem="onPickEphEvent" />
+    <CdmHeatmap :auto-select-tick="heatAutoSelectTick" @close="closeHeatPanel" @select="pickHeatPair"
+      @retry="retryHeat" @open-ephem="onOpenEphemFromHeat" />
 
     <!-- 左侧城市过境面板（dockMode==='pass' 时显示，自管过渡动画） -->
     <PassPanel @pick="pickFromPassList" @close="closePassPanel" />
@@ -1901,12 +2198,12 @@ const aiTarget = computed(() =>
       @close="closeMultiRegionPanel"
     />
 
-    <!-- 右侧星历分析面板（ephOpen 独立开关，与左侧面板可同时展开）：上传 / 内置样本 + 质量评估 + 威胁筛选事件列表 -->
+    <!-- 右侧星历分析面板（ephOpen 独立开关，与左侧面板可同时展开）：星历上传 / 官方星历 + 服务器威胁分析 -->
     <EphemPanel
       @close="closeEphemPanel"
       @focus-set="focusActiveEphem"
-      @focus-event="focusEphemEvent"
       @ai-explain="onEphemAiExplain"
+      @show-in-heat="onShowInHeat"
     />
 
     <!-- 仿真时间条：常驻底部（在按钮栏下方），拖动播放头直接改写虚拟时刻；
@@ -1932,14 +2229,15 @@ const aiTarget = computed(() =>
 
     <!-- 底部 dock 导航栏（极窄、精致，预留后续功能） -->
     <div class="constel-dock">
-      <!-- 安全热力图：直接弹出「交会分析热力」面板（与专家弹窗同为底部居中卡片），不再弹来源菜单 -->
-      <button class="dock-btn" :class="{ on: dockActive === 'heat' }" @click="openCriHeatDock"
-        title="安全热力图：展示交会分析（CRI/CRP）热力事件，点击弹出底部热力面板">
-        <span class="dock-ico">✱</span><span class="dock-txt">安全热力图</span>
+      <!-- 安全热力图：直接弹出安全热力面板（与专家弹窗同为底部居中卡片），面板内切换两个标签。
+           按钮高亮跟随 dockActive：面板缩回但威胁红云仍在展示时保持高亮，再点一次整体退出。 -->
+      <button class="dock-btn" :class="{ on: dockActive === 'heat' }" @click="openHeatDock"
+        title="安全热力：卫星轨道威胁事件 / 卫星轨道威胁事件（星历增强），点击弹出底部热力面板">
+        <span class="dock-ico">✱</span><span class="dock-txt">威胁热力图</span>
       </button>
-      <!-- 太空安全专家入口（原「空间态势智能体」，前台免登录，/cgi/ai 只读工具 + 限流）：
+      <!-- 太空AI专家入口（原「空间态势智能体」，前台免登录，/cgi/ai 只读工具 + 限流）：
            与 dock 的其它项不同，它不切换三维视图，只开一个右侧浮层，故不高亮 dockActive -->
-      <button class="dock-btn" :class="{ on: aiOpen }" title="太空安全专家：用自然语言查询目标、碰撞风险与空间环境" @click="aiOpen = !aiOpen">
+      <button class="dock-btn" :class="{ on: aiOpen }" title="太空AI专家：编目总览、目标查询、碰撞预警、卫星档案、星座档案" @click="aiOpen = !aiOpen">
         <span class="dock-ico">◈</span><span class="dock-txt">AI专家</span>
       </button>
       <!-- 初始化窗口：整页刷新（重新拉取全部数据与三维现场，等价于浏览器刷新） -->
@@ -2217,49 +2515,64 @@ const aiTarget = computed(() =>
         <div class="cd-head">
           <div class="cd-head-main">
             <b class="cd-name">{{ heatSel.name_a }} × {{ heatSel.name_b }}</b>
-            <span class="cd-sub">碰撞事件 · TCA {{ heatSel.tca }} UTC</span>
+            <span class="cd-sub">
+              {{ heatSource === 'tle-eph' ? '精密星历事件' : '轨道威胁事件' }} · TCA {{ heatSel.tca }} UTC
+            </span>
           </div>
           <button class="cd-close" title="收起详情" @click="heatOpen = false">✕</button>
         </div>
+
         <div class="cd-block">
           <div class="cd-title">碰撞参数</div>
           <div class="cd-grid">
             <div class="cd-item"><span>目标 A</span><b>{{ heatSel.name_a }}<i class="cd-norad">NORAD {{ heatSel.norad_a }}</i></b></div>
             <div class="cd-item"><span>目标 B</span><b>{{ heatSel.name_b }}<i class="cd-norad">NORAD {{ heatSel.norad_b }}</i></b></div>
-            <div class="cd-item"><span>{{ isLevelHeat ? '风险等级' : '碰撞概率' }}</span><b class="heat-strong" :style="{ color: heatSel.color }">{{ heatMetricShort(heatSel) }}</b></div>
+            <div class="cd-item"><span>碰撞概率</span><b class="heat-strong" :style="{ color: heatSel.color }">{{ heatMetricShort(heatSel) }}</b></div>
             <div class="cd-item"><span>最近距离</span><b>{{ fmtNum(heatSel.miss_distance_km, 3) }} km</b></div>
             <div class="cd-item"><span>相对速度</span><b>{{ fmtNum(heatSel.rel_speed_km_per_s, 2) }} km/s</b></div>
             <div class="cd-item"><span>硬体半径</span><b>{{ fmtNum(heatSel.hard_body_radius_m, 1) }} m</b></div>
-            <div class="cd-item"><span>事件编号</span><b>{{ heatSel.cdm_id }}</b></div>
           </div>
+          <div v-if="heatEphDetail" class="cd-note">
+            miss 分量（R/T/N）：{{ fmtKm(heatEphDetail.miss.r_km) }} / {{ fmtKm(heatEphDetail.miss.t_km) }} / {{ fmtKm(heatEphDetail.miss.n_km) }}
+          </div>
+          <div class="cd-note">坐标系：计算用 J2000，三维显示用 TEME。</div>
         </div>
-        <!-- 误差椭球（经验 σ）：三维场景里按真实比例画 RTN 三轴椭球；此处给出数值并显著标注口径 -->
-        <div class="cd-block">
-          <div class="cd-title">误差椭球 · 经验 σ</div>
-          <div v-if="conjEllipsoidLoading" class="cd-hint">读取中…</div>
-          <div v-else-if="conjEllipsoidError" class="cd-hint err">{{ conjEllipsoidError }}</div>
-          <template v-else-if="conjEllipsoid && (conjEllipsoid.a || conjEllipsoid.b)">
+
+        <div v-if="heatEphDetailLoading" class="cd-block"><div class="cd-none">正在读取事件详情…</div></div>
+        <div v-else-if="heatEphDetailError" class="cd-block"><div class="cd-none err">{{ heatEphDetailError }}</div></div>
+        <template v-else-if="heatEphDetail">
+          <div class="cd-block">
+            <div class="cd-title">概率与不确定度</div>
             <div class="cd-grid">
-              <div v-for="side in [conjEllipsoid.a, conjEllipsoid.b]" :key="side?.norad || Math.random()" class="cd-item">
-                <span>{{ side ? `${side.name} · 径向/沿迹/法向 σ` : '目标数据缺失' }}</span>
-                <b v-if="side">
-                  {{ fmtNum(side.sigma.sr, 1) }} / {{ fmtNum(side.sigma.st, 1) }} / {{ fmtNum(side.sigma.sn, 1) }} km
-                  <i class="cd-norad">预报 {{ fmtNum(side.dtHours, 1) }} h · {{ side.sigmaSource === 'model' ? '经验分桶' : '保守兜底' }}</i>
-                </b>
-                <b v-else>—</b>
-              </div>
+              <div class="cd-item"><span>Pc（Foster 2D）</span><b>{{ fmtSci(heatEphDetail.pc.value) }}</b></div>
+              <div class="cd-item"><span>PcMax（Alfano）</span><b>{{ fmtSci(heatEphDetail.pc.max) }}</b></div>
+              <div class="cd-item"><span>本星 σ<sub>T</sub></span><b>{{ fmtKm(heatEphDetail.primary.sigma_t_km, 3) }}<i class="cd-norad">{{ sigmaSrcLabel(heatEphDetail.pc.sigma_p_src) }}</i></b></div>
+              <div class="cd-item"><span>对方 σ<sub>T</sub></span><b>{{ fmtKm(heatEphDetail.secondary.sigma_t_km, 3) }}<i class="cd-norad">{{ sigmaSrcLabel(heatEphDetail.pc.sigma_s_src) }}</i></b></div>
+              <div class="cd-item"><span>对方根数历元</span><b>{{ heatEphDetail.secondary.epoch || '—' }} UTC</b></div>
+              <div class="cd-item"><span>对方龄期</span><b>{{ fmtHours(heatEphDetail.secondary.age_h) }}</b></div>
+              <div class="cd-item"><span>星历生成时间</span><b>{{ heatEphDetail.primary.eph_created || '—' }} UTC</b></div>
+              <div class="cd-item"><span>星历龄期</span><b>{{ fmtHours(heatEphDetail.primary.eph_age_h) }}</b></div>
             </div>
-            <div class="cd-hint warn">
-              经验 σ：由「同一目标连续两条 TLE 的预报差」按 轨道区域 × 目标类型 × 预报时长 分桶统计，
-              反映 TLE 自洽性，<b>不是定轨协方差</b>。真实协方差须来自外部精密轨道（OPR/OPM）。
-              <template v-if="covMag > 1.05">
-                <br>三维中已放大 <b>×{{ Math.round(covMag) }}</b> 显示（真实 σ 只有几十公里，
-                按实际比例画在默认机位下看不见）；上表数值为真实 σ。
-              </template>
+            <div v-if="heatEphDetail.pc.diluted" class="cd-note is-warn">
+              数据不足：Pc 极低但 PcMax ≥ 1e-4，当前协方差不足以支撑「安全」结论。
             </div>
-          </template>
-          <div v-else class="cd-hint">未取到该事件的椭球数据（该目标缺 TLE 或传播失败）</div>
-        </div>
+            <div v-else-if="heatEphDetail.pc.level === 'insufficient'" class="cd-note is-warn">
+              数据不足：Pc 极低但 PcMax 已达高危门限，建议结合官方 CDM 交叉判断。
+            </div>
+          </div>
+
+          <div v-if="heatSource === 'tle-eph'" class="cd-block">
+            <div class="cd-title">官方 CDM 对比</div>
+            <div v-if="heatEphDetail.cdm" class="cd-grid">
+              <div class="cd-item"><span>CDM 编号</span><b>{{ heatEphDetail.cdm.cdm_id }}</b></div>
+              <div class="cd-item"><span>官方 Pc</span><b>{{ fmtSci(heatEphDetail.cdm.pc) }}</b></div>
+              <div class="cd-item"><span>官方最近距离</span><b>{{ fmtKm(heatEphDetail.cdm.miss_km) }}</b></div>
+              <div class="cd-item"><span>ΔTCA</span><b>{{ heatEphDetail.cdm.dtca_s == null ? '—' : fmtNum(heatEphDetail.cdm.dtca_s, 0) + ' s' }}</b></div>
+            </div>
+            <div v-else class="cd-note">未匹配到官方 CDM（NORAD 无序对相同且 |ΔTCA| ≤ 120 s）。</div>
+          </div>
+        </template>
+
         <!-- 该「碰撞云」覆盖区域内的全部碰撞列表：点击事件点聚合出的同一片云（同一对卫星多次交会 / 邻近卫星对交会），
              点击某一项切换聚焦事件（重画两星轨道 + 卫星端点标记） -->
         <div v-if="heatSelList.length" class="cd-block">
@@ -2277,7 +2590,7 @@ const aiTarget = computed(() =>
                 <span class="cdm-tag">TCA {{ c.tca }}</span>
               </div>
               <div class="cdm-grid">
-                <span>{{ isLevelHeat ? '等级' : '概率' }} <b :style="{ color: c.color }">{{ heatMetricShort(c) }}</b></span>
+                <span>等级 <b :style="{ color: c.color }">{{ heatMetricShort(c) }}</b></span>
                 <span>距离 <b>{{ fmtNum(c.miss_distance_km, 3) }} km</b></span>
               </div>
             </li>
@@ -2358,7 +2671,7 @@ const aiTarget = computed(() =>
       <template v-else-if="rightMode === 'ephEv' && threatSelected">
         <div class="cd-head">
           <div class="cd-head-main">
-            <b class="cd-name">威胁事件 · {{ activeEphem?.name || `NORAD ${threatSelected.selfNorad}` }} × {{ threatSelected.otherName }}</b>
+            <b class="cd-name">威胁事件 · {{ threatSelected.primaryName || activeEphem?.name || `NORAD ${threatSelected.selfNorad}` }} × {{ threatSelected.otherName }}</b>
           </div>
           <div class="cd-head-actions">
             <button class="cd-close" title="收起详情（保留三维高亮）" @click="ephEvOpen = false">✕</button>
@@ -2375,14 +2688,16 @@ const aiTarget = computed(() =>
             <div class="cd-item"><span>碰撞概率</span><b>{{ threatSelected.pc > 0 ? threatSelected.pc.toExponential(2) : '0' }}</b></div>
             <div class="cd-item">
               <span>风险等级</span>
-              <b :style="{ color: EPH_EV_LEVEL[threatSelected.level].color }">{{ EPH_EV_LEVEL[threatSelected.level].label }}</b>
+              <b :style="{ color: colorForLevel(threatSelected.level) }">
+                {{ threatSelected.level ? labelForLevel(threatSelected.level) : '—' }}
+              </b>
             </div>
           </div>
         </div>
         <div class="cd-block">
           <div class="cd-title">双方目标</div>
           <div class="cd-grid is-inline">
-            <div class="cd-item"><span>本星</span><b>{{ activeEphem?.name || '—' }}<i class="cd-norad">NORAD {{ threatSelected.selfNorad }}</i></b></div>
+            <div class="cd-item"><span>本星</span><b>{{ threatSelected.primaryName || activeEphem?.name || '—' }}<i class="cd-norad">NORAD {{ threatSelected.selfNorad }}</i></b></div>
             <div class="cd-item"><span>对方</span><b>{{ threatSelected.otherName }}<i class="cd-norad">NORAD {{ threatSelected.otherNorad }}</i></b></div>
           </div>
         </div>
@@ -2510,9 +2825,9 @@ const aiTarget = computed(() =>
     <button
       v-if="showSatTag"
       class="edge-tag edge-tag-left"
-      title="展开太空安全目标列表"
+      title="展开太空目标列表"
       @click="openSatPanel"
-    >太空安全目标列表</button>
+    >太空目标列表</button>
 
     <!-- 右缘外拉 tag：与左缘「太空安全目标列表」对称（竖排同字号），点击拉出星历面板 -->
     <button

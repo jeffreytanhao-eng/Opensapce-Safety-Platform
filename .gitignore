@@ -17,3 +17,9 @@ openspace-full-*.sql
 # 运行时数据（上传文件 / 报告产物 / 日志）：部署后由服务写入
 server/public/uploads/*
 !server/public/uploads/.gitkeep
+# heat-sidecar 星历文件缓存（体积大，运行时生成）
+heat-sidecar/data/
+heat-sidecar/dist/
+# 私有核心算法（04 私有文档实现，严禁入库/外传）
+heat-core/
+heat-sidecar/private-core/

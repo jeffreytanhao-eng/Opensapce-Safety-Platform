@@ -85,6 +85,16 @@ export interface ConstellationPoint {
 /** 点云紧凑编码的类型枚举（与后端 POINT_TYPE_KEYS 一致；后端遇表外值会按序追加，
  *  故一律以响应里的 typeIndex 为准，这里只作为缺省兜底） */
 export const DEFAULT_POINT_TYPE_KEYS = ['UNKNOWN', 'PAYLOAD', 'ROCKET_BODY', 'DEBRIS']
+
+/** 目标类型归一：统一成界面 / 图例 / 过滤使用的 4 个粗类型（TYPE_KEYS 口径）。
+ *  AOE 库的 typeIndex 用下划线（ROCKET_BODY），而 TYPE_KEYS / satPanel.typeF 用空格（ROCKET BODY）；
+ *  若直接透传，`satPanel.typeF['ROCKET_BODY']` 为 undefined → 列表与类型开关永远不显示该类目标。
+ *  其余表外枚举（如 TBA）统一回落 UNKNOWN，保证三维显隐与面板勾选口径一致。 */
+export function normalizeObjectType(t: string | null | undefined): string {
+  const s = String(t ?? '').trim().toUpperCase().replace(/_/g, ' ')
+  if (s === 'PAYLOAD' || s === 'DEBRIS' || s === 'ROCKET BODY') return s
+  return 'UNKNOWN'
+}
 /** 点云紧凑编码的轨道区域枚举（与后端 POINT_REGIME_KEYS 一致） */
 export const DEFAULT_POINT_REGIME_KEYS = ['LEO', 'MEO', 'GEO', 'HEO', 'OTHER']
 
@@ -123,7 +133,7 @@ export function decodeConstellation(res: ConstellationSnapshot | null | undefine
   return list.map((r) => ({
     norad_id: r[0],
     object_name: names[r[1]] || '',
-    object_type: types[r[2]] || 'UNKNOWN',
+    object_type: normalizeObjectType(types[r[2]]),
     regime: regimes[r[3]] || 'OTHER',
     x: r[4],
     y: r[5],

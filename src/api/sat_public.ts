@@ -3,10 +3,9 @@
  * 供免登录页面（如 /test 3D 轨道视图）消费，与后台 /api 卫星逻辑保持一致。
  * 类型收口于 ./satTypes，保证字段结构前后端一致；函数走 httpCgi（baseURL='/cgi'），不触发登录校验。
  */
-import { httpCgi } from '@/utils/request'
+import { httpCgi, httpCgi2 } from '@/utils/request'
 import type { ConstellationSnapshot, SatTleItem } from './satTypes'
 import type { ConstellationItem } from './satTypes'
-import type { ConjEvent, ConjQuery } from './satTypes'
 import type { KgNeighbors } from './satTypes'
 
 /** 三维视图数据源：tle=国际库（sat_tle，默认）/ aoe=太空地图 AOE 库（sat_aoe）。
@@ -76,6 +75,27 @@ export function getSatHistoryPublic(noradId: number | string, source: SatSource 
 /** 全部星座（下拉用，免登录） */
 export function listAllConstellationsPublic() {
   return httpCgi<ConstellationItem[]>({ url: '/sat_constellation/all', method: 'get' })
+}
+
+/** 星座「首发 / 最近发射」（sidecar 按 sat_tle.launch_date 聚合，随每日 GP 同步刷新） */
+export interface ConstellationLaunch {
+  code: string
+  name: string
+  name_en: string
+  /** 仍在轨成员中最早一次发射（历史首发可能已再入，仅作参考） */
+  first_launch: string
+  /** 仍在轨成员中最晚一次发射 */
+  last_launch: string
+  /** 参与统计的成员数 */
+  n: number
+}
+
+/** 星座发射日期列表（/cgi2 免登录、只读）：替代前端写死的首发/最近发射日期 */
+export function listConstellationLaunches() {
+  return httpCgi2<{ list: ConstellationLaunch[]; generated_at: string }>({
+    url: '/cons/launch',
+    method: 'get'
+  })
 }
 
 /** 卫星所属星座条目（sat_constellation 主表的精简字段） */
@@ -162,6 +182,8 @@ export interface CdmHeatEvent {
   metric_text: string
   /** 按日切片归属天（1..days；days<=0「全部」时为 0） */
   day: number
+  /** heat-sidecar 计算的 Alfano 缩放上界（官方 CDM 来源无此字段）：Pc 极低但上界达危险门限时标「数据不足」 */
+  pc_max?: number
   /* 以下为「本项目 SGP4 初筛」（/cgi/sat_conj/heatmap）与「交会分析」（/cgi/sat_cri/heatmap）专有字段；
      官方 CDM 来源不含这些字段，前端按 [heatSource] 区分口径后使用 */
   cri?: number
@@ -172,41 +194,7 @@ export interface CdmHeatEvent {
   altitude?: number
 }
 
-/** 交会事件一端的经验误差椭球（TCA 处；σ 单位 km） */
-export interface ConjEllipsoidSide {
-  norad: number
-  name: string
-  objectType: string
-  regime: string
-  /** TCA 距该目标 TLE 历元的时长（小时）：σ 的分档依据 */
-  dtHours: number
-  /** TCA 处 ECI(TEME) 位置 km：椭球中心 */
-  pos: { x: number; y: number; z: number }
-  /** RTN 基单位向量（ECI 分量）：椭球三轴方向 */
-  r: { x: number; y: number; z: number }
-  t: { x: number; y: number; z: number }
-  n: { x: number; y: number; z: number }
-  /** 三轴 σ（km）：径向 / 沿迹 / 法向 */
-  sigma: { sr: number; st: number; sn: number }
-  /** model = 经验分桶模型；fallback = 无模型时的保守兜底公式 */
-  sigmaSource: string
-}
-
-/** 交会事件两端的经验误差椭球（⚠ 经验 σ，非真实协方差） */
-export interface ConjEllipsoidResult {
-  tca: number | null
-  model_source: string
-  a: ConjEllipsoidSide | null
-  b: ConjEllipsoidSide | null
-  note: string
-}
-
-/** 取交会事件两端的经验误差椭球（三维场景绘制 + 详情面板展示用） */
-export function getConjEllipsoid(params: { norad_a: number; norad_b: number; tca: number }) {
-  return httpCgi<ConjEllipsoidResult>({ url: '/sat_conj/ellipsoid', method: 'get', params })
-}
-
-/** 图例条目（后端下发，前端直接渲染，不做阈值换算） */
+/** 图例条目（保留结构以兼容 HeatmapResult；前端已统一按 heat/riskLevels.ts 的 Pc 分级，不再读取后端图例） */
 export interface HeatLegendItem {
   color: string
   label: string
@@ -231,42 +219,23 @@ export interface HeatmapResult {
   legend: HeatLegendItem[]
   /** 按日分组计数（days<=0「全部」时为空数组） */
   day_groups: HeatDayGroup[]
-  /** 指标名（'碰撞概率' / '风险等级' / '交会风险概率 CRP'），供面板标题直接展示 */
+  /** 指标名（三标签统一为碰撞概率 Pc），供面板标题直接展示 */
   metric_label: string
-  /** 口径标识（'pc' 官方 CDM 碰撞概率 / 'miss' 本项目初筛风险等级 / 'cri' 交会分析 CRP） */
-  metric: 'pc' | 'miss' | 'cri'
-}
-
-/** 总交会库批次条目（/cgi/sat_conj/batches 下发，供前台「数据批次」下拉回看历史全量批次） */
-export interface ConjBatchItem {
-  id: number
-  /** 扫描完成时间（DB created_at，YYYY-MM-DD HH:mm:ss） */
-  created_at: string
-  /** 本批次接近事件总数（含全部等级） */
-  events: number
-  /** 参与扫描的目标数 */
-  total_objects: number
-  /** 扫描范围文案（全量批次恒为「全量扫描（全体 × 全体）」） */
-  scope: string
-  /** 扫描模式（恒为 'all'） */
-  mode?: string
+  /** 口径标识（三标签统一为官方 CDM 口径的碰撞概率 Pc） */
+  metric: 'pc'
+  /** sidecar 核心是否就绪（仅 TLE/AOE 标签返回；false 时前端显示「核心算法模块未加载」空状态） */
+  ready?: boolean
+  /** 未就绪原因（CORE_NOT_LOADED / DB_DOWN 等），仅 ready=false 时有效 */
+  reason?: string | null
+  /** 主星口径：official = 官方星历；uploaded = 已上传星历（03 §15.7） */
+  primary_scope?: 'official' | 'uploaded'
+  ephem_id?: string | null
 }
 
 /** 碰撞热力（免登录，Space-Track 官方 CDM）：未来 heatDays 天窗口内的碰撞事件，可选 norad 只看该卫星（A 或 B）涉及的事件 */
 export function getCdmHeatmap(params?: { days?: number; norad?: number }) {
   return httpCgi<HeatmapResult>({
     url: '/sat_cdm/heatmap',
-    method: 'get',
-    params
-  })
-}
-
-/** 碰撞热力（免登录，本项目 SGP4 初筛）：sat_conjunction 记录 + 现行 TLE 在 TCA 时刻传播出的 ECI 坐标，
- *  与官方 CDM 同一坐标口径；collision_probability 为 crp（近似交会概率，无协方差，量级与官方 Pc 不可比）。
- *  run_id 可选：不传 = 最近一次全量（全体 × 全体）批次；传入 = 回看指定历史全量批次。 */
-export function getConjHeatmap(params?: { days?: number; norad?: number; run_id?: number }) {
-  return httpCgi<HeatmapResult>({
-    url: '/sat_conj/heatmap',
     method: 'get',
     params
   })
@@ -302,91 +271,7 @@ export function listCdmPublic(params?: { page?: number; pageSize?: number; keywo
   })
 }
 
-/** 总交会库批次列表（免登录，本项目 SGP4 初筛）：最近 N 个「全体 × 全体」全量批次，供前台回看历史总库 */
-export function getConjBatches(limit?: number) {
-  return httpCgi<{ list: ConjBatchItem[]; total: number }>({
-    url: '/sat_conj/batches',
-    method: 'get',
-    params: limit ? { limit } : undefined
-  })
-}
-
-/** 接近事件分页（免登录，本项目 SGP4 初筛）：总交会库当前批次的接近事件明细，
- *  与后台 /api/sat_conj/list 同一过滤口径（关键词 / 等级 / TCA 日期范围 / run_id），
- *  不做 SGP4 传播、不限等级（含「关注 info」），按最近距离升序。
- *  供前台碰撞热力面板「本批次交会数据」列表检索。 */
-export function listConjPublic(params?: ConjQuery) {
-  return httpCgi<{ list: ConjEvent[]; total: number; page: number; pageSize: number; run_id: number | null }>({
-    url: '/sat_conj/list',
-    method: 'get',
-    params
-  })
-}
-
-/** 交会分析库表明细行（/cgi/sat_cri/list 下发）：sat_cri_conjunction 原始字段（CRI/CRP 风险指数模型，
- *  《空间物体交会风险指数模型》2026-1，无协方差）+ 后端按 CRP 五级算好的 color / metric_text，
- *  供「交会分析热力」面板的列表渲染与点选绘制（与 /cgi/sat_conj/list、/cgi/sat_cdm/list 含义对称）。 */
-export interface CriListItem {
-  id: number
-  run_id: number
-  tca: string
-  norad_a: number
-  name_a: string
-  norad_b: number
-  name_b: string
-  /** 最近距离（km） */
-  min_distance: number
-  /** 相对速度（km/s） */
-  rel_speed: number
-  altitude: number
-  /** 交会风险指数 CRI */
-  cri: number
-  /** 交会风险概率 CRP */
-  crp: number
-  /** CRP 五级风险（1 极高 ~ 5 极低） */
-  risk_level: number
-  /** 最近距离五级（1 ~ 5） */
-  miss_level: number
-  level: 'danger' | 'warning' | 'info'
-  /** 分档配色（按 CRP 五级口径，与热力云同一套阈值） */
-  color: string
-  /** 风险文案（极高 / 高 / 中 / 低 / 极低） */
-  metric_text: string
-}
-
-/** 交会分析热力（免登录，本项目 CRI/CRP 风险指数模型）：sat_cri_conjunction 记录 + 现行 TLE 在 TCA 时刻
- *  传播出的 ECI 坐标，与 /cgi/sat_conj/heatmap、/cgi/sat_cdm/heatmap 同一坐标口径（三来源可在同场景直接对比）。
- *  collision_probability 为 CRP（交会风险概率），按 PDF 的 CRI/CRP 模型算得，非官方 Pc。
- *  run_id 可选：不传 = 最近一次全量（全体 × 全体）批次；传入 = 回看指定历史全量批次。 */
-export function getCriHeatmap(params?: { days?: number; norad?: number; run_id?: number }) {
-  return httpCgi<HeatmapResult>({
-    url: '/sat_cri/heatmap',
-    method: 'get',
-    params
-  })
-}
-
-/** 交会分析明细分页（免登录，本项目 CRI/CRP 模型）：当前批次（heatBatchRunId 指定 / 后端默认最近全量批次）
- *  的交会事件明细，检索口径与 /cgi/sat_conj/list 一致（关键词 / 等级 / TCA 日期范围 / run_id），
- *  按最近距离升序；color / metric_text 由后端按 CRP 五级算好下发。 */
-export function listCriPublic(params?: ConjQuery) {
-  return httpCgi<{ list: CriListItem[]; total: number; page: number; pageSize: number; run_id: number | null }>({
-    url: '/sat_cri/list',
-    method: 'get',
-    params
-  })
-}
-
-/** 交会分析批次列表（免登录，本项目 CRI/CRP 模型）：最近 N 个「全体 × 全体」全量批次，供前台回看历史 */
-export function getCriBatches(limit?: number) {
-  return httpCgi<{ list: ConjBatchItem[]; total: number }>({
-    url: '/sat_cri/batches',
-    method: 'get',
-    params: limit ? { limit } : undefined
-  })
-}
-
 export type { ConstellationPoint, SatTleItem, ConstellationSnapshot } from './satTypes'
-export { decodeConstellation } from './satTypes'
+export { decodeConstellation, normalizeObjectType } from './satTypes'
 export type { ConstellationItem } from './satTypes'
 export type { ConjEvent, ConjQuery } from './satTypes'
