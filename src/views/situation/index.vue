@@ -1705,7 +1705,7 @@ function resolveStationNoradFromAi(norad?: number, name?: string, cnName?: strin
   if (n === STATION_CSS_NORAD || n === STATION_ISS_NORAD) return n
   const blob = `${name || ''} ${cnName || ''}`.toUpperCase()
   if (!blob.trim()) return Number.isFinite(n) && n > 0 ? null : null
-  if (/天宫|中国空间站|TIANHE|CSS|TIANGONG/.test(`${name || ''}${cnName || ''}`) || /TIANHE|TIANGONG|\bCSS\b/.test(blob)) {
+  if (/天宫|天和|中国空间站|TIANHE|CSS|TIANGONG/.test(`${name || ''}${cnName || ''}`) || /TIANHE|TIANGONG|\bCSS\b/.test(blob)) {
     return STATION_CSS_NORAD
   }
   if (/国际空间站|ISS|ZARYA/.test(`${name || ''}${cnName || ''}`) || /\bISS\b|ZARYA/.test(blob)) {
@@ -1786,16 +1786,26 @@ function focusConstellationFromAi(name?: string) {
   aiDockPinned = true
   aiConstPinnedThisRound = true
   aiObjectPinnedThisRound = true
+  // 从空间站「位置展示」切过来时常跳过 clearScene，必须清掉 stationFocus，
+  // 否则独显旁路 / 选中态会干扰星座点云与 aiTarget。
+  stationFocus.value = null
+  if (hasSel.value) sceneRef.value?.resetSelected(false)
   applyDock('cons')
   heatMode.value = false
   filterNorads.value = null
   compareConsts.value = []
   filterKw.value = ''
+  // 只点亮目标星座卡片，避免残留其它 consShowMap 键干扰掩码
+  for (const k of Object.keys(consShowMap)) delete consShowMap[k]
   consShowMap[resolved] = true
+  const prevConst = filterConst.value
   filterConst.value = resolved
   consCardBound.value = true
   cloudRevealed.value = true
+  // BaseScene 的 filterConst watch 在换星座时会把 consOrbitOn 打回 false；
+  // 同 tick 里先写 true 会被该 watch 覆盖，故 nextTick 再强制点亮「轨道展示」。
   consOrbitOn.value = true
+  if (prevConst !== resolved) nextTick(() => { consOrbitOn.value = true })
   consListOpen.value = false
   dockMode.value = ''
 }
@@ -2028,7 +2038,10 @@ function onAiAction(a: AiAction) {
             : (hasSel.value && Number.isFinite(cur) && cur > 0 ? cur : null)
         }
         // 星座面板按「手动进入星座模块」口径切（先 clearScene 复位镜头与残留态），其余面板行为不变
-        if (a.panel === 'cons') focusConstellationInConsView()
+        if (a.panel === 'cons') {
+          // 本轮已钉星座展示则保持现状（避免无 name 的默认星座/侧栏路径冲掉 GPS 等）
+          if (!aiConstPinnedThisRound) focusConstellationInConsView()
+        }
         else applyDock(a.panel as DockType)
         // selectFirst：打开面板后自动选中列表第一条（目前仅碰撞热力面板实现 ——
         // 「交会 / 碰撞」类问题打开 heat 后直接展示目标卫星的第一条交会信息；无数据则只停在页面）
@@ -2052,6 +2065,8 @@ function onAiAction(a: AiAction) {
         focusStationFromAi(STATION_CSS_NORAD)
         break
       }
+      // 本轮已钉星座全量展示：show_satellites 会清 filterConst/consCardBound，导致地球空白，跳过
+      if (aiConstPinnedThisRound) break
       aiObjectPinnedThisRound = true
       // 本轮首个展示型动作若未清空（极端情况：后端未补 clear_display），这里补一次
       if (!aiRoundCleared) { clearScene(); aiRoundCleared = true }
@@ -2085,7 +2100,10 @@ function onAiAction(a: AiAction) {
       break
     }
     case 'clear_display':
-      // 清空上一轮展示效果（过滤条件 / 集合轨道线 / 选中目标）；由后端在每轮首个展示型动作前自动下发
+      // 本轮已钉住空间站/星座/目标展示时，禁止晚到的 clear_display 把大屏清空
+      // （round-start / select_constellation 之后再清，会出现「目标已切换→已取消选中」且地球空白）
+      if (aiStationPinnedThisRound || aiConstPinnedThisRound || aiObjectPinnedThisRound) break
+      // 清空上一轮展示效果（轨道线 / 星座过滤 / 选中目标），由后端在每轮首个展示型动作前自动下发
       if (!aiRoundCleared) { clearScene(); aiRoundCleared = true }
       break
     case 'kg_focus':
