@@ -42,8 +42,8 @@ export type AiAction =
   /** 选中某星座（按名称过滤并绘制该星座全部卫星的轨道线） */
   | { kind: 'select_constellation'; name: string }
   /** 多星座对比：一次把多个星座在三维里同时着色展示（各用一个公用调色板色，点云 + 轨道线一起着色），
-   *  并切到星座列表视图。names 为星座名称数组（去重、2~10 个）；前端先写对比集再进模块，
-   *  避免被「默认星座」覆盖。多条 select_constellation 会互相覆盖，故多星座对比一律用本动作。 */
+   *  并切到卫星列表模块。names 为星座名称数组（去重、2~10 个）；前端先写对比集再进模块。
+   *  多条 select_constellation 会互相覆盖，故多星座对比一律用本动作。 */
   | { kind: 'compare_constellations'; names: string[] }
   /** 定位并选中某个发射场（按 launch_site.id）；前端打开发射站面板、高亮该站并把镜头带过去。
    *  name 为发射站展示名（可选，仅用于对话轨迹文案）。 */
@@ -61,7 +61,8 @@ export type AiAction =
    *  allOrbits（可选）：是否画出该目标明细里的「全部过境卫星」轨道环 —— 仅当用户明确说「看全部过境」时为 true；
    *  缺省（false）时只画回答列出的那几颗（由 show_satellites 负责），视觉更干净。 */
   | { kind: 'select_pass_city'; targetId: number; name?: string; norad?: number; allOrbits?: boolean }
-  /** 打开某个左侧面板视图：sat 卫星 / cons 星座 / site 发射站 / heat 碰撞热力 / pass 城市过境 / region 区域过境 / multi 多区域过境。
+  /** 打开某个左侧面板视图：sat 卫星 / site 发射站 / heat 碰撞热力 / pass 城市过境 / region 区域过境 / multi 多区域过境。
+   *  历史值 cons（星座列表面板）已移除，前端向后兼容映射为打开 sat（太空目标列表）。
    *  selectFirst（仅 heat 面板实现）：打开后自动选中列表第一条（交会 / 碰撞类问题用它直接展示第一条交会信息；
    *  面板无数据时只停在页面、不选中任何项）。
    *  norad（仅 heat 有意义）：本次要聚焦的目标卫星 —— 前端把列表过滤到该卫星的交会后再选中第一条，

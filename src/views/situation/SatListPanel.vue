@@ -341,32 +341,32 @@ function toggleOrbit(name: string) {
           <span class="sp-type-txt">{{ TYPE_UI[k].label }}</span>
         </label>
       </div>
-      <!-- 空间站卡片：固定两颗核心舱，不参与星座排序；「位置展示」= 单星揭示 + 拉近镜头 -->
-      <div class="sp-station-cards">
-        <div v-for="s in stationCards" :key="s.key" class="sp-cons-card" :class="{ on: stationOn === s.key }">
-          <div class="sp-cons-head">
-            <span class="sp-cons-name" :title="s.name">{{ s.name }}</span>
-            <span class="sp-cons-op" :title="s.operator">运营方：{{ s.operator }}</span>
-            <span class="sp-cons-tag">空间站</span>
-          </div>
-          <div class="sp-cons-meta">
-            <span class="sp-cons-country">{{ s.country }}</span>
-            <img v-if="s.iso" class="sp-cons-flag" :src="'https://flagcdn.com/w20/' + s.iso + '.png'" alt="" />
-          </div>
-          <div class="sp-cons-dates">
-            <span>首发：{{ s.first }}</span><span>·</span><span>最近发射：{{ s.last }}</span>
-          </div>
-          <div class="sp-cons-actions">
-            <button class="sp-cons-btn" :class="{ on: stationOn === s.key }"
-              :title="stationOn === s.key ? '点暗：取消该站的单独展示（之后跟随「卫星」开关）' : '点亮：单独展示该空间站并拉近镜头（不影响其它目标）'"
-              @click="emit('stationShow', s.norad)">位置展示</button>
-          </div>
-        </div>
-      </div>
-
       <!-- 类型开关下方分割线 + 「卫星星座」标签 + 星座卡片列表 -->
       <div class="sp-const-label">卫星星座</div>
       <div class="sp-cons-scroll">
+        <!-- 空间站卡片：固定两颗核心舱，不参与星座排序；置于滚动区内部顶端与星座卡片纵向堆叠、随列表一起滚动
+            （右侧滚动条因此从天宫卡片旁开始）；「位置展示」= 单星揭示 + 拉近镜头 -->
+        <div class="sp-station-cards">
+          <div v-for="s in stationCards" :key="s.key" class="sp-cons-card" :class="{ on: stationOn === s.key }">
+            <div class="sp-cons-head">
+              <span class="sp-cons-name" :title="s.name">{{ s.name }}</span>
+              <span class="sp-cons-op" :title="s.operator">运营方：{{ s.operator }}</span>
+              <span class="sp-cons-tag">空间站</span>
+            </div>
+            <div class="sp-cons-meta">
+              <span class="sp-cons-country">{{ s.country }}</span>
+              <img v-if="s.iso" class="sp-cons-flag" :src="'https://flagcdn.com/w20/' + s.iso + '.png'" alt="" />
+            </div>
+            <div class="sp-cons-dates">
+              <span>首发：{{ s.first }}</span><span>·</span><span>最近发射：{{ s.last }}</span>
+            </div>
+            <div class="sp-cons-actions">
+              <button class="sp-cons-btn" :class="{ on: stationOn === s.key }"
+                :title="stationOn === s.key ? '点暗：取消该站的单独展示（之后跟随「卫星」开关）' : '点亮：单独展示该空间站并拉近镜头（不影响其它目标）'"
+                @click="emit('stationShow', s.norad)">位置展示</button>
+            </div>
+          </div>
+        </div>
         <div v-for="x in consCards" :key="x.c.id" class="sp-cons-card" :class="{ on: consShowOf(x.c.name) }">
           <!-- 第一排：星座名（定宽对齐）+ 运营方（超长省略号）+ 用途标签（右对齐；轨道信息不算用途） -->
           <div class="sp-cons-head">
@@ -462,10 +462,9 @@ function toggleOrbit(name: string) {
   flex-wrap: nowrap; gap: 4px;
   .sp-type { flex: 1 1 0; justify-content: center; padding: 3px 0; gap: 4px; font-size: 11px; }
 }
-/* 空间站卡片区：固定在「卫星星座」标签之上，不随星座列表滚动；左右边距与滚动区一致 */
-.side-panel .sp-station-cards {
-  margin: 10px -12px 0; padding: 0 12px; pointer-events: auto;
-}
+/* 空间站卡片区：置于星座列表滚动容器内部顶端，与星座卡片同列纵向堆叠、随列表一起滚动
+   （右侧滚动条因此从天宫卡片侧面开始，覆盖整个列表） */
+.side-panel .sp-station-cards { pointer-events: auto; }
 /* 「卫星星座」标签行：类型开关下方新分割线（顶部边框），字号同「太空目标展示」、居中。
    分割线位于「卫星」按钮与标签文字间隔的正中：.sp-types 自带 margin-bottom 10px，
    本行 margin-top 取 2px → 按钮下 12px / 文字上 12px（border 1px + padding 11px），上下对称 */

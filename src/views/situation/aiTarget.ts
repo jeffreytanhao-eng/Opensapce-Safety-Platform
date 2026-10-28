@@ -142,7 +142,9 @@ export function buildAiTarget(d: AiTargetDeps): AiTarget | null {
     }
   }
 
-  if (mode === 'cons') {
+  // 星座展示态（原「星座列表」dock 通道已并入卫星列表模块）：有星座过滤且未进入专项视图时，
+  // 当前目标即该星座（智能体星座展示 / URL ?const= 深链 / 星座卡片点亮都走这里）
+  if (d.filterConst && (mode === 'sat' || mode === '')) {
     const name = String(d.filterConst || '').trim()
     if (!name) return null
     const meta = d.constellation

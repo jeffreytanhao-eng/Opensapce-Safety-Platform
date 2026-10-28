@@ -180,7 +180,38 @@ npm run dev:all                       # 前端 vite 1233
 - 默认管理员 `admin / admin123456`（首次启动自动创建，请立即修改）
 - vite 代理规则：`/cgi`、`/uploads` → 1234，`/cgi2` → 1236
 
-### 生产部署（Docker）
+### 生产部署（Windows 服务器，已验证）
+
+推荐 Windows Server 2022/2025（2C8G 起步，生产建议 4C8G 以上）。所有组件解压到 `C:\osp\` 下的统一布局：
+
+```
+C:\osp\
+├── web\        # 网关：gateway.js（Node 监听 80 端口）+ 前端静态文件 dist\
+├── server\     # jsc 主后端（监听 1234）
+├── sidecar\    # heat-sidecar（监听 1236，dist 为 tsc 编译产物）
+├── heat-core\  # 私有核心算法（不入库，可选；未配置时 sidecar 使用内置引擎）
+├── node\       # 便携版 Node v22.12.0（Windows x64）
+├── mysql\      # MySQL 8（my.ini 已设 max_allowed_packet=512M，仅绑定 127.0.0.1）
+└── logs\       # 各服务日志
+```
+
+服务编排（`schtasks /Create ... SC ONSTART` 注册为系统任务，开机自启、崩溃可手动重跑）：
+
+| 任务名 | 内容 | 端口 |
+| --- | --- | --- |
+| `osp-web` | `node gateway.js` —— 静态托管 dist + 反向代理：`/cgi`、`/uploads` → 1234，`/cgi2` → 1236（SSE 流式透传） | 80（公网入口） |
+| `osp-server` | `node server.jsc` | 1234 |
+| `osp-sidecar` | `node dist/server.js` | 1236 |
+
+配置要点：
+
+- **环境变量**：jsc 主后端读取**项目根** `.env`（`C:\osp\.env`），heat-sidecar 读取自身目录 `.env`；数据库建议为生产单独生成随机密码，不要沿用开发库口令；
+- **网关顺序**：`/cgi2` 必须排在 `/cgi` 之前做前缀匹配，否则 sidecar 请求会被错误转发到主后端返回 404；网关对畸形百分号编码请求返回 400，不中断服务；
+- **数据迁移**：TLE 编目 / 星历（`hs_ephem`，BLOB 建议单行 `INSERT` 且调大 `max_allowed_packet`）/ AOE 全量数据可从开发库导出 SQL 后导入；AOE 同步源不携带目标类型，sidecar 会按 NORAD ID 从 `sat_tle` 自动回填 `sat_aoe.object_type`；
+- **heat-core 隔离**：私有算法目录置于仓库之外并通过 `.gitignore` 强制排除；服务器上同样独立存放，仅 sidecar 运行时加载；
+- **安全**：MySQL 只监听 `127.0.0.1`；公网防火墙只放行 80（或 443）与 RDP，用完及时关闭 SSH(22)；上线后立即修改默认管理员口令 `admin/admin123456`。
+
+### 生产部署（Docker，可选）
 
 ```bash
 # 前端镜像（nginx 托管 dist，/cgi /cgi2 /uploads 反代后端）
@@ -195,7 +226,7 @@ docker run -d -p 1236:1236 --env-file .env openspace-heat
 # 需以源码重编 Linux 版字节码后构建，详见 server/Dockerfile 头注释
 ```
 
-> 生产建议：Windows 服务器直接用 `start-dev.cmd`（便携 Node 22.12.0）启动主后端，推荐 4C8G 以上配置；heat-sidecar 无平台限制，可独立部署到任意节点。
+> 也可在 Windows 服务器上直接以 `start-dev.cmd`（便携 Node 22.12.0）启动主后端；heat-sidecar 无平台限制，可独立部署到任意节点。
 
 ## 六、开源协议
 

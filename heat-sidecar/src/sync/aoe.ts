@@ -139,6 +139,14 @@ export async function runAoeSync(): Promise<SyncResult> {
   const existing = new Map<number, AoeRow>()
   for (const r of existingRows) existing.set(Number(r.norad_id), r)
 
+  // AOE 数据源 OBJECT_TYPE 常缺失或恒为 UNKNOWN：按 NORAD 从 Space-Track GP（sat_tle）回填真实类型
+  const tleTypeRows = await query<RowDataPacket & { norad_id: number; object_type: string }>(
+    'SELECT norad_id, object_type FROM sat_tle WHERE object_type IN (?, ?, ?)',
+    ['PAYLOAD', 'DEBRIS', 'ROCKET BODY']
+  )
+  const tleType = new Map<number, string>()
+  for (const r of tleTypeRows) tleType.set(Number(r.norad_id), r.object_type)
+
   const rows: unknown[][] = []
   const history: unknown[][] = []
   let inserted = 0
@@ -165,7 +173,9 @@ export async function runAoeSync(): Promise<SyncResult> {
     const ndot = num(pick(raw, ['MEAN_MOTION_DOT', 'meanMotionDot'])) ?? 0
     const rev = num(pick(raw, ['REV_AT_EPOCH', 'revAtEpoch'])) ?? 0
     const intl = str(pick(raw, ['INTLDES', 'OBJECT_ID', 'intlDesig']))
-    const objType = str(pick(raw, ['OBJECT_TYPE', 'objectType'])) || 'UNKNOWN'
+    const rawObjType = str(pick(raw, ['OBJECT_TYPE', 'objectType']))
+    const objType =
+      rawObjType && rawObjType !== 'UNKNOWN' ? rawObjType : tleType.get(norad) || 'UNKNOWN'
     const channel = str(pick(raw, ['CHANNEL', 'channel'])) || 'KY'
     const constellation = str(pick(raw, ['CONSTELLATION_ID', 'constellationId'])) || null
 

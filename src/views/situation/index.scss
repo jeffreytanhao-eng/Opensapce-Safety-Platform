@@ -629,24 +629,6 @@
       b { color: #ffe9b0; font-weight: 700; } } }
   .pass-hint { font-size: 12px; line-height: 1.6; color: #a7b6cc; }
   .pass-err { font-size: 12px; line-height: 1.6; color: #ff8a80; word-break: break-word; }
-  /* 星座成员列表（点击左侧星座后在右侧展示，点击成员高亮其轨道线） */
-  .cons-sat-list { list-style: none; margin: 0; padding: 0;
-    max-height: min(52vh, 460px); overflow-y: auto; overscroll-behavior: contain;
-    &::-webkit-scrollbar { width: 6px; }
-    &::-webkit-scrollbar-thumb { background: rgba(120,160,220,0.3); border-radius: 3px; }
-  }
-  .cons-sat-item { display: flex; align-items: center; gap: 8px; padding: 6px 9px; margin-bottom: 4px;
-    border-radius: 8px; cursor: pointer; background: rgba(255,255,255,0.03);
-    border: 1px solid rgba(255,255,255,0.06); transition: background 0.15s, border-color 0.15s;
-    &:hover { background: rgba(0,229,255,0.1); border-color: rgba(0,229,255,0.35); }
-    /* 高亮态：与三维里亮青色高亮轨道线呼应 */
-    &.on { background: rgba(0,229,255,0.16); border-color: rgba(0,229,255,0.6); }
-    .cons-sat-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; }
-    .cons-sat-name { flex: 1; min-width: 0; font-size: 12px; color: #e6edf6;
-      overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .cons-sat-nor { flex: none; font-size: 10.5px; color: #8ea4c4; font-family: 'Consolas', 'Menlo', monospace; }
-  }
-  .cons-sat-more { padding: 4px 0 2px; text-align: center; font-size: 10.5px; color: #7d8ba3; }
 }
 /* 详情面板收起后的小浮标（右侧，点击重新展开） */
 .constel-detail-tab {
@@ -958,10 +940,6 @@ html.is-mobile {
   .constel-detail .pass-none { padding: 8px 0; font-size: 11px; }
   .constel-detail .pass-hint,
   .constel-detail .pass-err { font-size: 11px; line-height: 1.45; }
-  .constel-detail .cons-sat-list { max-height: 26vh; }
-  .constel-detail .cons-sat-item { padding: 5px 6px; margin-bottom: 3px; border-radius: 6px; }
-  .constel-detail .cons-sat-item .cons-sat-name { font-size: 11px; }
-  .constel-detail .cons-sat-item .cons-sat-nor { font-size: 9.5px; }
   .constel-detail-tab { top: 48px; right: 8px; width: 32px; height: 32px; font-size: 15px; }
   /* 列表收起浮标：面板已移到底部，浮标同步贴住底部 Tab 导航上沿（与抽屉同一入口位置） */
   .side-panel-tab { top: auto; bottom: calc(96px + env(safe-area-inset-bottom)); left: 8px; width: 32px; height: 32px; font-size: 15px; }

@@ -4,9 +4,8 @@
  *
  * 原单文件组件过重，现拆为多层（目录内组件化）：
  *  - BaseScene.vue          基础场景：3D 渲染 / 卫星运动 / 拾取选中 / 过滤轨道线 / 动画循环 / 准星 / 加载遮罩
- *  - SatListPanel.vue       左侧卫星列表面板（搜索 / 类型 / 轨道区域过滤 / 滚动加载）
- *  - ConstellationPanel.vue 左侧星座列表面板（按名称检索 / 点击星座过滤并绘制轨道线）
- *     二者同属 dock「综合态势」入口，点击该入口向上弹出子项菜单（卫星列表 / 星座列表）二选一，默认卫星列表
+ *  - SatListPanel.vue       左侧卫星列表面板（搜索 / 类型 / 轨道区域过滤 / 滚动加载 / 星座卡片）
+ *     与发射站列表同属 dock「综合态势」入口，点击该入口向上弹出子项菜单二选一，默认卫星列表
  *  - CdmHeatmap.vue         碰撞热力面板（三种来源：交会热力 / CDM 热力 / 交会分析热力）
  *  - PassPanel.vue          城市过境面板（行政区划检索列表；点击目标算未来 24h 载荷过境明细，读预计算表）
  *  - RegionPanel.vue        区域过境面板（三维框选多边形 → 提交后端现算；内容见 RegionSection.vue）
@@ -21,7 +20,6 @@ import { useRoute, useRouter } from 'vue-router'
 import { useDevice } from '@/composables/useDevice'
 import BaseScene from './BaseScene.vue'
 import SatListPanel from './SatListPanel.vue'
-import ConstellationPanel from './ConstellationPanel.vue'
 import CdmHeatmap from './CdmHeatmap.vue'
 import PassPanel from './PassPanel.vue'
 import RegionPanel from './RegionPanel.vue'
@@ -40,10 +38,9 @@ import {
   LEGEND, TYPE_LABEL, TYPE_KEYS, TYPE_HEX, fmtNum, TWILIGHT_LABEL, SHADOW_LABEL,
   colorMode, COLOR_MODES, colorLegend,
   compareConsts, compareActive, COMPARE_PALETTE,
-  dockMode, dockActive, constPanel, consFiltered, constellations, filterConst, filterKw, g,
+  dockMode, dockActive, constellations, filterConst, filterKw, g,
   simSpeed, simPlaying, simTimeMs,
   consShowMap, consOverrideActive, consShowOf, consCardBound, consOrbitOn,
-  consSatPanel, consHighlightNorad,
   loading, hasSel, filterActive, filterNorads, stationFocus, sel, selDetail, selConstellations, detailOpen, visible, orbitVisible,
   dataSource,
   heatMode, heatSel, heatSelList, heatOpen,
@@ -99,8 +96,6 @@ const aiDrawerRef = ref<InstanceType<typeof AiChatDrawer>>()
 /** 拾取详情面板内 2 个数据块的折叠开关（位置信息/卫星资料）：点击标题可折叠展开，默认展开 */
 const posOpen = ref(true)
 const metaOpen = ref(true)
-/** 星座视图右侧「成员列表」弹框开关：选中星座后展示（可 ✕ 收起，浮标可再展开） */
-const consListOpen = ref(true)
 /** 过境明细读的是后端预计算表，正常毫秒级返回：默认不显示「正在读取」，超过 1.5s 才出现兜底提示 */
 const passLoadingHint = useDelayed(passLoading)
 
@@ -314,38 +309,28 @@ function reloadSystem() {
 /* ============================================================
  * dock / 面板编排（纯动作，调用 BaseScene.expose）
  * ============================================================ */
-/** dock 七个视图态（与 scene.ts 的 DockMode 去掉空态一致），同时也是 /situation/:type 的合法取值。
+/** dock 视图态（与 scene.ts 的 DockMode 去掉空态一致），同时也是 /situation/:type 的合法取值。
  *  dock 上只呈现三个按钮：交会热力 / 专家 / 重启系统（综合态势、过境分析、星历分析入口已按需求移除，
- *  对应视图仍可通过 /situation/:type 深链直达；卫星/星座/发射站列表由左缘外拉 tag 打开，
+ *  对应视图仍可通过 /situation/:type 深链直达；卫星/发射站列表由左缘外拉 tag 打开，
  *  星历分析由右缘外拉 tag 打开）。 */
-const DOCK_TYPES = ['sat', 'cons', 'site', 'heat', 'pass', 'region', 'multi', 'eph'] as const
+const DOCK_TYPES = ['sat', 'site', 'heat', 'pass', 'region', 'multi', 'eph'] as const
 type DockType = (typeof DOCK_TYPES)[number]
 
-/** 「综合态势」下的三个子项（卫星列表 / 星座列表 / 发射站列表）：dock 上合并为一个入口，默认子项「卫星列表」。
- *  三者都算「综合态势」已激活 —— 主按钮高亮、子项当前态、面板再点收起、模块间切换判断共用这一份口径。 */
-const SAT_VIEWS: readonly string[] = ['sat', 'cons', 'site']
+/** 「综合态势」下的两个子项（卫星列表 / 发射站列表）：dock 上合并为一个入口，默认子项「卫星列表」。
+ *  二者都算「综合态势」已激活 —— 主按钮高亮、子项当前态、面板再点收起、模块间切换判断共用这一份口径。
+ *  （原「星座列表」子项面板已删除：星座维度由卫星列表内的星座卡片承载。） */
+const SAT_VIEWS: readonly string[] = ['sat', 'site']
 
 /** 「过境分析」下的三个子项（城市 / 区域 / 多区域）：dock 上合并为一个入口。
  *  三者都算「过境分析」已激活 —— 主按钮高亮、子项当前态、面板再点收起、模块间切换判断共用这一份口径，
  *  历史上漏掉 multi 时表现为：进入 /situation/multi 后 dock 上「过境分析」不高亮。 */
 const PASS_VIEWS: readonly string[] = ['pass', 'region', 'multi']
 
-/** 进入星座管理时默认选中第一个星座并绘出轨道线（仅「进入模块」时默认；之后搜索/手动点选以用户为准）。
- *  同理于卫星管理：进入即是干净的初始态，再叠加本模块的默认呈现。 */
-function selectDefaultConstellation() {
-  // 对比态下不被「默认选第一个单星座」覆盖（对比由智能体动作驱动，filterConst 保持空）
-  if (compareActive.value) return
-  if (filterConst.value) return
-  // 进入星座模块默认选中：同样清掉 NORAD 集合（与 pickConstellation 同口径）
-  filterNorads.value = null
-  const first = consFiltered.value[0]
-  if (first) filterConst.value = first.name
-}
-
-/** 把选中模块写回地址栏（replace，不产生历史记录）：刷新 / 从后台切回时按 type 恢复选中模块，不再落回第一个 */
+/** 把选中模块写回地址栏（replace，不产生历史记录）：刷新 / 从后台切回时按 type 恢复选中模块，不再落回第一个。
+ *  保留现有 query（?days=&day= 时间窗、?const= 星座深链等），仅改写 :type 段。 */
 function syncUrl(type: DockType) {
   if (route.params.type === type) return
-  router.replace({ name: 'situation', params: { type } })
+  router.replace({ name: 'situation', params: { type }, query: route.query })
 }
 
 /* 热力时间窗 / 按天切片：URL ?days=&day= 持久化。
@@ -377,7 +362,7 @@ watch([heatDays, heatDay], () => {
   if (dirty) router.replace({ query: q })
 })
 
-/** 进入模块：dock 高亮 + 展开对应面板 + 切视图（sat 重建卫星索引 / cons 默认选第一个星座 / heat 开热力 / pass 开过境）。
+/** 进入模块：dock 高亮 + 展开对应面板 + 切视图（sat 重建卫星索引 / heat 开热力 / pass 开过境）。
  *  writeUrl=false 供「按地址栏恢复」调用，避免与地址栏恢复互相触发。
  *
  *  两个视图开关（heatMode / passMode）在此**一律显式设置**：若只在部分分支设置，
@@ -389,12 +374,21 @@ function applyDock(type: DockType, writeUrl = true) {
   passMenuOpen.value = false
   satMenuOpen.value = false
   dockMode.value = type
-  // 星历面板用独立开关 ephOpen：进入星历视图（含 URL 深链恢复）即展开面板
+  // 星历面板用独立开关 ephOpen：用户主动进入星历视图（dock / tag / AI）时展开面板；首屏 restore 不走 eph
   if (type === 'eph') ephOpen.value = true
+  // 星历分析是纯列表弹窗（overlay）：打开它只拉列表数据，**不碰三维现场** ——
+  // 不清过滤叠加层（filterNorads / compareConsts / 着色维度）、不翻转热力 / 过境 / 发射站视图开关。
+  // 旧版把它当「专项分析视图」切模块处理（clearScene + 清过滤 + 退热力/过境），
+  // 实测表现为「一开弹窗三维就全量揭示点云 / 蓝色轨道线被改动」（用户明确要求：弹窗只管列表）。
+  if (type === 'eph') {
+    dockActive.value = 'eph'
+    if (writeUrl) syncUrl(type)
+    return
+  }
   // 热力 / 过境三类面板是「专项分析视图」：进入时排除其它叠加展示（NORAD 集合轨道线、多星座对比轨道线、
   //  星座着色），只显示该面板要展示的内容 —— 否则「卫星轨道 + 碰撞轨道」会混在一起。
   //  清掉 filterNorads 后 satSetActive=false → 卫星云整片隐藏（hideCloud 门控天然满足）。
-  if (type === 'heat' || type === 'pass' || type === 'region' || type === 'multi' || type === 'eph') {
+  if (type === 'heat' || type === 'pass' || type === 'region' || type === 'multi') {
     filterNorads.value = null
     compareConsts.value = []
     if (colorMode.value === 'compare') colorMode.value = 'type'
@@ -418,8 +412,6 @@ function applyDock(type: DockType, writeUrl = true) {
   }
   if (type === 'sat') {
     if (g.cloudList.length) sceneRef.value?.rebuildSatIndex()
-  } else if (type === 'cons') {
-    selectDefaultConstellation()
   } else if (type === 'site') {
     void loadLaunchSites()
   }
@@ -466,9 +458,6 @@ function openSatPanel() {
   satPanelClosed.value = false
   if (dockMode.value !== 'sat') chooseSatView('sat', false)
 }
-
-/** 收起星座列表面板：仅收起面板，保留当前三维与 dock 激活态（过滤轨道线/选中/拾取/镜头） */
-function closeConsPanel() { dockMode.value = ''; constPanel.q = '' }
 
 /** 收起发射站列表面板：仅收起面板，保留地球上的发射站标记与选中站（右侧详情继续可看） */
 function closeSitePanel() { dockMode.value = '' }
@@ -546,8 +535,10 @@ function toggleEphemDock() {
   if (ephOpen.value) { ephOpen.value = false; return }
   ephDetailOpen.value = false
   ephEvOpen.value = false
+  // 星历面板只负责展示星历列表：打开/收起**不清三维现场**（旧版在这里 clearScene → resetToInitial，
+  // 会清掉用户已有过滤 / 选中 / 位置展示并把镜头拽回初始位 —— 「弹窗一开三维目标状态就变」即此因）；
+  // 也不改动 heatMode / passMode 等视图开关（applyDock 对 'eph' 已按 overlay 口径短路）。
   const keepLeft = dockMode.value === 'sat'
-  if (dockActive.value && dockActive.value !== 'eph') clearScene()
   applyDock('eph')
   if (keepLeft) dockMode.value = 'sat'
 }
@@ -596,16 +587,6 @@ watch([maneuverStates, maneuverBurnMs], ([states, burn]) => {
 })
 
 /* ---- 星历分析窗 × 安全热力 双向联动（03 §15.5） ---- */
-
-/** 星历窗「在安全热力图中查看」：切标签 + 主星筛选并展开热力面板 */
-function onShowInHeat(p: { kind: 'tle-threat' | 'tle'; scope: 'official' | 'uploaded'; ephemId?: string; norad: number }) {
-  heatSource.value = heatSourceOf(p.kind)
-  heatPrimaryFilter.value = p.scope === 'uploaded' && p.ephemId
-    ? { kind: 'uploaded', ephemId: p.ephemId }
-    : { kind: 'official' }
-  if (dockActive.value !== 'heat') applyDock('heat')
-  else dockMode.value = 'heat'
-}
 
 /** 热力列表「在星历窗中打开该主星」：展开星历窗并载入该星官方星历 */
 async function onOpenEphemFromHeat(p: { norad: number; name: string }) {
@@ -895,7 +876,7 @@ const OUTCOME_LABEL: Record<string, string> = { success: '成功', failure: '失
 
 /* ============================================================
  * 「综合态势」子项菜单（dock 按钮点击后向上弹出）
- * 与「热力来源」「过境分析」同款：卫星列表（检索并拾取单星）/ 星座列表（按星座过滤成员）二选一，
+ * 与「热力来源」「过境分析」同款：卫星列表（检索并拾取单星）/ 发射站列表（地球打点选站）二选一，
  * 两者同属「总览态势」入口，故 dock 上合并为一个「综合态势」入口 + 子项菜单。
  * ============================================================ */
 /** 子项菜单开关 */
@@ -920,10 +901,10 @@ function chooseSatView(key: SatView, reveal = true) {
   }
 }
 
-/** 点击 dock「综合态势」：展开/收起卫星 / 星座列表面板。
- *  - 已在综合态势（卫星列表 / 星座列表）：再点一次只收起面板，保留三维现场（选中/轨道线/镜头）；
+/** 点击 dock「综合态势」：展开/收起卫星 / 发射站列表面板。
+ *  - 已在综合态势（卫星列表 / 发射站列表）：再点一次只收起面板，保留三维现场（选中/轨道线/镜头）；
  *  - 从其它模块切过来 / 面板已收起：先彻底还原（切模块时），再展开当前子项面板并弹出子项菜单便于切换；
- *    当前不在卫星/星座（如从碰撞热力切过来）时，按默认子项「卫星列表」进入。 */
+ *    当前不在卫星/发射站（如从碰撞热力切过来）时，按默认子项「卫星列表」进入。 */
 function toggleSatDock() {
   heatMenuOpen.value = false
   passMenuOpen.value = false
@@ -1008,7 +989,7 @@ function togglePassDock() {
   passMenuOpen.value = true
 }
 
-/* dock 子菜单「收起态」标题：父标签·当前子项完整标签（如「综合态势·星座列表」）。
+/* dock 子菜单「收起态」标题：父标签·当前子项完整标签（如「综合态势·太空安全目标列表」）。
  * 收起态只露一行，带上当前选中子项，一眼看清选的是哪一项；展开后仍由下方子项列表逐项选择。
  * 当前不在该模块时按各自默认子项（卫星列表 / 交会热力 / 城市过境）兜底。 */
 const satMenuTitle = computed(() => {
@@ -1051,17 +1032,27 @@ function onSituationPage() {
  *    尚未选中时取第一个「sat」（首次进入的默认态）；
  *  两种情况都把 type 规范化写回地址栏（/situation/sat 等），保证刷新后不回退。 */
 function restoreDock() {
-  const raw = String(route.params.type ?? '')
-  // 「安全热力」不作为首屏/刷新/初始化窗口的恢复目标：无事件深链参数时一律回到卫星视图，
-  // 避免用户刷新后仍停在热力面板（dock 点击进入热力不受影响，dockActive 已置位）。
+  const rawType = String(route.params.type ?? '')
+  // 「星座列表」面板已删除：旧深链 /situation/cons?const= 向后兼容映射为 sat 模式，
+  // 地址栏 type 段改写为 sat；?const= 预置参数原样保留，星座过滤仍由 BaseScene 的 URL 预置逻辑应用
+  const raw = rawType === 'cons' ? 'sat' : rawType
+  // 「安全热力」「星历分析」均不作为首屏/刷新/初始化窗口的恢复目标：
+  //  - 热力：无事件深链参数时回到卫星视图，避免刷新后仍停在热力面板；
+  //  - 星历：刷新/首次进入不自动弹出右侧「星历分析」窗（ephOpen 保持关闭）；
+  // dock 点击 / 右缘 tag / AI 打开星历仍走 toggleEphemDock → applyDock('eph')，不受影响。
   const hasHeatDeepLink = ['a', 'b', 'tca'].some((k) => route.query[k] != null)
-  const target = raw === 'heat' && !hasHeatDeepLink && !dockActive.value ? 'sat' : raw
+  const bounceInit = !dockActive.value && (
+    (raw === 'heat' && !hasHeatDeepLink) || raw === 'eph'
+  )
+  const target = bounceInit ? 'sat' : raw
   const type: DockType = (DOCK_TYPES as readonly string[]).includes(target)
     ? (target as DockType)
     : (dockActive.value || 'sat')
-  if (raw !== type) syncUrl(type)
+  if (rawType !== type) syncUrl(type)
   if (dockActive.value === type) return
   if (dockActive.value) clearScene()
+  // 首屏从 /situation/eph 弹回 sat 时显式关上星历窗，避免 HMR/热更新残留 ephOpen=true
+  if (bounceInit) ephOpen.value = false
   applyDock(type, false)
 }
 
@@ -1161,15 +1152,13 @@ function layerTitle(ly: { key: SkyLayerKey; label: string; desc: string }) {
  *  事件详情独立用 heatOpen，卫星详情用 detailOpen，发射站用 siteOpen（均可单独收起，浮标重新展开）；
  *  过境明细用 passDetailOpen（收起只隐藏弹窗，保留选中城市与三维高亮圈/过境标记，避免「关闭即地球还原」）。
  */
-const rightMode = computed<'' | 'pass' | 'heat' | 'ephEv' | 'sat' | 'site' | 'cons' | 'eph'>(() => {
+const rightMode = computed<'' | 'pass' | 'heat' | 'ephEv' | 'sat' | 'site' | 'eph'>(() => {
   if (passSelTarget.value && passDetailOpen.value) return 'pass'
   if (heatSel.value && heatOpen.value) return 'heat'
   if (ephEvOpen.value && threatSelected.value) return 'ephEv'
   if (siteSel.value && siteOpen.value) return 'site'
   if (ephDetailOpen.value && ephDetail.value) return 'eph'
   if (hasSel.value && selDetail.value && detailOpen.value) return 'sat'
-  // 星座视图：选中某星座后右侧展示其成员列表（与选中单星的卫星详情互不冲突，后者的优先级更高）
-  if (dockActive.value === 'cons' && filterConst.value && consListOpen.value && !compareActive.value) return 'cons'
   return ''
 })
 
@@ -1498,7 +1487,6 @@ function reopenRight() {
   else if (heatSel.value) heatOpen.value = true
   else if (siteSel.value) siteOpen.value = true
   else if (hasSel.value && selDetail.value) detailOpen.value = true
-  else consListOpen.value = true
 }
 
 /** 点击右侧「本区域碰撞列表」某一项：与点云团 / 左侧热力列表一致 ——
@@ -1627,20 +1615,6 @@ function pickFromList(gi: number) {
  *  面板保持展开，切换完成后场景内会重建过滤索引刷新列表。 */
 function switchSource(src: SatSource) {
   sceneRef.value?.switchDataSource(src)
-}
-
-/** 点击星座：设置星座过滤并绘制该星座全部卫星的轨道线（刷新由 [filterKw, filterConst, altMin, altMax] watch 统一驱动）。
- *  PC 端保留列表，便于连续切换不同星座的轨道线；移动端列表占据大半个屏幕，绘制后收起让位给地球观察。 */
-function pickConstellation(name: string) {
-  // 星座与「NORAD 集合」「多星座对比」是三种定位来源：互清，避免过滤 AND 得出空集
-  filterNorads.value = null
-  compareConsts.value = []
-  filterConst.value = name
-  // 星座展示是独立于类型开关的展示通道：揭示点云（否则首页「无目标」门控会整体压住）
-  cloudRevealed.value = true
-  // 选中星座即展开右侧成员列表（旧的成员高亮由 BaseScene 的 filterConst watch 清除）
-  consListOpen.value = true
-  if (isMobile.value) dockMode.value = ''
 }
 
 /** 星座卡片「星座展示」开关（逐星库覆盖口径，与主开关「卫星」解耦）：
@@ -1778,11 +1752,12 @@ function resolveConstellationName(raw?: string): string | null {
   return q
 }
 
-/** AI 提到星座（如 GPS）：等同卡片「卫星展示」+「轨道展示」强制开启，不弹目标列表/成员侧栏。 */
+/** AI 提到星座（如 GPS）：等同卡片「卫星展示」+「轨道展示」强制开启，不弹目标列表。
+ *  原「星座列表」面板已删除：模块切换改走 sat（太空目标列表模块），星座过滤效果不变。 */
 function focusConstellationFromAi(name?: string) {
   const resolved = resolveConstellationName(name)
   if (!resolved) return
-  if (!aiRoundCleared && dockActive.value !== 'cons' && dockActive.value !== 'sat') clearScene()
+  if (!aiRoundCleared && dockActive.value !== 'sat') clearScene()
   aiDockPinned = true
   aiConstPinnedThisRound = true
   aiObjectPinnedThisRound = true
@@ -1790,7 +1765,7 @@ function focusConstellationFromAi(name?: string) {
   // 否则独显旁路 / 选中态会干扰星座点云与 aiTarget。
   stationFocus.value = null
   if (hasSel.value) sceneRef.value?.resetSelected(false)
-  applyDock('cons')
+  applyDock('sat')
   heatMode.value = false
   filterNorads.value = null
   compareConsts.value = []
@@ -1806,24 +1781,9 @@ function focusConstellationFromAi(name?: string) {
   // 同 tick 里先写 true 会被该 watch 覆盖，故 nextTick 再强制点亮「轨道展示」。
   consOrbitOn.value = true
   if (prevConst !== resolved) nextTick(() => { consOrbitOn.value = true })
-  consListOpen.value = false
   dockMode.value = ''
 }
 
-
-/** 右侧星座成员列表：滚动到底部附近继续加载下一批 */
-function onConsSatScroll(ev: Event) {
-  const el = ev.target as HTMLElement
-  if (el.scrollTop + el.clientHeight >= el.scrollHeight - 40) {
-    consSatPanel.count = Math.min(consSatPanel.count + consSatPanel.BATCH, consSatPanel.idx.length)
-  }
-}
-
-/** 点击右侧成员列表某一项：在星座里用亮青色高亮该星轨道线；再点同一颗则取消高亮 */
-function toggleConsHighlight(norad: number) {
-  const next = consHighlightNorad.value === norad ? 0 : norad
-  void sceneRef.value?.highlightConstSat(next)
-}
 
 /** 「本轮提问是否已清空展示效果」：后端在每轮首个展示型动作前自动补发 clear_display，
  *  这里记录本轮的清空是否已发生 —— 后续动作不再重复清场（否则同轮多动作会互相擦除，
@@ -1839,6 +1799,8 @@ let aiStationPinnedThisRound = false
 let aiConstPinnedThisRound = false
 /** 本轮用户问的是具体目标/星座/空间站（非威胁类）—— 一律禁止默认打开热力图 */
 let aiObjectPinnedThisRound = false
+/** 本轮由星历质量卡「AI 解读」发起：禁止切星座/选星/清空，保持星历 3D 模型与 dock=eph */
+let aiEphemPinnedThisRound = false
 /** 「上一轮 AI 打开的图层」：下一轮提问开始时先关掉上一轮的（跨轮替换 → 每轮画面只保留本轮要的图层）。
  *  只关 AI 打开过的；用户手动勾选的新建图层等图层不受影响。 */
 const aiOpenedLayers = new Set<SkyLayerKey>()
@@ -1846,6 +1808,12 @@ const aiOpenedLayers = new Set<SkyLayerKey>()
 const CSS_MODULE_NORADS = new Set([38761, 48274, 53239, 54216])
 
 /** 从用户原问句判断本轮展示意图：空间站 / 星座 / 一般目标；含威胁词则不钉展示（可开热力） */
+/** 星历质量卡「AI 解读」拼出的提问：含卫星名（如 STARLINK-xxx）但不是要展示星座 */
+function isEphemQualityExplainPrompt(q: string): boolean {
+  const s = String(q || '')
+  return /请解读这份高精度星历的质量评估|自洽性\s*RMS|综合评分：\s*\d+\s*\/\s*100/.test(s)
+}
+
 function detectAiDisplayIntent(q: string):
   | { kind: 'station'; norad: number }
   | { kind: 'constellation'; name: string }
@@ -1853,6 +1821,8 @@ function detectAiDisplayIntent(q: string):
   | null {
   const raw = String(q || '').trim()
   if (!raw) return null
+  // 星历「AI 解读」正文常含 STARLINK/GPS 等字样，不能当成星座展示意图
+  if (isEphemQualityExplainPrompt(raw)) return null
   const threat = /威胁|碰撞|交会|热力|conjunction|cdm|碰撞预警|碰撞风险/i.test(raw)
   if (threat) return null
   const lower = raw.toLowerCase()
@@ -1885,7 +1855,7 @@ function detectAiDisplayIntent(q: string):
   return null
 }
 
-/** 中国空间站 / 天宫 等名称应走空间站「位置展示」而非星座列表 */
+/** 中国空间站 / 天宫 等名称应走空间站「位置展示」而非星座展示 */
 function isCssStationConstellationName(name?: string): boolean {
   const s = String(name || '')
   return /中国空间站|天宫|天和|tiangong|tianhe|\bcss\b/i.test(s)
@@ -1902,9 +1872,16 @@ function onAiRoundStart(q?: string) {
   aiStationPinnedThisRound = false
   aiConstPinnedThisRound = false
   aiObjectPinnedThisRound = false
+  aiEphemPinnedThisRound = false
   if (aiOpenedLayers.size) {
     for (const k of aiOpenedLayers) skyLayers[k] = false
     aiOpenedLayers.clear()
+  }
+  // 星历质量「AI 解读」：钉住星历展示，勿因文案里的 STARLINK 等误切星座导致 mesh 被 dock 门控藏掉
+  if (isEphemQualityExplainPrompt(q || '')) {
+    aiObjectPinnedThisRound = true
+    aiEphemPinnedThisRound = true
+    return
   }
   const intent = detectAiDisplayIntent(q || '')
   if (!intent) return
@@ -1925,34 +1902,20 @@ function focusSatelliteInSatView(norad: number) {
   dockMode.value = ''
 }
 
-/** 切到「星座列表」并（可选）选中指定星座（智能体 select_constellation / 图谱 kg_focus 共用）。
- *  与手动从 dock 进入星座模块（chooseSatView('cons')）口径完全一致：模块不同时先 clearScene ——
- *  clearScene → resetToInitial → resetSelected 会 applyHomeCamera() 把镜头复位到「正对中国」的初始机位。
- *  漏掉这一步就会停在旧模块的镜头角度上（用户感知为「通过大模型看星座时镜头位置不对」）。
- *  同模块内切换星座（如在星座列表里再问一个）不复位镜头，与手动点列表项一致；
- *  不传 name 时只进模块、用默认星座（供 open_panel('cons') 复用）。 */
-function focusConstellationInConsView(name?: string) {
-  if (!aiRoundCleared && dockActive.value !== 'cons') clearScene()
-  aiDockPinned = true
-  applyDock('cons')
-  if (name) pickConstellation(name)
-}
-
-/** 多星座对比：进星座列表页 + 按公用调色板给每个星座分色（点云与过滤轨道线同时着色）。
+/** 多星座对比：切到卫星列表模块并按公用调色板给每个星座分色（点云与过滤轨道线同时着色）。
  *  与单星座进入同一口径（模块不同时先 clearScene 复位镜头，同模块内不复位）；
  *  只用对比着色，**不设 filterConst**（单星座过滤会额外收窄，与对比语义冲突）。
  *  配色顺序即图例顺序；超出调色板长度循环取色（见 COMPARE_PALETTE）。 */
-function focusCompareInConsView(names: string[]) {
+function focusCompareInSatView(names: string[]) {
   const list = (names || []).map((n) => String(n || '').trim()).filter(Boolean)
   if (!list.length) return
-  if (!aiRoundCleared && dockActive.value !== 'cons') clearScene()
+  if (!aiRoundCleared && dockActive.value !== 'sat') clearScene()
   aiDockPinned = true
   filterNorads.value = null
-  // 先写对比态：applyDock('cons') 内部会调 selectDefaultConstellation()，其早退条件依赖 compareActive，
-  //  若在 applyDock 之后再写会把 filterConst 覆盖成「默认第一个星座」，导致只剩单星座轨道线。
+  // 先写对比态再 applyDock：sat 模块进入不触碰对比集，着色维度随后切到 compare
   compareConsts.value = list.map((name, i) => ({ name, color: COMPARE_PALETTE[i % COMPARE_PALETTE.length] }))
   filterConst.value = ''
-  applyDock('cons')
+  applyDock('sat')
   colorMode.value = 'compare'
 }
 
@@ -1965,6 +1928,8 @@ const heatAutoSelectTick = ref(0)
 function onAiAction(a: AiAction) {
   switch (a.kind) {
     case 'select_satellite': {
+      // 星历 AI 解读进行中：勿切到编目选星（会 applyDock(sat) 藏掉星历 mesh，只剩准星环）
+      if (aiEphemPinnedThisRound) break
       // 天宫/ISS → 空间站「位置展示」专用模型+跟随；其它 → 普通选星
       const stationNorad = resolveStationNoradFromAi(Number(a.norad), a.name, a.cnName)
       if (stationNorad != null) {
@@ -1978,6 +1943,7 @@ function onAiAction(a: AiAction) {
       break
     }
     case 'select_constellation': {
+      if (aiEphemPinnedThisRound) break
       // 中国空间站/天宫 等后端常当成「星座」下发 → 改走空间站位置展示
       if (isCssStationConstellationName(a.name)) {
         focusStationFromAi(STATION_CSS_NORAD)
@@ -1987,13 +1953,14 @@ function onAiAction(a: AiAction) {
         focusStationFromAi(STATION_ISS_NORAD)
         break
       }
-      // AI：全量星展示 + 轨道；不弹目标列表 / 成员抽屉
+      // AI：全量星展示 + 轨道；不弹目标列表
       focusConstellationFromAi(a.name)
       break
     }
     case 'compare_constellations':
-      // 多星座对比：进星座列表页并按公用调色板给各星座分色（点云 + 轨道线同时着色）
-      focusCompareInConsView(a.names)
+      if (aiEphemPinnedThisRound) break
+      // 多星座对比：切到卫星列表模块并按公用调色板给各星座分色（点云 + 轨道线同时着色）
+      focusCompareInSatView(a.names)
       break
     case 'select_site': {
       // 打开站点面板并选中该发射场（与点击左侧站列表同一路径：写选中态 + 高亮 + 镜头飞过去）。
@@ -2022,8 +1989,10 @@ function onAiAction(a: AiAction) {
     }
     case 'open_panel':
       if ((DOCK_TYPES as readonly string[]).includes(a.panel)) {
+        // 星历 AI 解读：禁止切走 eph（BaseScene 仅在 dockActive===eph 时显示星历 mesh）
+        if (aiEphemPinnedThisRound && a.panel !== 'eph') break
         // 本轮已钉住空间站/星座/目标展示时，禁止后端误发的威胁热力图冲掉模型与轨道
-        if (a.panel === 'heat' && (aiStationPinnedThisRound || aiConstPinnedThisRound || aiObjectPinnedThisRound)) {
+        if (a.panel === 'heat' && (aiStationPinnedThisRound || aiConstPinnedThisRound || aiObjectPinnedThisRound || aiEphemPinnedThisRound)) {
           break
         }
         aiDockPinned = true
@@ -2037,10 +2006,15 @@ function onAiAction(a: AiAction) {
             ? explicit
             : (hasSel.value && Number.isFinite(cur) && cur > 0 ? cur : null)
         }
-        // 星座面板按「手动进入星座模块」口径切（先 clearScene 复位镜头与残留态），其余面板行为不变
+        // 「星座列表」面板已删除：旧动作 open_panel('cons') 向后兼容映射为打开「太空目标列表」面板
+        //（按「手动切模块」口径：先 clearScene 复位镜头与残留态，再进 sat 模块并拉出面板）
         if (a.panel === 'cons') {
-          // 本轮已钉星座展示则保持现状（避免无 name 的默认星座/侧栏路径冲掉 GPS 等）
-          if (!aiConstPinnedThisRound) focusConstellationInConsView()
+          // 本轮已钉星座展示则保持现状（避免面板切换冲掉 GPS 等已钉住的星座展示）
+          if (!aiConstPinnedThisRound) {
+            if (!aiRoundCleared && dockActive.value !== 'sat') clearScene()
+            applyDock('sat')
+            satPanelClosed.value = false
+          }
         }
         else applyDock(a.panel as DockType)
         // selectFirst：打开面板后自动选中列表第一条（目前仅碰撞热力面板实现 ——
@@ -2067,6 +2041,7 @@ function onAiAction(a: AiAction) {
       }
       // 本轮已钉星座全量展示：show_satellites 会清 filterConst/consCardBound，导致地球空白，跳过
       if (aiConstPinnedThisRound) break
+      if (aiEphemPinnedThisRound) break
       aiObjectPinnedThisRound = true
       // 本轮首个展示型动作若未清空（极端情况：后端未补 clear_display），这里补一次
       if (!aiRoundCleared) { clearScene(); aiRoundCleared = true }
@@ -2084,14 +2059,14 @@ function onAiAction(a: AiAction) {
     }
     case 'select_conj_event': {
       // 本轮已钉住目标/空间站/星座展示时，跳过误发的碰撞事件定位（避免切到热力图盖住模型）
-      if (aiStationPinnedThisRound || aiConstPinnedThisRound || aiObjectPinnedThisRound) break
+      if (aiStationPinnedThisRound || aiConstPinnedThisRound || aiObjectPinnedThisRound || aiEphemPinnedThisRound) break
       // 对话内事件卡 / 行内「定位」按钮 → 进碰撞热力面板、切到对应来源、直接定位该事件
       //（两端误差椭球 + 两星轨道线 + 镜头飞到交会点），随后收起面板让位给地球（与手动点列表项一致）。
       // 数据来源两条路都覆盖：卡片已取到 data 就直接用；行内按钮只带 source + key，由 locateConjEvent 现场查 /cgi/event/one。
       const src = a.source === 'cri' ? 'cri' : 'conj'
       void locateConjEvent(src, a).then((pair) => {
         if (!pair) return
-        if (aiStationPinnedThisRound || aiConstPinnedThisRound || aiObjectPinnedThisRound) return
+        if (aiStationPinnedThisRound || aiConstPinnedThisRound || aiObjectPinnedThisRound || aiEphemPinnedThisRound) return
         aiDockPinned = true
         applyDock('heat')
         pickHeatPair(pair)
@@ -2102,7 +2077,7 @@ function onAiAction(a: AiAction) {
     case 'clear_display':
       // 本轮已钉住空间站/星座/目标展示时，禁止晚到的 clear_display 把大屏清空
       // （round-start / select_constellation 之后再清，会出现「目标已切换→已取消选中」且地球空白）
-      if (aiStationPinnedThisRound || aiConstPinnedThisRound || aiObjectPinnedThisRound) break
+      if (aiStationPinnedThisRound || aiConstPinnedThisRound || aiObjectPinnedThisRound || aiEphemPinnedThisRound) break
       // 清空上一轮展示效果（轨道线 / 星座过滤 / 选中目标），由后端在每轮首个展示型动作前自动下发
       if (!aiRoundCleared) { clearScene(); aiRoundCleared = true }
       break
@@ -2187,9 +2162,6 @@ const aiTarget = computed(() =>
     <!-- 左侧发射站列表面板（dockMode==='site' 时显示，自管过渡动画） -->
     <SiteListPanel @pick="pickFromSiteList" @close="closeSitePanel" />
 
-    <!-- 左侧星座列表面板（dockMode==='cons' 时显示，自管过渡动画） -->
-    <ConstellationPanel @pick="pickConstellation" @close="closeConsPanel" />
-
     <!-- 左侧碰撞热力面板（dockMode==='heat' 时显示，自管过渡动画） -->
     <CdmHeatmap :auto-select-tick="heatAutoSelectTick" @close="closeHeatPanel" @select="pickHeatPair"
       @retry="retryHeat" @open-ephem="onOpenEphemFromHeat" />
@@ -2221,7 +2193,6 @@ const aiTarget = computed(() =>
       @close="closeEphemPanel"
       @focus-set="focusActiveEphem"
       @ai-explain="onEphemAiExplain"
-      @show-in-heat="onShowInHeat"
     />
 
     <!-- 仿真时间条：常驻底部（在按钮栏下方），拖动播放头直接改写虚拟时刻；
@@ -2801,41 +2772,10 @@ const aiTarget = computed(() =>
         </div>
       </div>
       </template>
-
-      <!-- ⑥ 星座成员列表（点击左侧星座后右侧展示）：点击某颗成员即用亮青色高亮其轨道线，
-           在星座里单独突出显示（再点同一颗取消）；不改变「选中单星」状态与镜头。 -->
-      <template v-else-if="rightMode === 'cons'">
-        <div class="cd-head">
-          <div class="cd-head-main">
-            <b class="cd-name">{{ filterConst }}</b>
-            <span class="cd-sub">{{ consSatPanel.idx.length.toLocaleString() }} 颗成员卫星 · 点击成员飞抵该星并高亮其轨道线</span>
-          </div>
-          <button class="cd-close" title="收起列表" @click="consListOpen = false">✕</button>
-        </div>
-        <div class="cd-block">
-          <div class="cd-title">星座成员</div>
-          <ul class="cons-sat-list" @scroll="onConsSatScroll">
-            <li
-              v-for="gi in consSatPanel.idx.slice(0, consSatPanel.count)"
-              :key="gi"
-              class="cons-sat-item"
-              :class="{ on: consHighlightNorad === g.cloudList[gi].norad_id }"
-              :title="consHighlightNorad === g.cloudList[gi].norad_id ? '再次点击取消高亮' : '点击：镜头飞抵该卫星，并将其轨道线颜色替换为亮青色'"
-              @click="toggleConsHighlight(g.cloudList[gi].norad_id)"
-            >
-              <span class="cons-sat-dot" :style="{ background: TYPE_HEX[g.cloudList[gi].object_type] || '#8fd0ff' }"></span>
-              <span class="cons-sat-name">{{ g.cloudList[gi].object_name || ('NORAD ' + g.cloudList[gi].norad_id) }}</span>
-              <span class="cons-sat-nor">NORAD {{ g.cloudList[gi].norad_id }}</span>
-            </li>
-            <div v-if="!consSatPanel.idx.length" class="cd-none">该星座下暂无载荷卫星</div>
-            <li v-else-if="consSatPanel.count < consSatPanel.idx.length" class="cons-sat-more">继续滚动加载更多…</li>
-          </ul>
-        </div>
-      </template>
     </aside>
 
-    <!-- 详情收起后的浮动小按钮：点击重新展开过境明细/卫星详情/碰撞列表/事件详情/发射站详情/星座成员列表 -->
-    <button v-if="!rightMode && (hasSel || heatSel || passSelTarget || siteSel || (dockActive === 'cons' && filterConst && !compareActive))" class="constel-detail-tab" title="展开详情" @click="reopenRight">
+    <!-- 详情收起后的浮动小按钮：点击重新展开过境明细/卫星详情/碰撞列表/事件详情/发射站详情 -->
+    <button v-if="!rightMode && (hasSel || heatSel || passSelTarget || siteSel)" class="constel-detail-tab" title="展开详情" @click="reopenRight">
       ◎
     </button>
 
@@ -2859,9 +2799,9 @@ const aiTarget = computed(() =>
     <button
       v-if="isMobile && dockActive !== '' && dockMode === '' && !(dockActive === 'eph' && ephOpen)"
       class="side-panel-tab"
-      :title="dockActive === 'sat' ? '展开太空安全目标列表' : dockActive === 'cons' ? '展开星座列表' : dockActive === 'site' ? '展开发射站列表' : dockActive === 'heat' ? '展开碰撞热力' : dockActive === 'pass' ? '展开城市过境' : dockActive === 'multi' ? '展开多区域过境' : dockActive === 'eph' ? '展开星历分析' : '展开区域过境'"
+      :title="dockActive === 'sat' ? '展开太空安全目标列表' : dockActive === 'site' ? '展开发射站列表' : dockActive === 'heat' ? '展开碰撞热力' : dockActive === 'pass' ? '展开城市过境' : dockActive === 'multi' ? '展开多区域过境' : dockActive === 'eph' ? '展开星历分析' : '展开区域过境'"
       @click="openActivePanel"
-    >{{ dockActive === 'sat' ? '▤' : dockActive === 'cons' ? '✦' : dockActive === 'site' ? '⌖' : dockActive === 'heat' ? '✱' : dockActive === 'pass' ? '➤' : dockActive === 'eph' ? '◍' : '◆' }}</button>
+    >{{ dockActive === 'sat' ? '▤' : dockActive === 'site' ? '⌖' : dockActive === 'heat' ? '✱' : dockActive === 'pass' ? '➤' : dockActive === 'eph' ? '◍' : '◆' }}</button>
 
     <!-- 空间态势分析智能体浮层（前台免登录 /cgi/ai；独立于 dock 视图状态）。
          模型下发的界面动作由本容器消费，落到三维态势（定位选中 / 打开面板 / 绘制区域 / 图谱下钻） -->

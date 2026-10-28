@@ -2,7 +2,7 @@
  * 星座总览 /situation 共享 store（单一真实来源）
  *
  * 原 situation/index.vue 过于厚重，现拆分为：基础场景(BaseScene) / 卫星列表(SatListPanel) /
- * 星座列表(ConstellationPanel) / 碰撞热力(CdmHeatmap)。本模块集中持有：
+ * 碰撞热力(CdmHeatmap)。本模块集中持有：
  *  - 全部坐标转换 / 格式化常量与工具（唯一出处：ECI → Three.js 场景单位）
  *  - THREE 资源持有对象 g（非响应式，渲染器/场景/相机/controls/InstancedMesh/过滤轨道线等）
  *  - 跨组件共享的响应式状态（载入进度、选中卫星、过滤条件、dock 面板、卫星/星座列表数据等）
@@ -604,7 +604,7 @@ export interface GState {
   filterOrbitLiveT0: number
   /** 近重合轨道去重：每个点云索引对应的「画环代表」（桶内首星）全局下标；自己就是首星时等于自己。
    *  同轨道面/相近高度的多颗卫星各自 TLE 传播出的环彼此只差几~几十公里，拉近看「一条轨道」会由
-   *  2~4 条近重合线组成 —— 每桶只画首星的环，其余成员复用（高亮/染色经 paintConsOrbit 归并到共用环）。 */
+   *  2~4 条近重合线组成 —— 每桶只画首星的环，其余成员复用。 */
   filterOrbitPrimary: Int32Array | null
   /** 选中星的轨道环复用过滤轨道线（过滤态下把该星那段重染亮青，不叠加独立环）：
    *  true = 选中轨道就是过滤环里重染的那一段；false = 独立选中环 g.orbitLine */
@@ -724,15 +724,15 @@ export function consShowOf(name: string): boolean {
   const v = consShowMap[name]
   return v !== undefined ? v : satPanel.typeF.PAYLOAD
 }
-/** 星座卡片轨道绑定标记：卡片通道写 filterConst 时置 true，用于与「星座列表」dock 视图的
- *  filterConst 展示通道区分 —— 卡片通道下 filterConst 只负责「轨道展示画哪个星座」，
- *  点云掩码走 consShowMap 口径（否则会把其它已展示星座从屏幕上抹掉）。 */
+/** 星座卡片轨道绑定标记：卡片通道写 filterConst 时置 true，与 URL 深链 ?const= 的过滤通道区分 ——
+ *  卡片通道下 filterConst 只负责「轨道展示画哪个星座」，点云掩码走 consShowMap 口径
+ *  （否则会把其它已展示星座从屏幕上抹掉）；深链通道无卡片覆盖，掩码按星座过滤收口。 */
 export const consCardBound = ref(false)
 export const altMin = ref<number | undefined>(undefined) // 轨道高度下限(km)
 export const altMax = ref<number | undefined>(undefined) // 轨道高度上限(km)
 /** NORAD 集合过滤（智能体/接口下发的「一批目标」，如某国/某机构的卫星、某事件涉及的两星）：
  *  null = 不启用；与 kw / 星座 / 高度三条**AND 叠加**（不覆盖，避免搜索框失灵）。
- *  注意两个定位来源在各自入口互清：showSatelliteSet() 会先清 kw/星座/高度，pickConstellation() 会清空本集合。 */
+ *  注意两个定位来源在各自入口互清：showSatelliteSet() 会先清 kw/星座/高度，星座过滤入口（星座卡片 / 智能体定位）会清空本集合。 */
 export const filterNorads = ref<number[] | null>(null)
 
 /** 空间站「位置展示」：当前单独点亮的核心舱 NORAD（25544 = ISS，48274 = CSS；null = 未点亮）。
@@ -746,49 +746,14 @@ export const stationFocus = ref<number | null>(null)
 export const compareConsts = ref<{ name: string; color: string }[]>([])
 export const compareActive = computed(() => compareConsts.value.length > 0)
 
-/** 星座列表面板：名称模糊检索 */
-export const constPanel = reactive({ q: '' })
-/** 按名称过滤后的星座列表 */
-export const consFiltered = computed(() => {
-  const q = constPanel.q.trim().toLowerCase()
-  if (!q) return constellations.value
-  return constellations.value.filter((c) => c.name.toLowerCase().includes(q))
-})
-
-/** 星座视图右侧「成员列表」：当前星座下命中过滤口径的卫星全局索引 + 滚动加载计数。
- *  点击列表项即高亮该星轨道线（见 consHighlightNorad），不改变「选中单星」状态。 */
-export const consSatPanel = reactive({
-  idx: [] as number[],
-  count: 0,
-  BATCH: 200
-})
-
-/** 星座视图中被高亮轨道线的卫星 NORAD（0 = 未高亮）；由右侧成员列表点击设置。
- *  高亮方式 = 直接替换该星在过滤轨道线里那一段的顶点色（载荷绿 → 选中蓝），而非额外叠加一条线。 */
-export const consHighlightNorad = ref(0)
 /* ---------- 卫星 3D 状态配色（全站唯一口径）----------
  *  平时 = 绿（TYPE_COLOR.PAYLOAD，点云按类型着色时的默认色）
- *  选中 = 蓝（点云焦点光点 / 星历本星模型 / 星座点名高亮轨道线共用）
+ *  选中 = 蓝（点云焦点光点 / 星历本星模型共用）
  *  星历对方威胁目标 = 橙（威胁事件里的对方卫星模型，不再按风险等级改色） */
-/** 选中 / 焦点高亮色（星座成员轨道线是载荷绿，用蓝色拉开对比，见 BaseScene 的 paintConsOrbit） */
+/** 选中 / 焦点高亮色（星座成员轨道线是载荷色，用蓝色拉开对比） */
 export const SAT_SELECT_COLOR = 0x2f8fff
 /** 星历「对方威胁目标」模型色：所有风险等级统一橙色 */
 export const SAT_THREAT_COLOR = 0xff9800
-
-/** 重建星座视图的成员列表（filterConst 指定星座下只认载荷，与 refreshFilter 的过滤口径一致）。
- *  点云未就绪 / 未选星座时置空；由 BaseScene 在每次重建过滤时同步刷新。 */
-export function rebuildConsSatIndex() {
-  const name = filterConst.value
-  const idx: number[] = []
-  if (name && g.cloudList.length) {
-    for (let i = 0; i < g.cloudList.length; i++) {
-      const p = g.cloudList[i]
-      if (p.object_type === 'PAYLOAD' && (p.cons || []).includes(name)) idx.push(i)
-    }
-  }
-  consSatPanel.idx = idx
-  consSatPanel.count = Math.min(consSatPanel.BATCH, idx.length)
-}
 
 export const visibleCount = ref(0)
 /** 轨道线总开关（右下角图例最后一行「轨道线」勾选）：
@@ -831,10 +796,10 @@ export const cloudRevealed = ref(false)
 export const consOrbitOn = ref(false)
 
 /* ============================================================
- * dock 导航 / 面板数据（卫星列表 / 星座列表）
+ * dock 导航 / 面板数据
  * ============================================================ */
-/** 当前展开的面板：'sat' 卫星列表 | 'cons' 星座列表 | 'site' 发射站列表 | 'heat' 碰撞热力 | 'pass' 城市过境 | 'region' 区域过境 | 'multi' 多区域过境 | 'eph' 星历分析 | '' 全收起 */
-export type DockMode = '' | 'sat' | 'cons' | 'site' | 'heat' | 'pass' | 'region' | 'multi' | 'eph'
+/** 当前展开的面板：'sat' 卫星列表 | 'site' 发射站列表 | 'heat' 碰撞热力 | 'pass' 城市过境 | 'region' 区域过境 | 'multi' 多区域过境 | 'eph' 星历分析 | '' 全收起 */
+export type DockMode = '' | 'sat' | 'site' | 'heat' | 'pass' | 'region' | 'multi' | 'eph'
 /** 当前展开的面板 */
 export const dockMode = ref<DockMode>('')
 /** 星历面板是否展开：独立于 dockMode —— 星历面板停靠右侧，与左侧「太空安全目标列表」等面板互不干扰，
@@ -854,18 +819,18 @@ export const simPlaying = ref(true)
 export const simTimeMs = ref(Date.now())
 
 /**
- * 「综合态势」的三个子项：卫星列表（'sat'）/ 星座列表（'cons'）/ 发射站列表（'site'）。
- *  三者都是「总览态势」入口，dock 上合并为一个「综合态势」按钮 + 子项菜单，默认子项为「卫星列表」。
+ * 「综合态势」的两个子项：卫星列表（'sat'）/ 发射站列表（'site'）。
+ *  二者都是「总览态势」入口，dock 上合并为一个「综合态势」按钮 + 子项菜单，默认子项为「卫星列表」。
+ *  （原第三子项「星座列表」面板已删除：星座维度由卫星列表内的星座卡片承载。）
  */
-export type SatView = 'sat' | 'cons' | 'site'
+export type SatView = 'sat' | 'site'
 export const SAT_SOURCES: { key: SatView; label: string; desc: string }[] = [
   { key: 'sat', label: '太空安全目标列表', desc: '按名称 / 类型 / 轨道区域检索 · 拾取单星' },
-  { key: 'cons', label: '星座列表', desc: '按星座检索 · 过滤成员并绘出轨道线' },
   { key: 'site', label: '发射站列表', desc: '地球按经纬度打点 · 点站看即将发射与发射历史' }
 ]
 
 /* ============================================================
- * 发射站列表（/situation 综合态势第三项）
+ * 发射站列表（/situation 综合态势第二项）
  *  地球按经纬度打点（BaseScene 消费 launchSites 建标记）；点站后右侧面板展示即将发射 + 发射历史。
  *  数据源：/cgi/launch_site/all、/cgi/launch_upcoming/by_site/:id、/cgi/launch_record/by_site/:id（免登录只读）。
  * ============================================================ */
@@ -950,7 +915,7 @@ const NA_BUCKET_COLOR = '#7a8794'
 
 /** 对比态一旦清空（改点单星座 / 还原 / 切到热力·过境面板等入口都会清 compareConsts），
  *  着色维度若仍停在 'compare' 会因分档只剩兜底档、把整片点云染成灰色 —— 这里统一回落 'type'。
- *  单一兜底点：覆盖 pickConstellation / resetFilter / applyDock / showSatelliteSet 等所有清空入口。 */
+ *  单一兜底点：覆盖星座卡片切换 / resetFilter / applyDock / showSatelliteSet 等所有清空入口。 */
 watch(compareActive, (on) => {
   if (!on && colorMode.value === 'compare') colorMode.value = 'type'
 })
@@ -1143,7 +1108,7 @@ TYPE_KEYS.forEach((k) => {
     visible[k] = v
     if (v) {
       cloudRevealed.value = true
-      // 类型全量展示让位优先：清除「单星白名单」（URL 深链 / 星座列表点选单星），
+      // 类型全量展示让位优先：清除「单星白名单」（URL 深链点选单星），
       // 否则 NORAD 集合会与类型过滤 AND 叠加，导致只显示旧的那一颗
       if (filterNorads.value) filterNorads.value = null
     } else if (k === 'PAYLOAD' && !filterConst.value && !consOverrideActive.value) {
@@ -1193,7 +1158,7 @@ export const HEAT_SOURCES: { key: HeatSource; label: string; desc: string }[] = 
 /** 热力视图开关：进入后隐藏卫星云与轨道线，只显示碰撞事件标记；
  *  与「碰撞热力」面板显隐解耦（由 index.vue 的 toggleDock 编排）：
  *  展开面板开启热力视图；折叠面板只隐藏面板、保留热力云以便继续观察与拾取；
- *  只有还原初始 / 点 dock × / 切到卫星·星座列表 才退出热力视图。 */
+ *  只有还原初始 / 点 dock × / 切到卫星列表 才退出热力视图。 */
 export const heatMode = ref(false)
 /** 时间窗口（天）：只允许 1 / 3 / 7（与 /cgi2/heat/heatmap 的口径一致），默认 7 天。
  *  星历只覆盖约 3–7 天、CDM 也只覆盖近期，因此不再提供「全部 / 30d」档。 */

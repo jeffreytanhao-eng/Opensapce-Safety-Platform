@@ -41,7 +41,7 @@ import {
   consShowMap, consOverrideActive, consShowOf, consCardBound,
   compareConsts, compareActive,
   visibleCount, orbitTotal, orbitSkipped, loadProgress, orbitBuilding, orbitProgress, orbitDrawCount, cloudRev, filterActive,
-  consHighlightNorad, SAT_SELECT_COLOR, SAT_THREAT_COLOR, rebuildConsSatIndex, consOrbitOn,
+  SAT_SELECT_COLOR, SAT_THREAT_COLOR, consOrbitOn,
   dockMode, dockActive, satPanel, dataSource, visible, rebuildSatIndex, orbitVisible,
   simSpeed, simPlaying, simTimeMs,
   heatMode, heatDays, heatDay, heatList, heatLoading, heatSel, heatSelList, heatOpen,
@@ -101,7 +101,7 @@ const loadStage = ref('正在加载卫星数据…')
 
 /* ============================================================
  * 地球中央操作 loading
- * 「正在绘制轨道线…」「正在加载碰撞事件…」原先分散在星座列表 / 热力面板 / 右侧碰撞列表内部，
+ * 「正在绘制轨道线…」「正在加载碰撞事件…」原先分散在列表面板 / 热力面板 / 右侧碰撞列表内部，
  * 位置凌乱；这里统一收敛到地球正中央展示（主加载遮罩 loading 已覆盖时不再叠加）。
  * 两者都走「超时兜底」：正常毫秒级返回时不显示提示，持续超过 1.5s 才出现，
  * 避免每次切换星座 / 切换热力来源都闪一下 loading。
@@ -215,8 +215,20 @@ function applyHomeCamera() {
   }
 }
 
-/** 仅复位镜头：回到初始机位（武汉 + 初始地球大小），不清选中与过滤（区别于 resetSelected） */
+/** 相机意图代号：每次「复位镜头」自增。选中链路是异步的（先拉 TLE 详情再飞镜头），
+ *  线上网络慢时「点选 → 复位 → 响应返回 → 起飞」会让复位被随后到来的 flyToSat 覆盖 ——
+ *  异步回调起飞前比对代号，不一致即放弃本次镜头动作（选中/面板照常落地，只压制镜头）。 */
+let camEpoch = 0
+/** 仅复位镜头：回到初始机位（武汉 + 初始地球大小），不清选中与过滤（区别于 resetSelected）。
+ *  幂等可靠：先取消进行中的相机动画（camFly）与三类镜头跟随（双击跟踪 / 空间站跟随 / 星历本星跟踪），
+ *  否则落位动画与逐帧跟随会在下一帧把镜头拽回去 —— 线上加载慢、帧率低时 900ms 飞行被拉长，
+ *  「复位点了没反应」即由此而来（本地加载快被掩盖）。选中态、面板与过滤一概不动（只管相机）。 */
 function resetCameraToHome() {
+  camEpoch++
+  camFly.active = false
+  trackGi = null
+  stationFollowGi = null
+  stopEphemTracking()
   restoreEarthOrbitLimits()
   applyHomeCamera()
 }
@@ -2166,9 +2178,8 @@ function refreshEphemHidden() {
   setEphemHiddenNorad(ephemHiddenNorad)
 }
 
-/* ---------- 焦点卫星光点上色：选中卫星 / 星座点名成员在点云里的光点替换为选中蓝 ---------- */
-/** 当前需要在点云里以选中蓝显示的焦点卫星（全局索引集合）：选中单星（hasSel + sel.id）与星座点名成员
- *  （consHighlightNorad）都算，同一颗星只算一次（Set 去重）。 */
+/* ---------- 焦点卫星光点上色：选中卫星在点云里的光点替换为选中蓝 ---------- */
+/** 当前需要在点云里以选中蓝显示的焦点卫星（全局索引集合）：选中单星（hasSel + sel.id） */
 function focusPointGis(): Set<number> {
   const want = new Set<number>()
   const add = (norad: number) => {
@@ -2177,7 +2188,6 @@ function focusPointGis(): Set<number> {
     if (gi >= 0) want.add(gi)
   }
   if (hasSel.value) add(sel.id)
-  add(consHighlightNorad.value)
   return want
 }
 
@@ -2641,7 +2651,7 @@ function calibrateInstances(budget: { n: number }) {
 const MAX_SAT_SET = 8000
 
 /** 展示一批指定 NORAD 的卫星（智能体 / 接口下发）：只显示这批目标并画出它们的全部轨道线。
- *  与 pickConstellation 是两种「定位来源」，故入口互清（先清 kw / 星座 / 高度，避免旧条件 AND 出空集）。
+ *  与星座过滤（星座卡片 / 智能体定位）是两种「定位来源」，故入口互清（先清 kw / 星座 / 高度，避免旧条件 AND 出空集）。
  *  点云尚未就绪时不额外刷新——applyCloud 会在点云到位后按 filterActive 重放当前条件。 */
 function showSatelliteSet(norads: number[]) {
   const arr: number[] = []
@@ -2711,8 +2721,6 @@ function refreshFilter() {
   }
   g.filterMask = mask
   visibleCount.value = cnt
-  // 星座视图右侧成员列表与过滤掩码同源同刻刷新（同一份过滤口径，避免两处各算一次）
-  rebuildConsSatIndex()
   // 按型号重写实例矩阵（不可见的写零矩阵），与「三维还原」共用同一实现
   rewriteInstanceMatrices((gi) => mask[gi] === 1)
   void rebuildFilterOrbits()
@@ -2796,7 +2804,7 @@ async function rebuildFilterOrbits() {
   const list = g.cloudList
   const n = list.length
   // 点云里的物体都带 TLE（后端已把无 TLE / 传播失败的记录过滤掉），故只按可见掩码取队列；
-  // 卡片/星座列表通道绑定星座（filterConst）时轨道线只画该星座成员 —— 掩码是「主开关+卡片」的
+  // 卡片/URL 深链通道绑定星座（filterConst）时轨道线只画该星座成员 —— 掩码是「主开关+卡片」的
   // 并集口径（主开关开时可能整屏卫星），这里再收口到绑定星座，与「轨道展示」按钮语义一致
   const boundCons = filterConst.value
   for (let i = 0; i < n; i++) {
@@ -2820,7 +2828,7 @@ async function rebuildFilterOrbits() {
   // （实测 Galileo 同面 4 星的环仅差 0.04°，Kuiper 散布赤经里也有 0.09° 的成对组），拉近看就是
   // 「一条轨道由 2~4 条蓝线组成」。按「半长轴/倾角/升交点赤经」三要素分桶（双偏移网格降低边界
   // 漏并），每桶只由首星画环，其余成员复用 —— 每条视觉轨道只画一条线，点云仍逐星渲染不受影响；
-  // 高亮/染色经 paintConsOrbit 归并到共用环。分桶按轨道分组键隔离（类型态/对比态各色互不混并）。
+  // 分桶按轨道分组键隔离（类型态/对比态各色互不混并）。
   g.filterOrbitPrimary = new Int32Array(n).fill(-1)
   {
     const cellA = new Map<string, number>()
@@ -2900,8 +2908,7 @@ function stepFilterOrbits(budget: { n: number }) {
       }
       const geometry = new THREE.BufferGeometry()
       geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3).setUsage(THREE.DynamicDrawUsage))
-      // 顶点色：默认整条轨道线统一用该分组的颜色（载荷=红…）；星座成员高亮时按顶点区间把被点名那颗
-      // 替换成亮青色（见 paintConsOrbit）——「替换」而非叠加，故上万条密集轨道线里也能一眼看清。
+      // 顶点色：整条轨道线统一用该分组的颜色（载荷=红…），「替换」式上色便于后续按顶点区间改色
       const baseColor = orbitGroupColorOf(key)
       const bc = new THREE.Color(baseColor)
       const colors = new Float32Array(segs.length * 3)
@@ -2914,8 +2921,6 @@ function stepFilterOrbits(budget: { n: number }) {
         new THREE.LineBasicMaterial({ color: 0xffffff, vertexColors: true, transparent: true, opacity: 0.7 })
       )
       line.userData.type = key
-      // 还原高亮时用的基色（分组色），见 paintConsOrbit
-      line.userData.baseColor = baseColor
       // 类型勾选 + 图例「轨道线」总开关叠加（总开关关闭时该类轨道线也不显示）；
       // 多星座对比态的键是 `cmp:<星座名>`（不在 TYPE_KEYS 里），不受类型勾选约束、只受总开关控制
       //（与 applyOrbitToggle / watch(visible) 里「非类型键视为应显示」同口径）。
@@ -2942,11 +2947,6 @@ function stepFilterOrbits(budget: { n: number }) {
     g.filterOrbitCursor = 0
     g.filterOrbitLiveT0 = g.simTimeMs
     orbitBuilding.value = false
-    // 星座成员高亮：过滤轨道线重建后几何是全新的（默认分组色），按当前高亮 NORAD 重新上色
-    if (consHighlightNorad.value > 0) {
-      const hi = g.cloudList.findIndex((p) => p.norad_id === consHighlightNorad.value)
-      if (hi >= 0) paintConsOrbit(hi, SAT_SELECT_COLOR)
-    }
   }
 }
 
@@ -3034,6 +3034,8 @@ function resetFilter() {
 let selectSeq = 0
 async function selectSatellite(pt: ConstellationPoint, fly = true) {
   const seq = ++selectSeq
+  // 复位竞态防护：记录起飞前的相机意图代号，网络返回后若期间发生过复位则放弃飞镜头
+  const camAtStart = camEpoch
   try {
     notice.value = ''
     const data = await getSatDetailPublic(pt.norad_id, dataSource.value)
@@ -3062,7 +3064,7 @@ async function selectSatellite(pt: ConstellationPoint, fly = true) {
     anchor.position.copy(scenePos)
     g.selAnchor = anchor
     g.scene?.add(anchor)
-    if (fly && g.selAnchor) flyToSat(g.selAnchor.position)
+    if (fly && g.selAnchor && camAtStart === camEpoch) flyToSat(g.selAnchor.position)
     g.controls!.update()
     updateLiveData()
     // 热力模式下拾取目标端点：选中卫星的独立轨道线与准星不能被热力视图的隐藏逻辑盖掉，这里确保可见
@@ -3126,7 +3128,10 @@ const TRACK_CAM_DIST = 0.15
 /** 进入跟踪：先走常规选中链路（准星 + 轨道线 + 详情面板），成功后把镜头拉近到 TRACK_CAM_DIST。
  *  载荷 / 碎片 / 箭体 / 未知统一走点云拾取，四类目标行为一致。 */
 function startTargetTracking(gi: number, pt: ConstellationPoint, freeView = false) {
+  // 复位竞态防护：选中链路异步，期间用户点复位则放弃本次拉近跟随（选中结果照常落地）
+  const camAtStart = camEpoch
   selectSatellite(pt).then(() => {
+    if (camAtStart !== camEpoch) return
     if (!hasSel.value || sel.id !== pt.norad_id || !g.selAnchor) return
     const cam = g.camera, controls = g.controls
     if (!cam || !controls) return
@@ -3244,90 +3249,6 @@ function clearSelected() {
   // 星下点轨迹没有独立的销毁逻辑，只按 trackHasData 决定显隐；satrec 已清空，
   // 这里同步让它失效，避免「取消选中后旧轨迹还挂在场景里」（切星座、还原等路径通用）
   updateGroundTrack()
-}
-
-/* ---------- 星座视图：右侧成员列表点名高亮某颗卫星的轨道线 ---------- */
-/** 高亮请求代次：异步等 TLE 期间用户可能又点了别的成员，只允许最后一次请求落地 */
-let consHighlightSeq = 0
-/** 上色复用色对象（避免每次新建 Color） */
-const _consPaintColor = new THREE.Color()
-
-/** 把「全局索引 gi 的卫星」在过滤轨道线里的顶点色改成 hex —— 直接替换该星那一段（载荷红等）的颜色，
- *  而不是额外叠加一条线；hex 传 null 表示还原为所在轨道线的分组基色。返回是否命中
- *  （未命中 = 该星不在当前过滤轨道线里，例如轨道线尚未建好，此时待 stepFilterOrbits 建好后重新上色）。 */
-function paintConsOrbit(gi: number, hex: number | null): boolean {
-  // 近重合轨道去重后非首星成员没有自己的环：归并到所属 primary 的共用环上染色
-  const prim = g.filterOrbitPrimary && gi >= 0 && gi < g.filterOrbitPrimary.length ? g.filterOrbitPrimary[gi] : gi
-  const target = prim >= 0 ? prim : gi
-  let hit = false
-  for (const it of g.filterOrbitItems) {
-    if (it.gi !== target) continue
-    const attr = it.line.geometry.getAttribute('color') as THREE.BufferAttribute | undefined
-    if (!attr) continue
-    const baseColor = (it.line.userData?.baseColor as number | undefined) ?? 0x8fd0ff
-    _consPaintColor.setHex(hex == null ? baseColor : hex)
-    const arr = attr.array as Float32Array
-    const start = it.base * 3
-    const end = (it.base + it.steps * 2) * 3
-    for (let i = start; i < end; i += 3) {
-      arr[i] = _consPaintColor.r
-      arr[i + 1] = _consPaintColor.g
-      arr[i + 2] = _consPaintColor.b
-    }
-    // 只把这一条轨道占用的顶点区间标脏（同类轨道线共用一个 BufferGeometry，见 updateFilterOrbitsLive）
-    attr.addUpdateRange(start, end - start)
-    attr.needsUpdate = true
-    hit = true
-  }
-  return hit
-}
-
-/** 清除高亮配色（切星座 / 还原 / 卸载时调用）：把被点名那颗卫星的轨道线颜色还原为分组基色 */
-function clearConstHighlight() {
-  consHighlightSeq++
-  const prev = consHighlightNorad.value
-  consHighlightNorad.value = 0
-  if (prev > 0) {
-    const gi = g.cloudList.findIndex((p) => p.norad_id === prev)
-    if (gi >= 0) paintConsOrbit(gi, null)
-  }
-  // 点云里被点名成员的光点一并还原（可能仍被「选中」占用，故交给同步函数按当前焦点重算）
-  syncFocusPointPaint()
-}
-
-/** 高亮某颗卫星的轨道线（星座视图右侧成员列表点击触发）：先把镜头飞到该星当前位置，再把它在
- *  星座轨道线里那一段的颜色从载荷红「替换」为亮青（直接改顶点色，故上万条密集轨道线里也能一眼
- *  看清）；norad<=0 即只清除（并把镜头环绕轴心放回地心）。不改变选中单星状态（不设 hasSel / 详情）。 */
-async function highlightConstSat(norad: number) {
-  const n = Math.trunc(Number(norad))
-  const had = consHighlightNorad.value > 0
-  clearConstHighlight()
-  if (!(n > 0)) {
-    // 取消高亮：镜头焦点从该星放回地心（相机位置不动，仅换环绕轴心，避免缩放绕空中空点）
-    if (had) resetOrbitFocusToEarth()
-    return
-  }
-  const seq = ++consHighlightSeq
-  const scene = g.scene
-  if (!scene) return
-  const gi = g.cloudList.findIndex((p) => p.norad_id === n)
-  if (gi < 0) return
-  // 列表高亮态先落地（轨道线尚未建好时也先记着，建好后会自动重新上色）
-  consHighlightNorad.value = n
-  // 该成员在点云里的光点也换成亮青
-  syncFocusPointPaint()
-  /** 该星不在此数据源 / 拿不到 TLE：撤销高亮标记，避免列表高亮态与实际轨道线不一致 */
-  const abort = () => { if (seq === consHighlightSeq) { consHighlightNorad.value = 0; syncFocusPointPaint() } }
-  // 定位 / 上色都要 satrec（TLE 懒加载），未就绪时先补齐；等待期间可能又被点 / 被清除，用代次守卫
-  if (!satrecsReady) await awaitSatrecs()
-  if (seq !== consHighlightSeq) return
-  const rec = g.satrecs[gi]
-  if (!rec || rec.no <= 0) return abort()
-  // 镜头先飞到该星当前位置（与「选中单星」同一套落位算法，落位后环绕焦点切到该星）
-  const pv = propagate(rec, new Date(g.simTimeMs))
-  if (pv?.position) flyToPoint(eciToScene(pv.position.x, pv.position.y, pv.position.z), 'point')
-  // 再把该星轨道线那一段的颜色替换成选中蓝（见 paintConsOrbit）
-  paintConsOrbit(gi, SAT_SELECT_COLOR)
 }
 
 function updateReticle() {
@@ -4719,9 +4640,9 @@ function selectHeatTarget(t: { norad: number; eci: THREE.Vector3 }) {
 function onCanvasClick(ev: MouseEvent) {
   const renderer = g.renderer, cam = g.camera
   if (!renderer || !cam) return
-  // 左侧列表与右侧详情两两相对但互斥：点画布空白处 / 拾取三维目标后收起左侧卫星/星座列表，让位给右侧详情
+  // 左侧列表与右侧详情两两相对但互斥：点画布空白处 / 拾取三维目标后收起左侧卫星列表，让位给右侧详情
   // （热力面板不在此列：它本身即热力视图入口，收起会连带退出热力视图）
-  const collapseList = () => { if (dockMode.value === 'sat' || dockMode.value === 'cons') dockMode.value = '' }
+  const collapseList = () => { if (dockMode.value === 'sat') dockMode.value = '' }
   // 热力模式：点击事件点 → 聚合该「碰撞云」覆盖区域内的全部事件（右侧列出整片云的碰撞列表），
   // 并聚焦被点击的那一个事件（画 A/B 两星轨道 + 卫星端点标记）；再次点击已选中事件取消选中。
   if (heatMode.value) {
@@ -6912,7 +6833,8 @@ function selectLaunchSiteById(id: number): boolean {
  * 三维实现全站只保留本页，各后台/前台入口一律改成「带参跳转 /situation/<type>?…」，
  * 参数与目标视图必须一一对应（用户要求「千万要对应好」）：
  *   · /situation/sat?norad=     选中该 NORAD 的卫星并飞过去（卫星列表入口）
- *   · /situation/cons?const=    按星座名过滤（星座列表入口）
+ *   · /situation/cons?const=    按星座名过滤（旧「星座列表」入口，向后兼容：面板已并入卫星列表，
+ *     index.vue 将 cons 映射为 sat 模式，本参数原样应用星座过滤）
  *   · /situation/site?site=     选中该发射站（发射站列表入口）
  *   · /situation/heat?source=&a=&b=&tca=  选中该碰撞 / 交会事件（碰撞列表用 source=local，交会用 source=cri）
  *
@@ -7824,7 +7746,7 @@ function applyEarthNightLights(on: boolean) {
 /** 切换过境模式：进入显示地表叠加图层与过境标记、隐藏卫星云/轨道线/选中；退出反向恢复。
  *  过境视图（城市与区域）会把虚拟时间锁到「那次过境的时刻」（点选过境记录对齐到过境中点、区域过境播放沿 AOS→LOS 推进），
  *  退出时必须还原到真实时钟 —— 否则太阳方向、地球昼夜都会停在那次过境的时刻上：
- *  切回卫星列表 / 星座列表看着「昼夜分界回不到真实位置」，只有刷新页面才恢复。 */
+ *  切回卫星列表看着「昼夜分界回不到真实位置」，只有刷新页面才恢复。 */
 function applyPassMode() {
   const on = passMode.value
   if (!on) {
@@ -9308,8 +9230,6 @@ watch(
 watch(filterConst, (v, old) => {
   if (v === old) return
   resetSelected(false)
-  // 换了星座：旧成员的高亮轨道线不再属于当前星座，一并清掉
-  clearConstHighlight()
   // 星座展示对象变化（含清空 / 换星座）：「轨道展示」随星座复位（用户需重新点亮）
   consOrbitOn.value = false
   // 星座展示通道接入/退出会改变 mesh 显隐口径（不依赖类型勾选），此处统一重算
@@ -9533,7 +9453,6 @@ onBeforeUnmount(() => {
   clearPassLayers()
   hoverGi = null
   clearPreviewOrbit()
-  clearConstHighlight()
   if (g.scene) disposeScene(g.scene)
   // 二十八宿四象连线材质随场景一并释放（disposeScene 遍历 scene），这里清掉模块级引用
   mansionLineMat = null
@@ -9560,8 +9479,6 @@ defineExpose({
   trackSatelliteByIndex,
   /** 智能体动作：按 NORAD 编号定位并选中卫星（与列表点击同一链路） */
   selectByNorad,
-  /** 星座视图右侧成员列表点击：高亮/取消高亮某颗卫星的轨道线（亮青色，不改变选中单星状态） */
-  highlightConstSat,
   /** 智能体动作：以经纬度顶点直接绘制区域（写 regionDraft 自动重绘） */
   setRegionPolygon,
   /** 智能体动作：展示一批指定 NORAD 的卫星（只显示这批目标并画出全部轨道线；
