@@ -1620,8 +1620,10 @@ function applyCloudCoords(res: ConstellationSnapshot, smooth: boolean) {
 /** 同序快照替换：时刻差不大时先做「时间追赶」（见 warpRes 说明）再落位，避免整片目标瞬移闪位 */
 function patchCloudCoords(res: ConstellationSnapshot) {
   const gapMs = (res.t || Date.now()) - g.simTimeMs
-  // 时刻差过大（本地缓存放了很久）：不做追赶动画，直接对齐 —— 几百毫秒里掠过小半条轨道会穿过地球
-  if (!Number.isFinite(gapMs) || gapMs <= CLOUD_WARP_MIN_MS || gapMs > CLOUD_WARP_MAX_MS) {
+  // 时刻差过大（本地缓放置了很久）：不做追赶动画，直接对齐 —— 几百毫秒里掠过小半条轨道会穿过地球。
+  // 点云当前不可见（cloudGate 为假，如热力/过境视图或未揭示）也不追赶：观众看不到对齐过程，
+  // 追赶却会在「退出热力/点开开关」后的下一帧以最高速播放，观感即「部分卫星异常高速」（用户实测复现）。
+  if (!Number.isFinite(gapMs) || gapMs <= CLOUD_WARP_MIN_MS || gapMs > CLOUD_WARP_MAX_MS || !cloudGate()) {
     if (gapMs > CLOUD_WARP_MIN_MS) applyCloudCoords(res, false)
     else applyCloudCoords(res, true)
     return
@@ -1652,9 +1654,12 @@ async function refreshCloudInBackground(src: SatSource) {
 
 async function loadConstellation() {
   const src = dataSource.value
-  // ① 本地缓存直出：毫秒级出画面（首次安装 / 缓存被清时无缓存，自动落到下面的网络路径）
+  // ① 本地缓存直出：毫秒级出画面（首次安装 / 缓存被清时无缓存，自动落到下面的网络路径）。
+  //  缓存新鲜度门控：快照时刻早于追赶窗口上限（>2 小时，典型为隔天再访）直接弃用走网络 ——
+  //  旧快照按陈旧历元外推的位置已完全失真，且静默刷新对齐前会出现「部分卫星异常高速/位置跳变」
+  //  （用户实测隔天缓存复现过），弃用后冷启动与首次安装同一条网络路径，无此问题。
   const cached = await cacheGet<ConstellationSnapshot>(cloudCacheKey(src))
-  if (cached?.list?.length) {
+  if (cached?.list?.length && Date.now() - (cached.t || 0) <= CLOUD_WARP_MAX_MS) {
     loadStage.value = '正在载入本地缓存…'
     loadProgress.value = 30
     await applyCloud(cached)
